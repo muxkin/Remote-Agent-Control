@@ -10,7 +10,7 @@ import { fixtureConfig, historyFixture, FakeTransport, THREAD, state } from '../
 import { Store } from '../src/server/store.js';
 import { HistoryIndex } from '../src/server/history.js';
 import { DesktopAdapter } from '../src/server/desktop.js';
-import { buildGateway } from '../src/server/gateway.js';
+import { buildGateway } from '../test/legacy/gateway.js';
 const c = fixtureConfig();
 await writeFile(historyFixture(c), '');
 const db = new DatabaseSync(join(c.codexHome, 'state_5.sqlite'));

@@ -49,6 +49,8 @@ it('keeps diagnostic information for an imageView without an image path', () => 
   ];
   const messages = messagesOf(snapshot);
   expect(messages).toHaveLength(1);
-  expect(messages[0].details).toContain('File not found');
+  expect(messages[0].deferred).toBe(true);
+  expect(messages[0].details).toBeUndefined();
+  expect(messagesOf(snapshot, true)[0].details).toContain('File not found');
   expect(messages[0].id).toBe('failed-view');
 });

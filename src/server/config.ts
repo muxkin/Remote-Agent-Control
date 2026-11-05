@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { assetSettings } from '../shared/assets.js';
+import { platformRuntime, type PlatformRuntime } from './platform.js';
 
 export interface StorageSettings {
   adapterPath: string;
@@ -22,6 +23,8 @@ export interface Config {
   assetOrigin: string | null;
   p2p?: { enabled: boolean; stunUrls: string[] };
   media?: StorageSettings;
+  platform?: PlatformRuntime;
+  relay?: { origin: string; enrollment: string };
 }
 export function readConfig(): Config {
   const port = z.coerce
@@ -42,6 +45,7 @@ export function readConfig(): Config {
   }
   const codexHome = resolve(process.env.CODEX_HOME ?? `${homedir()}/.codex`);
   const projectRoot = fileURLToPath(new URL('../..', import.meta.url));
+  const platform = platformRuntime();
   return {
     port,
     origin: url.origin,
@@ -50,8 +54,8 @@ export function readConfig(): Config {
       process.env.POCKET_STATE_DIR ??
         `${process.env.XDG_STATE_HOME ?? `${homedir()}/.local/state`}/codex-pocket-remote`,
     ),
-    desktopRoot: '/usr/lib/chatgpt',
-    socketPath: `${codexHome}/ipc/ipc.sock`,
+    ...platform.desktopPaths(codexHome),
+    platform,
     readOnly: process.env.POCKET_READ_ONLY === '1',
     webRoot: resolve(projectRoot, 'dist/web'),
     bridgePath: resolve(projectRoot, 'src/server/peer-bridge.py'),
@@ -63,6 +67,7 @@ export function readConfig(): Config {
         .parse((process.env.POCKET_STUN_URLS ?? '').split(',').filter(Boolean)),
     },
     media: readStorageSettings('media'),
+    relay: { origin: url.origin, enrollment: process.env.POCKET_RELAY_ENROLLMENT ?? '' },
   };
 }
 

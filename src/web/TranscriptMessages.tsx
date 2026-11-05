@@ -2,17 +2,18 @@ import type { Message, ConversationRequest } from '../shared/types';
 import { useState, type ReactNode } from 'react';
 import { MessageContent } from './MessageContent';
 import { Icon } from './Icon';
-import codexAvatar from './assets/codex-avatar.webp';
 export function TranscriptMessages({
   messages,
   threadId,
   activeTurnId,
   requests = [],
+  agent,
 }: {
   messages: Message[];
   threadId: string;
   activeTurnId?: string | null;
   requests?: ConversationRequest[];
+  agent: { name: string; avatar?: string };
 }) {
   const groups: { key: string; tools: boolean; messages: Message[] }[] = [];
   for (const original of messages) {
@@ -35,10 +36,10 @@ export function TranscriptMessages({
   const render = (m: Message) => (
     <article key={m.id} className={`message ${m.role}`}>
       <div className="message-role">
-        {m.role === 'assistant' && (
-          <img className="codex-avatar" src={codexAvatar} alt="" width={32} height={32} />
+        {m.role === 'assistant' && agent.avatar && (
+          <img className="codex-avatar" src={agent.avatar} alt="" width={32} height={32} />
         )}
-        {m.role === 'user' ? '你' : m.role === 'assistant' ? 'Codex' : '工具活动'}
+        {m.role === 'user' ? '你' : m.role === 'assistant' ? agent.name : '工具活动'}
       </div>
       <MessageContent message={m} threadId={threadId} streaming={m.turnId === activeTurnId} />
     </article>

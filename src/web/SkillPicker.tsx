@@ -1,3 +1,4 @@
+import { remoteFetch } from './device-session';
 import { useEffect, useState } from 'react';
 import type { SkillChoice, PluginChoice } from '../shared/types';
 import { Icon } from './Icon';
@@ -27,7 +28,7 @@ export function SkillPicker({
   const label = kind === 'skills' ? '技能' : '插件';
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/threads/${threadId}/${kind}`, { signal: controller.signal })
+    remoteFetch(`/api/threads/${threadId}/${kind}`, { signal: controller.signal })
       .then(async (r) => {
         const data = await r.json();
         if (!r.ok) throw Error(data.error ?? `读取${label}失败`);

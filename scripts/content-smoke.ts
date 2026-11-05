@@ -12,11 +12,11 @@ import { fixtureConfig, historyFixture, FakeTransport, THREAD, state } from '../
 import { Store } from '../src/server/store.js';
 import { HistoryIndex } from '../src/server/history.js';
 import { DesktopAdapter } from '../src/server/desktop.js';
-import { buildGateway } from '../src/server/gateway.js';
+import { buildGateway } from '../test/legacy/gateway.js';
 
 const c = fixtureConfig();
 historyFixture(c);
-const output = resolve('.test-output');
+const output = resolve(process.env.POCKET_TEST_OUTPUT ?? '.test-output');
 await mkdir(output, { recursive: true });
 const externalDirectory = await mkdtemp(join(tmpdir(), 'pocket-external-media-'));
 const externalPicture = join(externalDirectory, 'downloaded photo (1).png');
@@ -281,6 +281,12 @@ try {
   native.revision++;
   native.snapshot();
   await page.locator('.activity-group > summary').last().click();
+  await page
+    .locator('.activity-group')
+    .last()
+    .getByRole('button', { name: '展开活动详情', exact: true })
+    .last()
+    .click();
   await page.locator('.diff-file summary').click();
   await expect(page.locator('.diff-add')).toHaveText('+new');
   await expect(page.locator('.diff-remove')).toHaveText('-old');

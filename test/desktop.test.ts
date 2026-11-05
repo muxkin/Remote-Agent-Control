@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DesktopAdapter } from '../src/server/desktop.js';
+import { platformRuntime } from '../src/server/platform.js';
+import { requestFingerprint } from '../src/server/approvals.js';
 import { messagesOf } from '../src/server/timeline.js';
 import { fixtureConfig, FakeTransport, THREAD, TURN, state } from './helpers.js';
 const cleanups: (() => void)[] = [];
@@ -44,6 +46,50 @@ describe('Desktop follower', () => {
       },
     });
   });
+  it('reuses native image and file input when adding attachments to a running turn', async () => {
+    const { t, d } = await setup();
+    t.current = state({ threadRuntimeStatus: { type: 'active' } });
+    t.current.turnHistory.history.entitiesByKey.one.status = 'inProgress';
+    t.revision++;
+    t.snapshot();
+    const attachments = [
+      { name: 'paste.png', path: '/private/paste.png' },
+      { name: 'notes.txt', path: '/private/notes.txt' },
+    ];
+    await d.control(
+      THREAD,
+      'steer',
+      JSON.stringify({ expectedTurnId: TURN, text: '', attachments }),
+      'image-only',
+    );
+    expect(t.calls.at(-1)).toMatchObject({
+      method: 'thread-follower-steer-turn',
+      params: {
+        clientUserMessageId: 'image-only',
+        input: [
+          { type: 'text', text: expect.stringContaining('/private/notes.txt') },
+          { type: 'localImage', path: '/private/paste.png' },
+        ],
+        attachments: [
+          { path: '/private/paste.png', isImageAttachment: true },
+          { path: '/private/notes.txt' },
+        ],
+        restoreMessage: {
+          context: { fileAttachments: [{ path: '/private/paste.png' }, { path: '/private/notes.txt' }] },
+        },
+      },
+    });
+    const count = t.calls.length;
+    await expect(
+      d.control(
+        THREAD,
+        'steer',
+        JSON.stringify({ expectedTurnId: 'stale', text: '', attachments }),
+        'stale-image',
+      ),
+    ).rejects.toThrow();
+    expect(t.calls).toHaveLength(count);
+  });
   it.each(['commandExecution', 'fileChange'])(
     'binds %s approval to the original request and turn',
     async (type) => {
@@ -63,6 +109,98 @@ describe('Desktop follower', () => {
         method: `thread-follower-${type === 'fileChange' ? 'file' : 'command'}-approval-decision`,
         params: { conversationId: THREAD, requestId: 42, decision: 'decline' },
       });
+    },
+  );
+  it.each(['implement', 'revise'] as const)(
+    'handles plan %s through the native follow-up turn',
+    async (planDecision) => {
+      const { t, d } = await setup();
+      const request = {
+        id: `implement-plan:${TURN}`,
+        method: 'item/plan/requestImplementation',
+        params: { threadId: THREAD, turnId: TURN, planContent: '# Plan\nKeep the existing composer.' },
+      };
+      t.current = state({ requests: [request], latestCollaborationMode: { mode: 'plan' } });
+      t.revision = 2;
+      t.snapshot();
+      expect(d.view(THREAD)?.requests?.[0]).toMatchObject({ kind: 'plan', actionable: true });
+      const answer = {
+        targetRequestId: request.id,
+        expectedTurnId: TURN,
+        expectedFingerprint: requestFingerprint(request),
+        planDecision,
+        ...(planDecision === 'revise' ? { feedback: 'Preserve drafts too.' } : {}),
+      };
+      await d.control(THREAD, 'respond', JSON.stringify(answer), 'stable-operation-id');
+      expect(t.calls.at(-1)).toMatchObject({
+        method: 'thread-follower-start-turn',
+        version: 2,
+        params: {
+          conversationId: THREAD,
+          turnStart: {
+            request: {
+              threadId: THREAD,
+              clientUserMessageId: 'stable-operation-id',
+              input: [
+                {
+                  type: 'text',
+                  text:
+                    planDecision === 'implement'
+                      ? `PLEASE IMPLEMENT THIS PLAN:\n${request.params.planContent}`
+                      : 'Preserve drafts too.',
+                },
+              ],
+              collaborationMode: {
+                mode: planDecision === 'implement' ? 'default' : 'plan',
+                settings: { model: 'desktop-model' },
+              },
+            },
+            context: { inheritThreadSettings: true },
+          },
+        },
+      });
+      // Approval is confirmed by a new native turn; the owner, not the phone, clears the pending request.
+      expect(d.view(THREAD)?.requests).toHaveLength(1);
+      t.current = state({ requests: [] });
+      t.revision++;
+      t.snapshot();
+      const calls = t.calls.length;
+      await expect(d.control(THREAD, 'respond', JSON.stringify(answer), 'other-id')).rejects.toThrow('过期');
+      expect(t.calls.length).toBe(calls);
+    },
+  );
+  it.each(['fingerprint', 'turn', 'running', 'other-request', 'content', 'missing-feedback'])(
+    'rejects stale/unsafe plan response: %s',
+    async (scenario) => {
+      const { t, d } = await setup();
+      const request = {
+        id: `implement-plan:${TURN}`,
+        method: 'item/plan/requestImplementation',
+        params: { threadId: THREAD, turnId: TURN, planContent: 'Original plan' },
+      };
+      const answer = {
+        targetRequestId: request.id,
+        expectedTurnId: TURN,
+        expectedFingerprint: requestFingerprint(request),
+        planDecision: scenario === 'missing-feedback' ? 'revise' : 'implement',
+      };
+      if (scenario === 'fingerprint') answer.expectedFingerprint = '0'.repeat(64);
+      if (scenario === 'turn') request.params.turnId = 'old-turn';
+      if (scenario === 'content') request.params.planContent = 'Changed plan';
+      t.current = state({
+        requests: [
+          request,
+          ...(scenario === 'other-request'
+            ? [{ id: 'another', method: 'item/tool/requestUserInput', params: {} }]
+            : []),
+        ],
+        ...(scenario === 'running' ? { threadRuntimeStatus: { type: 'active' } } : {}),
+      });
+      t.revision = 2;
+      t.snapshot();
+      const count = t.calls.length;
+      await expect(d.control(THREAD, 'respond', JSON.stringify(answer), 'id')).rejects.toThrow();
+      expect(t.calls.length).toBe(count);
     },
   );
   it('confirms model changes using the native unwrapped settings response', async () => {
@@ -217,6 +355,35 @@ describe('Desktop follower', () => {
     t.snapshot();
     expect(d.view(THREAD)?.messages.at(-1)).toMatchObject({ truncated: true });
     expect(d.fullMessage(THREAD, 'long')?.text).toBe(text);
+  });
+  it('keeps large tool payloads off the live stream and serves complete details on demand', async () => {
+    const { t, d } = await setup();
+    const output = '结果'.repeat(80000) + '末尾';
+    const diff = '+更改\n'.repeat(30000);
+    t.current.turnHistory.history.entitiesByKey.one.items.push(
+      {
+        id: 'command',
+        type: 'commandExecution',
+        command: 'fixture',
+        status: 'completed',
+        aggregatedOutput: output,
+      },
+      {
+        id: 'change',
+        type: 'fileChange',
+        status: 'completed',
+        changes: [{ path: 'a.txt', kind: 'update', diff }],
+      },
+    );
+    t.revision++;
+    t.snapshot();
+    const view = d.view(THREAD)!;
+    expect(Buffer.byteLength(JSON.stringify(view))).toBeLessThan(3000);
+    expect(view.messages.slice(-2).every((m) => m.deferred && !m.output && !m.changes && !m.details)).toBe(
+      true,
+    );
+    expect(d.fullMessage(THREAD, 'command')?.output).toBe(output);
+    expect(d.fullMessage(THREAD, 'change')?.changes?.[0].diff).toBe(diff);
   });
   it('places envelope input before assistant items in partial snapshots', () => {
     const snapshot = state();
@@ -377,4 +544,28 @@ it('includes selected skills as native input while preserving attachment context
     },
     context: { inheritThreadSettings: true },
   });
+});
+
+it('resumes an owned but unloaded desktop instead of treating ownership as readiness', async () => {
+  const { c, t, d } = await setup();
+  t.current = state({ threadRuntimeStatus: { type: 'notLoaded' }, resumeState: 'needs_resume' });
+  t.revision++;
+  t.snapshot();
+  const runtime = platformRuntime();
+  const open = vi.fn(async () => {
+    setTimeout(() => {
+      t.current = state({ threadRuntimeStatus: { type: 'idle' }, resumeState: 'resumed' });
+      t.revision++;
+      t.snapshot();
+    }, 50);
+  });
+  runtime.openThread = open;
+  c.platform = runtime;
+  expect(d.view(THREAD)?.owner).toBe(true);
+  expect(d.view(THREAD)?.canSend).toBe(false);
+  await d.openThread(THREAD);
+  expect(open).toHaveBeenCalledWith(THREAD);
+  expect(d.view(THREAD)?.canSend).toBe(true);
+  await d.openThread(THREAD);
+  expect(open).toHaveBeenCalledTimes(1);
 });

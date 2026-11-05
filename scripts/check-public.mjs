@@ -12,7 +12,7 @@ try {
   const config = parseEnv(readFileSync(resolve(process.env.POCKET_ENV_FILE || 'local/gateway.env'), 'utf8'));
   for (const [key, value] of Object.entries(config)) {
     if (
-      /(?:ACCESS_KEY|SECRET_KEY|TOKEN|PASSWORD|ORIGIN|ASSET_BASE|STATE_DIR|STUN_URLS|BUCKET|ADAPTER)$/.test(
+      /(?:ACCESS_KEY|SECRET_KEY|TOKEN|PASSWORD|ENROLLMENT|ORIGIN|ASSET_BASE|STATE_DIR|STUN_URLS|BUCKET|ADAPTER)$/.test(
         key,
       ) &&
       value.length >= (/(?:BUCKET|ADAPTER)$/.test(key) ? 4 : 8) &&
@@ -39,23 +39,23 @@ try {
   if (error.code !== 'ENOENT') throw error;
 }
 const forbidden =
-  /(^|\/)(?:local|inner|\.deploy|\.test-output|node_modules|dist|coverage|\.env|[^/]+\.pem|id_rsa|id_ed25519|known_hosts|ssh_config)(\/|$)|\.(?:sqlite(?:-wal|-shm)?|db|log|har|map)$/i;
+  /(^|\/)(?:local|inner|\.deploy|\.implementation|\.test-output|relay-state|node_modules|dist|coverage|\.npmrc|\.netrc|\.ssh|\.aws|\.env(?:\.[^/]+)?|[^/]+\.env|[^/]+\.(?:pem|key|p12|pfx|p8)|id_rsa|id_ed25519|known_hosts|ssh_config)(\/|$)|\.(?:sqlite(?:-[\w-]+)?|db(?:-[\w-]+)?|log|har|map)$/i;
 const findings = [];
 for (const file of files) {
-  if (forbidden.test(file) || file.startsWith('docs/design/'))
+  if ((file !== '.env.example' && forbidden.test(file)) || file.startsWith('docs/design/'))
     findings.push([file, 'private or generated path']);
   if (file.endsWith('/.gitignore')) findings.push([file, 'local ignore file must remain local']);
   const bytes = git(['show', `:${file}`]);
   if (/\.(png|webp|jpg|jpeg|ico|woff2?)$/i.test(file)) continue;
   const content = bytes.toString('utf8');
   if (
-    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}/.test(
+    /-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{40,}|\bAKIA[0-9A-Z]{16}\b|\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}/.test(
       content,
     )
   )
     findings.push([file, 'credential pattern']);
   for (const match of content.matchAll(
-    /https?:\/\/[^\s"'<>]+[?&](?:token|access_token|signature)=[^\s"'<>]+/gi,
+    /https?:\/\/[^\s"'<>]+[?&](?:token|access_token|signature|x-amz-signature|x-goog-signature)=[^\s"'<>]+/gi,
   )) {
     if (!/(^|\.)example\.(com|org|net)$/.test(new URL(match[0]).hostname))
       findings.push([file, 'signed or authenticated URL']);

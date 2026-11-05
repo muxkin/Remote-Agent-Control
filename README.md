@@ -4,7 +4,7 @@
 
 Codex Pocket Remote 是一个可自行部署的移动端网页客户端，连接电脑上正在运行的 Codex 桌面会话。你可以查看执行进度、发送指令、回答问题、处理审批，以及接收代码、图片和文件。手机与电脑使用同一条会话，可以随时切换。
 
-目前支持 Linux 桌面主机与 Android Chrome。本项目为非官方项目，仍处于早期开发阶段。
+目前实现 Linux 桌面主机适配，手机采用浏览器/PWA。v2 已通过 Linux Chrome 移动视口测试；Android/iOS 真机验收进度见 [验证记录](docs/VALIDATION_V2.md)。本项目为非官方项目，仍处于早期开发阶段。
 
 ## 界面预览
 
@@ -15,12 +15,14 @@ Codex Pocket Remote 是一个可自行部署的移动端网页客户端，连接
 ## 主要功能
 
 - **继续桌面会话**：按项目浏览、搜索会话、查看历史，实时接收电脑上的消息与执行进度。
-- **控制任务**：发送消息、运行中追加指令、中断任务，或将消息排到下一轮。
+- **控制任务**：发送消息、运行中追加文字与附件、中断任务，或将文字消息排到下一轮。
 - **调整工作方式**：选择模型、推理强度和速度，切换计划模式，使用本机已安装的技能与插件。
-- **处理交互**：在手机上回答选择题和自由输入问题，查看并处理命令、文件变更审批。
+- **处理交互**：在手机上回答选择题和自由输入问题，查看并处理命令、文件变更审批，以及批准计划或提出修改。
 - **阅读完整内容**：支持 Markdown、代码高亮、数学公式、Mermaid、Diff、图片、音频和视频；工具活动可折叠。
-- **传递文件**：从手机上传图片与附件，打开会话中的文件，保留原文件内容。
-- **灵活部署**：支持 HTTPS 云入口、WebRTC 直连、静态资源 CDN 与可选对象存储适配器。
+- **传递文件**：选择或粘贴图片与附件，打开会话中的文件，保留原文件内容。
+- **加密连接与缓存**：设备级 WebRTC 直连、加密 WSS 回退、手机历史缓存，以及可选的附件密文存储；公共资源默认同源托管，CDN 可选。
+
+界面按“消息 / 工作台 / 我的”组织。PC 使用左侧导航；手机在一级页面显示底部导航，进入对话后隐藏。工作台提供当前 Codex 功能，即时聊天连接器尚待接入。设置仅在“清理缓存”旁显示缓存用量，不提供容量预算或自动淘汰。详见 [前端模块说明](docs/FRONTEND_V3.md) 和 [更新记录](CHANGELOG.md)。
 
 ## 开始使用
 
@@ -49,11 +51,11 @@ npm run configure
 编辑生成的 `local/gateway.env`，设置手机访问地址：
 
 ```dotenv
-POCKET_PORT=4317
 POCKET_PUBLIC_ORIGIN=https://codex.example.com
+POCKET_RELAY_ENROLLMENT=<私有注册凭据>
 ```
 
-将示例域名替换为自己的 HTTPS 地址，并按 [部署指南](docs/CLOUD_DEPLOYMENT.md) 配置反向代理与隧道。配置项说明见 [.env.example](.env.example)。
+将示例域名替换为自己的 HTTPS 地址，并按 [部署指南](docs/CLOUD_DEPLOYMENT.md) 配置独立云端静态入口和加密中继。配置项说明见 [.env.example](.env.example)。
 
 ### 2. 启动服务
 
@@ -64,7 +66,7 @@ npm run build
 npm start
 ```
 
-服务监听 `127.0.0.1:4317`，由反向代理提供手机入口。只想在电脑本机体验时，可将 `POCKET_PUBLIC_ORIGIN` 设为 `http://127.0.0.1:4317`，启动后用浏览器打开该地址。
+电脑 Gateway 主动连接云端，不监听入站业务端口。云端独立运行 `dist/server/relay-main.js`；手机先经加密 WSS 连接，再后台升级为 WebRTC 直连。缓存可用于离线阅读。架构和协议见 [v2 协议说明](docs/PROTOCOL_V2.md)。
 
 ### 3. 手机扫码连接
 
@@ -81,7 +83,7 @@ npm run pair -- --open
 | 操作                 | 入口                           |
 | -------------------- | ------------------------------ |
 | 查找会话             | 列表中的“最近”“项目”与搜索框   |
-| 上传图片或文件       | 输入框左下角 `＋`              |
+| 上传图片或文件       | 输入框左下角 `＋`，或粘贴图片  |
 | 计划模式、技能与插件 | “工具”菜单                     |
 | 模型、推理强度与速度 | 输入框下方的模型名称           |
 | 发送或追加指令       | 输入文字后点击发送按钮         |
@@ -98,16 +100,18 @@ npm run pair -- --open
 
 ```mermaid
 flowchart LR
-    Phone[手机浏览器] -->|HTTPS / WSS| Cloud[云服务器]
-    Cloud -->|反向隧道| Gateway[电脑 Gateway]
-    Gateway --> Desktop[现有 Codex 桌面会话]
-    Phone <-->|可用时 WebRTC 直连| Gateway
-    Phone <-->|附件与静态资源| Storage[对象存储 / CDN]
+    Phone[手机 PWA 与本地缓存] <-->|Noise 加密 WSS| Cloud[云端注册、信令与中继]
+    Gateway[电脑 Gateway] <-->|主动建立 WSS| Cloud
+    Phone <-->|Noise 加密 WebRTC| Gateway
+    Gateway --> Adapter[桌面与平台适配接口] --> Desktop[现有 Linux 桌面会话]
+    Phone <-.->|附件密文回退| Storage[私有对象存储]
+    Gateway <-.->|附件密文回退| Storage
+    CDN[同源公共静态资源 / 可选 CDN] --> Phone
 ```
 
-基本部署通过 HTTPS/WSS 转发消息。配置 STUN 后，可在网络允许时建立 WebRTC 直连，传输实时事件与控制；直连不可用时自动回退。
+手机先建立加密 WSS 连接，同时后台尝试 WebRTC；直连就绪后，读取、控制、订阅与文件共用同一业务协议。切换聊天复用设备连接；WSS 短暂断开不会主动关闭健康直连。云端页面独立运行，电脑离线时仍能阅读手机缓存。项目不使用 SSH 业务隧道，也不配置 TURN。
 
-默认由 Gateway 传输附件。接入符合接口约定的对象存储适配器后，手机可直接上传和读取私有附件，减少云服务器的文件转发流量；前端静态资源也可通过 CDN 分发。项目不内置存储厂商实现，适配器接入方式见 [存储扩展](docs/STORAGE_ADAPTER.md)。
+附件优先读取已校验缓存，再选择直连；打洞最多等待两秒。无直连时，8 MiB 以内走加密 WSS，更大文件可使用加密对象存储，存储不可用时回退 WSS。附件可按块续传；对象存储不接收文件名和解密密钥。项目不内置存储厂商实现，适配器接入方式见 [存储扩展](docs/STORAGE_ADAPTER.md)。
 
 - [云服务器、STUN 与对象存储配置](docs/CLOUD_DEPLOYMENT.md)
 - [功能支持范围](docs/CAPABILITIES.md)
@@ -115,7 +119,7 @@ flowchart LR
 
 ## 使用须知
 
-- 电脑必须保持在线，桌面应用需要运行。未加载的历史会话可能只能只读查看。
+- 发送和读取新内容时，电脑及桌面应用需要在线；已有缓存可离线阅读。未加载的历史会话可能只能只读查看。
 - 桌面连接使用内部 IPC，桌面升级可能影响兼容性。
 - 技能和插件选择面向本机已安装内容，尚不支持安装管理与全部插件专用界面。
 - 部分原生卡片、历史内嵌媒体和权限请求仍在适配中。
@@ -130,7 +134,7 @@ npm run typecheck
 npm run build
 ```
 
-前端使用 React、Vite 和 TypeScript；服务端使用 Fastify、WebSocket 与 SQLite。浏览器测试还需 Chrome 和 ffmpeg。开发与测试说明见 [贡献指南](CONTRIBUTING.md)。
+前端使用 React、Vite 和 TypeScript；服务端使用 Fastify、WebSocket 与 SQLite。v2 浏览器测试需要 Chrome。开发与测试说明见 [贡献指南](CONTRIBUTING.md)，部署结果与未完成的真机验收见 [验证记录](docs/VALIDATION_V2.md)。
 
 ## 许可证
 

@@ -9,7 +9,7 @@ import { fixtureConfig, historyFixture, FakeTransport, THREAD, state } from '../
 import { DesktopAdapter } from '../src/server/desktop.js';
 import { Store } from '../src/server/store.js';
 import { HistoryIndex } from '../src/server/history.js';
-import { buildGateway } from '../src/server/gateway.js';
+import { buildGateway } from '../test/legacy/gateway.js';
 const report: any = { checks: {}, errors: [], fixture: true };
 const browser = await chromium.launch({ channel: process.env.POCKET_BROWSER_CHANNEL ?? 'chrome' });
 async function run(webRoot: string) {

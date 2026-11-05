@@ -9,6 +9,8 @@ export interface StoredFile {
   contentType?: string;
   cacheControl?: string;
   allowedOrigin?: string;
+  /** Private ciphertext must be provider-expired even while the desktop is offline. */
+  expiresAt?: number;
 }
 export interface StorageAdapter {
   version: 1;
@@ -19,6 +21,8 @@ export interface StorageAdapter {
   downloadUrl(key: string, expiresAt: number): Promise<string>;
   createUpload(input: { key: string; size: number; expiresAt: number }): Promise<DirectUpload>;
   remove?(key: string): Promise<void>;
+  /** Optional operator inventory; never exposed as a phone RPC. */
+  list?(prefix: string, marker?: string): Promise<{ keys: string[]; marker?: string }>;
 }
 export type StorageFactory = (context: {
   purpose: 'media' | 'assets';

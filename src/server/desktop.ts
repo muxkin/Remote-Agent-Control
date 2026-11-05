@@ -3,8 +3,6 @@ import { SkillCatalog } from './skills.js';
 import { PluginCatalog } from './plugins.js';
 import { SelectionError } from './selection-error.js';
 import { asyncReply } from './async-questions.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { DesktopAppTools } from './app-tools.js';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -15,8 +13,10 @@ import { DesktopTransport, type RpcTransport, DeliveryError } from './transport.
 import { normalizedView, turnsOf, orderedEntities, messagesOf } from './timeline.js';
 import { itemMedia, mediaReference } from './content-media.js';
 import { readNativeQueue, queueFingerprint, queuedMessage } from './queue.js';
-import { approvalResponse } from './approvals.js';
+import { approvalResponse, requestFingerprint, normalizeRequest } from './approvals.js';
 import type { GatewayStatus, ThreadView, Operation } from '../shared/types.js';
+import type { DesktopBackend } from './desktop-backend.js';
+import { platformRuntime } from './platform.js';
 
 enablePatches();
 export const SUPPORTED_VERSION = '26.1029.61003';
@@ -49,7 +49,16 @@ interface Subscription {
   discovering?: Promise<void>;
   queue?: any[];
 }
-export class DesktopAdapter extends EventEmitter {
+export class DesktopAdapter extends EventEmitter implements DesktopBackend {
+  get capabilities() {
+    return {
+      platform: (this.config.platform ?? platformRuntime()).id,
+      protocolVerified: this.status().supportedVersion,
+      files: true,
+      controls: this.status().writesEnabled,
+      creation: this.status().writesEnabled,
+    };
+  }
   private transport: RpcTransport | null = null;
   private appTools: DesktopAppTools;
   private skillCatalog: SkillCatalog;
@@ -103,10 +112,9 @@ export class DesktopAdapter extends EventEmitter {
   private async connect(): Promise<void> {
     if (this.stopped) return;
     try {
-      const meta = JSON.parse(
-        await readFile(`${this.config.desktopRoot}/resources/linux-package-metadata.json`, 'utf8'),
+      this.version = await (this.config.platform ?? platformRuntime()).desktopVersion(
+        this.config.desktopRoot,
       );
-      this.version = typeof meta.version === 'string' ? meta.version : null;
       const transport = this.factory();
       this.transport = transport;
       transport.on('broadcast', (message) => this.receive(message));
@@ -355,17 +363,22 @@ export class DesktopAdapter extends EventEmitter {
       throw new DeliveryError('桌面未连接或版本不兼容', true);
     const sub = this.subscriptions.get(id);
     if (!sub) throw new DeliveryError('尚未订阅此会话', true);
-    if (sub.owner && sub.synced) return;
-    const { stdout } = await promisify(execFile)('xdg-mime', ['query', 'default', 'x-scheme-handler/codex'], {
-      timeout: 5000,
-    });
-    if (stdout.trim() !== 'chatgpt.desktop')
-      throw new DeliveryError('本机 codex 链接未绑定受支持的桌面应用', true);
-    await promisify(execFile)('xdg-open', [`codex://threads/${id}`], { timeout: 10000 });
-    for (let attempt = 0; attempt < 12; attempt++) {
+    const ready = () => {
+      const view = this.view(id);
+      return !!view?.owner && view.synchronized && view.runtimeStatus !== 'notLoaded';
+    };
+    if (ready()) return;
+    try {
+      await (this.config.platform ?? platformRuntime()).openThread(id);
+    } catch {
+      throw new DeliveryError('本机桌面链接处理程序不可用', true);
+    }
+    const deadline = Date.now() + 12000;
+    while (Date.now() < deadline) {
       await this.discover(id);
-      const v = await this.waitForView(id, 800);
-      if (v?.owner && v.synchronized) return;
+      await this.waitForView(id, 800);
+      if (ready()) return;
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
     throw new DeliveryError('已请求桌面打开，但尚未取得会话状态');
   }
@@ -375,11 +388,14 @@ export class DesktopAdapter extends EventEmitter {
     input: string,
     requestId: string,
   ): Promise<string | null> {
+    if (kind === 'create') {
+      if (!this.status().writesEnabled) throw new DeliveryError('桌面未连接或版本不兼容', true);
+      return this.appTools.create(id, requestId, JSON.parse(input));
+    }
     const sub = this.subscriptions.get(id);
     const view = this.view(id);
     if (!sub?.owner || !view?.synchronized || !this.status().writesEnabled || !this.transport)
       throw new DeliveryError('Desktop owner is unavailable or incompatible', true);
-    if (kind === 'create') return this.appTools.create(id, requestId, JSON.parse(input));
     if (kind === 'open') return null;
     if (kind === 'queue' || kind === 'queue-remove') {
       const value = JSON.parse(input);
@@ -514,6 +530,57 @@ export class DesktopAdapter extends EventEmitter {
         (r: any) => String(r.id) === inputData.targetRequestId && !r.completed,
       );
       if (!request) throw new DeliveryError('此请求已处理或过期', true);
+      if (request.method === 'item/plan/requestImplementation') {
+        const lastTurn = turnsOf(sub.state).at(-1);
+        if (
+          view.activeTurnId ||
+          view.runtimeStatus !== 'idle' ||
+          !view.model ||
+          requests.filter((r: any) => !r.completed).length !== 1 ||
+          request.params?.threadId !== id ||
+          request.params?.turnId !== lastTurn?.turnId ||
+          inputData.expectedTurnId !== request.params.turnId ||
+          inputData.expectedFingerprint !== requestFingerprint(request) ||
+          !normalizeRequest(request, []).actionable ||
+          !['implement', 'revise'].includes(inputData.planDecision) ||
+          (inputData.planDecision === 'revise' && !inputData.feedback?.trim())
+        )
+          throw new DeliveryError('计划已变化或当前正在执行，请重新核对', true);
+        // The desktop's native plan action is a follow-up turn, not a command approval.
+        // Starting that turn completes the synthetic implementation request in the owner stream.
+        const text =
+          inputData.planDecision === 'implement'
+            ? `PLEASE IMPLEMENT THIS PLAN:\n${request.params.planContent}`
+            : inputData.feedback.trim();
+        const response = await this.transport.request(
+          'thread-follower-start-turn',
+          {
+            conversationId: id,
+            turnStart: {
+              request: {
+                threadId: id,
+                input: nativeUserInput(text, []).input,
+                clientUserMessageId: requestId,
+                collaborationMode: {
+                  mode: inputData.planDecision === 'implement' ? 'default' : 'plan',
+                  settings: {
+                    model: view.model,
+                    reasoning_effort: view.reasoningEffort ?? null,
+                    developer_instructions: null,
+                  },
+                },
+              },
+              context: { inheritThreadSettings: true, attachments: [] },
+            },
+          },
+          2,
+          sub.owner,
+          30000,
+        );
+        const turnId = response.result?.result?.turn?.id;
+        if (!turnId) throw new DeliveryError('计划操作尚未获得桌面确认');
+        return turnId;
+      }
       const response = approvalResponse(request, inputData);
       await this.transport.request(
         response.method,
@@ -528,13 +595,20 @@ export class DesktopAdapter extends EventEmitter {
       const value = JSON.parse(input);
       if (!view.activeTurnId || view.activeTurnId !== value.expectedTurnId || view.pendingRequests)
         throw new DeliveryError('目标任务已变化或正在等待交互', true);
+      const native = nativeUserInput(value.text, value.attachments ?? []);
       await this.transport.request(
         'thread-follower-steer-turn',
         {
           conversationId: id,
-          input: [{ type: 'text', text: value.text, text_elements: [] }],
+          input: native.input,
+          attachments: native.attachments,
           clientUserMessageId: requestId,
-          restoreMessage: { id: requestId, text: value.text, cwd: view.cwd, context: {} },
+          restoreMessage: {
+            id: requestId,
+            text: value.text,
+            cwd: view.cwd,
+            context: { fileAttachments: native.attachments },
+          },
         },
         1,
         sub.owner,
@@ -631,6 +705,7 @@ export class DesktopAdapter extends EventEmitter {
   }
   stop(): void {
     this.stopped = true;
+    this.appTools.close();
     clearTimeout(this.reconnect);
     for (const [id, sub] of this.subscriptions) this.follow(id, sub, false);
     this.transport?.close();

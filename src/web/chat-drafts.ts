@@ -16,7 +16,11 @@ export function useChatDrafts(device: string, thread: string | null) {
     if (!device) return;
     let drafts: Record<string, ChatDraft> = {};
     try {
-      const parsed = JSON.parse(sessionStorage.getItem(`pocket-drafts:${device}`) || '{}');
+      const parsed = JSON.parse(
+        (localStorage.getItem(`pocket-drafts:${device}`) ??
+          sessionStorage.getItem(`pocket-drafts:${device}`)) ||
+          '{}',
+      );
       for (const [id, d] of Object.entries(parsed) as [string, any][])
         if (
           typeof d?.text === 'string' &&
@@ -33,7 +37,7 @@ export function useChatDrafts(device: string, thread: string | null) {
   useEffect(() => {
     if (!device || state.device !== device) return;
     try {
-      sessionStorage.setItem(`pocket-drafts:${device}`, JSON.stringify(state.drafts));
+      localStorage.setItem(`pocket-drafts:${device}`, JSON.stringify(state.drafts));
     } catch {
       /* Reload notice still protects unsaved input. */
     }

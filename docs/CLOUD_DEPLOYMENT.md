@@ -1,94 +1,63 @@
-# 云入口、P2P 与对象存储
+# v2 部署与回滚
 
-云服务器提供 HTTPS 入口，Gateway 在运行桌面应用的电脑上监听 localhost。部署前请准备服务器、域名及服务器的 SSH 登录方式。
+公网入口由独立云端服务提供；电脑离线时仍可打开 PWA、查看本地缓存。电脑只向云端建立 WSS，并尝试 WebRTC 直连。业务链路不再使用 SSH、反向端口映射或本机 HTTP 代理。服务器管理 SSH 保持独立。
 
-## 1. 本地配置
+## 配置与安装
 
-```bash
-npm ci
-npm run configure
-```
+电脑和云端均使用 Node.js 24+。电脑额外需要现有 Linux 桌面应用和 Python IPC 校验桥。运行 `npm ci`、`npm run build`。公共资源默认同源，不需要 CDN。启用 CDN 时，生产构建和运行的 `POCKET_ASSET_BASE` 必须一致；先发布 CDN 哈希文件，再切换 HTML。
 
-编辑 `local/gateway.env`：
+电脑 `local/gateway.env`：
 
 ```dotenv
-POCKET_PORT=4317
 POCKET_PUBLIC_ORIGIN=https://codex.example.com
+POCKET_RELAY_ENROLLMENT=<随机生成的至少32字节凭据>
 POCKET_P2P=1
-```
-
-默认读取 `local/gateway.env`，也可用 `POCKET_ENV_FILE` 指定其他配置文件。以 systemd 运行时通过 `EnvironmentFile` 注入相同配置。配置文件权限应为 `0600`。
-
-## 2. HTTPS 与 SSH 反向隧道
-
-```bash
-npm run deploy:render -- --domain codex.example.com --ssh-host my-vps
-```
-
-默认输出至 `.deploy/`。`--out` 可修改位置，`--env-file` 可指定生成服务引用的配置文件；`--remote-port` 默认 14317。生成器不修改系统或连接服务器。
-
-1. 将域名解析至自己的服务器，配置 HTTPS。生成的 Caddyfile 将请求转发到服务器回环端口；已有 Nginx 也可使用等价配置，需支持 WebSocket Upgrade。
-2. 使用专用 SSH 账号与密钥。生成的 sshd 片段限制远程转发、回环监听和其他 SSH 能力；合并后先校验配置，再重载 SSH。
-3. 校验服务器主机密钥，将 SSH 别名、私钥和 known_hosts 保存在本机 SSH 配置目录。
-4. 在电脑构建应用，审阅后安装生成的两个 systemd 用户服务。网关和隧道的启动路径需与当前安装位置一致。
-5. 确认公开入口可达，再运行 `npm run pair -- --open` 扫码。电脑需保持在线且 Desktop 正在运行。
-
-```bash
-npm run build
-systemctl --user daemon-reload
-systemctl --user enable --now codex-pocket-remote.service codex-pocket-tunnel.service
-```
-
-这些服务名来自生成模板。不要覆盖已有同名服务而未核对配置。
-
-## 3. 可选 STUN / P2P
-
-```dotenv
 POCKET_STUN_URLS=stun:stun.example.com:3479
 ```
 
-不硬编码公共 STUN。生成器可输出 coturn 的 `stun-only` 配置与专用服务，默认 UDP 3479，可用 `--stun-port` 调整。需安装 coturn，并在云安全组与主机防火墙放行实际 UDP 端口。
-
-STUN 只帮助发现地址，不转发聊天或文件；本项目不配置 TURN。WSS 先提供正常同步，WebRTC 可用时再切换实时事件和控制，失败自动回退。不支持直连的 NAT 不影响基本功能。设置 `POCKET_P2P=0` 可关闭。
-
-P2P 连接不意味着列表、历史、上传和所有媒体都通过直连。移动网连接成功率与实际流量应在自己的网络测量。
-
-## 4. 可选静态资源 CDN
+云端另建私有配置，不要复制电脑的环境文件或对象存储凭据：
 
 ```dotenv
-POCKET_ASSET_BASE=https://static.example.com/pocket/v1/
+POCKET_PUBLIC_ORIGIN=https://codex.example.com
+POCKET_RELAY_ENROLLMENT=<相同的注册凭据>
+POCKET_RELAY_BIND=127.0.0.1
+POCKET_RELAY_PORT=4318
+POCKET_RELAY_STATE=/var/lib/codex-pocket-relay
+POCKET_WEB_ROOT=/opt/codex-pocket/current/dist/web
+# 与构建一致的公共资源源：
+# POCKET_ASSET_BASE=https://static.example.com/pocket/v1/
+# 私有上传端点和密文下载域名，逗号分隔，均为精确 HTTPS origin：
+# POCKET_UPLOAD_ORIGINS=https://upload.example.com,https://objects.example.com
 ```
 
-```bash
-npm run build
-npm run assets:prepare
-```
+运行 `npm run deploy:render -- --domain codex.example.com` 生成可审查的主机/中继 systemd 单元和反向代理示例。生成器不修改服务器。`--relay-root` 设置云端发行目录，`--relay-node` 设置云端 Node.js 的绝对路径（默认 `/usr/bin/node`）；请按实际安装位置调整。云端入口为 `dist/server/relay-main.js`；电脑入口为 `dist/server/main.js`。反向代理保留 Host、Origin 和 WebSocket Upgrade，关闭业务正文日志、请求缓冲和自动重试。只代理云端服务，不能再指向电脑端口。STUN 只做地址发现；不配置 TURN。
 
-构建与 Gateway 的资源配置必须一致。导出清单位于 `.deploy/asset-manifest.json`，对应文件位于 `.deploy/assets/`；可以使用自己的发布工具上传到静态托管服务。跨域脚本、字体需允许网页 Origin，哈希资源可配置不可变缓存。HTML、配置、设备数据库与会话记录保留在 Gateway。
+部署静态应用后启动云端服务，再启动电脑 Gateway。运行 `npm run pair -- --open`，手机重新扫码一次。配对密钥只在二维码 fragment 和端点内出现；禁止把二维码、身份私钥或完整环境文件写入公开日志。
 
-如果已实现 [静态资源适配器](STORAGE_ADAPTER.md)，设置 `POCKET_ASSET_ADAPTER` 后可运行 `npm run assets:publish`。发布器仅上传清单中的哈希资源，校验导出文件和已经存在的对象内容。
+开发预览绑定 Tailscale 地址；自动化隔离测试使用 loopback，不连接真实工作会话。公网服务必须使用 HTTPS。
 
-先发布资源，再切换服务构建。旧页面可能仍需旧哈希资源，因此不要立即清除历史构建资源。
+## 对象存储
 
-## 5. 可选私有会话媒体
+对象存储与 CDN 均为可选项，由自己的适配器和配置接入；不配置时附件使用加密直连/WSS，静态资源由云端入口同源提供。新附件只使用 `private-encrypted-v2/` 前缀，随机对象名、二进制类型，内容与文件名/密钥分开传输。适配器须支持私有下载、Range、浏览器 CORS、临时上传、删除及 24 小时过期策略。CORS 应允许应用的精确 origin 和 Range，并暴露 Content-Range。成功消费后删除；主机清理失败会重试，提供方生命周期负责电脑离线期间的遗留对象。
 
-默认通过经过认证的 Gateway 传输附件，不需要外部存储账号。手机上传使用分块传输，电脑校验 SHA-256 和文件大小后再交给桌面会话，单文件上限为 256 MiB。
+不得因升级直接删除旧附件。为 `private-uploads/` 和 `private-media/` 单独生成清单；只有本机副本存在且哈希一致才清理。没有核实副本的对象保留待处理；公共静态资源前缀必须排除。新版不签发旧明文下载链接。
 
-需要分流附件时，可自行接入 [存储适配器](STORAGE_ADAPTER.md)，通过 `POCKET_MEDIA_ADAPTER` 指定本地模块。项目提供通用接口，不内置任何厂商实现或账号配置。
+## 切换与回滚
 
-适配器必须使用私有存储，并提供限定对象、大小与有效期的上传凭证以及短期下载链接。浏览器可通过 HTTPS 直接访问存储，视频支持 Range；常见 UTF-8 文本附件显式声明 charset，原文件字节保留。存储的 CORS 配置需允许自己的网页 Origin。
+1. 保存当前源码/发行包、桌面环境文件、本机身份/操作数据库的 SQLite 一致性备份、Nginx 配置和服务单元。保留原始会话和附件目录。
+2. 隔离验证新发行包。发布静态资源及云端服务，检查 `/health`、TLS 和未认证访问。
+3. 切换本机 Gateway 和代理目标，完成加密配对、直连及纯中继验证。
+4. 停用并移除项目专用 SSH 隧道单元、专用转发公钥/配置和旧端口映射。管理 SSH 不变。上一发行包和旧单元只保存在私有回滚目录，不作为第三条运行路径。
+5. 保留数据库新增表及操作记录。回滚应用时不要覆盖恢复旧数据库，也不要自动重放结果不明确的操作。旧版无法使用新版设备身份，需要相应重新配对。
 
-## 6. 更新、验证与回退
+回滚需要同时恢复上一发行包、电脑环境、代理目标及其对应服务；先停止新版，确认原始会话/附件仍在，再启动上一版。旧隧道只可在明确执行回滚时恢复。不要清理仍有未确认操作的桌面数据。
 
-- 更新前备份运行配置与旧构建。
-- 在独立构建目录完成测试，发布 CDN 后再切换网关，避免覆盖正在运行的文件。
-- 网关重启不停止桌面任务。手机恢复连接后重新获取状态；结果待确认时不能盲目重发。
-- 回退时恢复上一构建及对应配置，保留设备数据库与原附件，不覆盖 Codex 数据库。
+## 验证
 
-```bash
-npm run test:cloud -- <test-thread-id>
-npm run test:storage
-npm run test:stun -- stun:stun.example.com:3479
-```
+- `npm run typecheck`、`npm test`：协议、增量、权限、现有桌面行为及回归。
+- 单独构建测试 Web：`POCKET_ENV_FILE=/dev/null npx vite build --outDir ../../.implementation/web`。
+- `npm run test:v2`：独立模拟桌面，Chrome 移动视口，验证直连/中继、连接复用、缓存及上传。
+- `node --import ./scripts/env.mjs --import tsx scripts/v2-storage-smoke.ts`：实际存储上的可删除密文测试对象，不使用真实附件。
+- `npm run test:cloud -- <会话UUID>`：公网只读加密验收，临时设备随后撤销，不写入桌面会话。
 
-存储测试需要已配置且支持删除临时对象的适配器，不包含浏览器 CORS 验证；`test:cloud` 默认只读。只有明确增加 `--restart-tunnel` 才会中断隧道以验证恢复，此时所有手机会短暂断线。
+旧 HTTP UI 脚本是 v1 历史验证材料，不能替代 v2 传输验收。真实 Android/iOS、蜂窝网络、后台挂起、配额回收和跨网络 IPv6 必须另记录实测结果，模拟器或本机直连不算真机验收。

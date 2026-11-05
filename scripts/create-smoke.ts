@@ -41,11 +41,13 @@ try {
   await page.getByRole('button', { name: '会话工具', exact: true }).click();
   await page.getByRole('button', { name: '新建会话', exact: true }).click();
   await page.screenshot({ path: '.test-output/create-debug.png', fullPage: true });
-  await page.getByLabel('新会话标题').fill(title);
-  await page
-    .getByLabel('新会话第一条消息')
+  const creation = page.getByRole('dialog', { name: '新会话', exact: true });
+  await creation.getByText('自定义标题（可选）', { exact: true }).click();
+  await creation.getByLabel('新会话标题（可选）').fill(title);
+  await creation
+    .getByLabel('消息', { exact: true })
     .fill(`这是手机原生新建会话验收。请只回复 ${marker}，不要调用任何工具、修改文件或继续其他工作。`);
-  await page.getByRole('button', { name: '创建并发送', exact: true }).click();
+  await creation.getByRole('button', { name: '发送 ↑', exact: true }).click();
   const device = store.devices().find((d) => d.name === deviceName);
   await expect
     .poll(() => store.recent(device.id, anchor).find((o) => o.kind === 'create')?.state, { timeout: 45000 })

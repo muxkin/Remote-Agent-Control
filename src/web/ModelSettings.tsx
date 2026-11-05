@@ -1,3 +1,4 @@
+import { remoteFetch } from './device-session';
 import { useEffect, useState } from 'react';
 import type { ThreadView, Operation } from '../shared/types';
 import type { ModelChoice } from '../server/models';
@@ -48,6 +49,7 @@ export function ModelSettings({
   onDirtyChange,
   response,
   onApplied,
+  creation = false,
 }: {
   view: ThreadView;
   disabled: boolean;
@@ -55,6 +57,7 @@ export function ModelSettings({
   onDirtyChange?: (dirty: boolean) => void;
   response?: Operation;
   onApplied: () => void;
+  creation?: boolean;
 }) {
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [initial] = useState(() => settingsUpdate(view, view.mode === 'plan' ? 'plan' : 'default'));
@@ -68,7 +71,7 @@ export function ModelSettings({
   const [submitted, setSubmitted] = useState<string>();
   useEffect(() => {
     const controller = new AbortController();
-    fetch('/api/models', { signal: controller.signal })
+    remoteFetch('/api/models', { signal: controller.signal })
       .then(async (r) => {
         if (!r.ok) throw Error('暂时无法读取桌面模型目录');
         setModels((await r.json()).models);
@@ -177,37 +180,43 @@ export function ModelSettings({
                 ))}
               </div>
             </div>
-            <div className="setting-section">
-              <h3>速度</h3>
-              <div className="speed-options" role="radiogroup" aria-label="速度">
-                {choice?.speeds.map((speed) => (
-                  <label key={speed.id}>
-                    <input
-                      type="radio"
-                      name="model-speed"
-                      aria-label={
-                        speed.id === 'default' ? '标准' : speed.name === 'Fast' ? '快速 · Fast' : speed.name
-                      }
-                      checked={tier === speed.id}
-                      disabled={disabled || loading}
-                      onChange={() => setTier(speed.id)}
-                    />
-                    <span>
-                      <strong>
-                        {speed.id === 'default' ? '标准' : speed.name === 'Fast' ? '快速 · Fast' : speed.name}
-                      </strong>
-                      <small>
-                        {speed.id === 'default'
-                          ? '使用标准速度'
-                          : speed.id === 'priority'
-                            ? '更快响应，可能增加用量'
-                            : speed.description}
-                      </small>
-                    </span>
-                  </label>
-                ))}
+            {!creation && (
+              <div className="setting-section">
+                <h3>速度</h3>
+                <div className="speed-options" role="radiogroup" aria-label="速度">
+                  {choice?.speeds.map((speed) => (
+                    <label key={speed.id}>
+                      <input
+                        type="radio"
+                        name="model-speed"
+                        aria-label={
+                          speed.id === 'default' ? '标准' : speed.name === 'Fast' ? '快速 · Fast' : speed.name
+                        }
+                        checked={tier === speed.id}
+                        disabled={disabled || loading}
+                        onChange={() => setTier(speed.id)}
+                      />
+                      <span>
+                        <strong>
+                          {speed.id === 'default'
+                            ? '标准'
+                            : speed.name === 'Fast'
+                              ? '快速 · Fast'
+                              : speed.name}
+                        </strong>
+                        <small>
+                          {speed.id === 'default'
+                            ? '使用标准速度'
+                            : speed.id === 'priority'
+                              ? '更快响应，可能增加用量'
+                              : speed.description}
+                        </small>
+                      </span>
+                    </label>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </>
         )}
         {loading && (
@@ -243,9 +252,9 @@ export function ModelSettings({
           disabled={disabled || loading || stale || !choice || !choice.efforts.includes(effort)}
           onClick={async () => setSubmitted(await onSave({ ...initial, model, effort, serviceTier: tier }))}
         >
-          应用到下一轮
+          {creation ? '用于新会话' : '应用到下一轮'}
         </button>
-        <small>确认后与电脑同步</small>
+        <small>{creation ? '发送第一条消息时使用，不影响原会话' : '确认后与电脑同步'}</small>
       </footer>
     </section>
   );

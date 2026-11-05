@@ -1,3 +1,4 @@
+// V1 regression fixture only. Not included in any production entrypoint.
 import { RTCPeerConnection, type RTCDataChannel } from 'werift';
 
 /** One authenticated signalling session owns one reliable, ordered data channel. */

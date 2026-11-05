@@ -7,6 +7,7 @@ export interface Message {
   phase?: string;
   details?: string;
   truncated?: boolean;
+  deferred?: boolean;
   changes?: FileDiff[];
   output?: string;
   attachments?: { name: string; path: string }[];
@@ -16,7 +17,15 @@ export interface Message {
 export interface ConversationRequest {
   id: string;
   fingerprint?: string;
-  kind: 'command' | 'file' | 'question' | 'async-question' | 'permissions' | 'elicitation' | 'unsupported';
+  kind:
+    | 'command'
+    | 'file'
+    | 'question'
+    | 'async-question'
+    | 'permissions'
+    | 'elicitation'
+    | 'plan'
+    | 'unsupported';
   title: string;
   description: string;
   turnId: string | null;
@@ -44,6 +53,8 @@ export interface RequestResponse {
   targetRequestId: string;
   expectedTurnId: string | null;
   expectedFingerprint?: string;
+  planDecision?: 'implement' | 'revise';
+  feedback?: string;
   decision?: ApprovalDecision;
   answers?: Record<string, string[]>;
   permissionIds?: string[];

@@ -11,6 +11,8 @@ export const responseBody = z
     targetRequestId: z.string().min(1).max(500),
     expectedTurnId: z.string().max(200).nullable(),
     expectedFingerprint: z.string().length(64).optional(),
+    planDecision: z.enum(['implement', 'revise']).optional(),
+    feedback: z.string().trim().min(1).max(16000).optional(),
     decision: z.enum(['accept', 'acceptForSession', 'decline', 'cancel']).optional(),
     answers: z.record(z.string().max(200), z.array(z.string().max(16000)).max(20)).optional(),
     permissionIds: z.array(z.string().max(200)).max(100).optional(),
@@ -21,9 +23,15 @@ export const responseBody = z
   .strict()
   .refine(
     (value) =>
-      [value.decision, value.answers, value.permissionIds, value.action].filter(
+      [value.decision, value.answers, value.permissionIds, value.action, value.planDecision].filter(
         (value) => value !== undefined,
       ).length === 1,
+  )
+  .refine((value) =>
+    value.planDecision
+      ? !!value.expectedFingerprint &&
+        (value.planDecision === 'revise' ? !!value.feedback : value.feedback === undefined)
+      : value.feedback === undefined,
   );
 
 export function requestFingerprint(request: any): string {
@@ -73,12 +81,14 @@ export function normalizeRequest(request: any, items: any[]): ConversationReques
     'item/fileChange/requestApproval': 'file',
     'item/permissions/requestApproval': 'permissions',
     'item/tool/requestUserInput': 'question',
+    'item/plan/requestImplementation': 'plan',
     'mcpServer/elicitation/request': 'elicitation',
   };
   kind = methods[request.method] ?? kind;
   const review =
     kind === 'file' ? (p.changes ?? item?.changes) : kind === 'command' ? (p.command ?? item?.command) : null;
   const description = [
+    kind === 'plan' ? p.planContent : null,
     p.reason,
     p.message,
     kind === 'command' ? review : null,
@@ -137,6 +147,7 @@ export function normalizeRequest(request: any, items: any[]): ConversationReques
       question: 'Codex 需要你的回答',
       'async-question': 'Codex 需要你的回答',
       elicitation: `${p.serverName ?? '连接器'} 需要确认`,
+      plan: '计划等待批准',
       unsupported: '桌面交互请求',
     }[kind],
     description: complete ? description : description.slice(0, 100000) + '\n请在桌面查看完整审批。',
@@ -149,7 +160,8 @@ export function normalizeRequest(request: any, items: any[]): ConversationReques
     url,
     actionable:
       complete &&
-      (kind === 'question' ||
+      ((kind === 'plan' && typeof p.planContent === 'string' && !!p.planContent.trim() && !!p.turnId) ||
+        kind === 'question' ||
         (kind === 'permissions' && !!options?.length) ||
         (kind === 'elicitation' && (!!form || !!url)) ||
         (kind === 'file' && !!changes?.length) ||

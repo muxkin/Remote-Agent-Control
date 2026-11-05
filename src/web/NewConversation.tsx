@@ -1,106 +1,221 @@
+import { remoteFetch, deviceSession } from './device-session';
 import { useEffect, useState } from 'react';
+import type { ProjectSummary, ThreadView } from '../shared/types';
+import { ChatComposer } from './ChatComposer';
+import type { ChatDraft } from './chat-drafts';
+import { ModelSettings, modelLabel, type ModelUpdate } from './ModelSettings';
+import { ThreadTools } from './ThreadTools';
+import { Icon } from './Icon';
+
 export interface NewConversationInput {
-  title: string;
+  title?: string;
   prompt: string;
   projectId?: string;
+  model?: string;
+  thinking?: string;
 }
 export function NewConversation({
   anchor,
   disabled,
+  active,
   onCreate,
-  initiallyOpen = false,
   defaultProject,
+  knownProjects,
+  onDirtyChange,
+  feedback,
 }: {
   anchor: string;
   disabled: boolean;
+  active: boolean;
   onCreate: (input: NewConversationInput) => void;
-  initiallyOpen?: boolean;
   defaultProject?: string;
+  knownProjects: ProjectSummary[];
+  onDirtyChange: (dirty: boolean) => void;
+  feedback?: string;
 }) {
-  const [open, setOpen] = useState(initiallyOpen),
-    [title, setTitle] = useState('手机新会话'),
-    [prompt, setPrompt] = useState(''),
-    [projectId, setProjectId] = useState(defaultProject ?? '');
-  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]),
-    [error, setError] = useState('');
-  async function show() {
-    setOpen((v) => !v);
-    if (open) return;
-    await loadProjects();
-  }
-  async function loadProjects() {
-    try {
-      const response = await fetch(`/api/threads/${anchor}/projects`);
-      const data = await response.json();
-      if (!response.ok) throw Error(data.error);
-      setProjects(data.projects);
-      if (projectId && !data.projects.some((p: { id: string }) => p.id === projectId)) setProjectId('');
-    } catch {
-      setError('暂时无法列出项目；仍可创建独立会话。');
-    }
-  }
+  const [title, setTitle] = useState('');
+  const [draft, setDraft] = useState<ChatDraft>({ text: '', uploads: [], skills: [], plugins: [] });
+  const [projectId, setProjectId] = useState(defaultProject ?? '');
+  const [projects, setProjects] = useState<{ id: string; name: string }[] | null>(null);
+  const choices = projects ?? knownProjects;
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [settings, setSettings] = useState<ModelUpdate>();
   useEffect(() => {
-    if (initiallyOpen) void loadProjects();
-  }, []);
+    setProjectId(defaultProject ?? '');
+  }, [defaultProject]);
+  useEffect(() => {
+    onDirtyChange(!!draft.text.trim() || !!title.trim() || !!settings);
+    return () => onDirtyChange(false);
+  }, [draft.text, title, settings, onDirtyChange]);
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    setLoading(true);
+    setError('');
+    let disposed = false;
+    void deviceSession
+      .cached<{ projects: { id: string; name: string }[] }>(`/threads/${anchor}/projects`)
+      .then((cached) => {
+        if (cached && !disposed) {
+          setProjects(cached.projects);
+          setLoading(false);
+        }
+      });
+    remoteFetch(`/api/threads/${anchor}/projects`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw Error();
+        if (!disposed) setProjects(data.projects);
+      })
+      .catch(() => {
+        if (!disposed) setError('项目目录更新失败，可以重试；已填写的消息会保留。');
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        if (!disposed) setLoading(false);
+      });
+    return () => {
+      disposed = true;
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [active, anchor, refresh]);
+  if (!active) return null;
+  const modelView: ThreadView = {
+    id: anchor,
+    title: '',
+    cwd: '',
+    updatedAt: 0,
+    revision: 0,
+    owner: true,
+    synchronized: true,
+    activeTurnId: null,
+    runtimeStatus: 'idle',
+    messages: [],
+    pendingRequests: 0,
+    canSend: true,
+    canInterrupt: false,
+    reason: null,
+    model: settings?.model ?? null,
+    reasoningEffort: settings?.effort ?? null,
+    mode: 'default',
+  };
   return (
     <div className="new-conversation">
-      {!initiallyOpen && (
-        <button className="secondary" disabled={disabled} onClick={() => void show()}>
-          新建会话
-        </button>
-      )}
-      {open && (
-        <form
-          className="new-conversation-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onCreate({ title, prompt, ...(projectId ? { projectId } : {}) });
-          }}
-        >
-          <label>
-            会话标题
-            <input
-              aria-label="新会话标题"
-              value={title}
-              maxLength={160}
-              required
+      <div className="new-conversation-fields">
+        <label>
+          项目
+          <select
+            aria-label="新会话项目"
+            value={projectId}
+            disabled={disabled}
+            onChange={(e) => setProjectId(e.target.value)}
+          >
+            <option value="">独立会话</option>
+            {projectId && !choices.some((p) => p.id === projectId) && (
+              <option value={projectId}>当前项目</option>
+            )}
+            {choices.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <details className="optional-title">
+          <summary>自定义标题（可选）</summary>
+          <input
+            aria-label="新会话标题（可选）"
+            placeholder="留空，由 Codex 自动命名"
+            value={title}
+            maxLength={160}
+            disabled={disabled}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+        </details>
+        <div className="project-load-status" role="status">
+          {loading
+            ? '正在更新项目目录，你可以先写消息。'
+            : error || (title.trim() ? '将使用自定义标题。' : '标题会根据第一条消息自动生成。')}
+          {error && (
+            <button className="text-button" onClick={() => setRefresh((n) => n + 1)}>
+              重试
+            </button>
+          )}
+        </div>
+      </div>
+      <section className="composer new-conversation-composer">
+        {feedback && (
+          <p className="hint" role="status">
+            {feedback}
+          </p>
+        )}
+        <ChatComposer
+          value={draft}
+          onChange={(change) =>
+            setDraft((old) => (typeof change === 'function' ? change(old) : { ...old, ...change }))
+          }
+          disabled={disabled}
+          sendDisabled={disabled || !draft.text.trim()}
+          placeholder="发送第一条消息，开始新会话…"
+          onSubmit={() =>
+            onCreate({
+              prompt: draft.text,
+              ...(title.trim() ? { title: title.trim() } : {}),
+              ...(projectId ? { projectId } : {}),
+              ...(settings ? { model: settings.model, thinking: settings.effort } : {}),
+            })
+          }
+          actions={
+            <button
+              type="button"
+              className="composer-model"
+              aria-label="模型设置"
+              onClick={() => setModelOpen(true)}
               disabled={disabled}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-          </label>
-          <label>
-            项目
-            <select
-              aria-label="新会话项目"
-              value={projectId}
-              disabled={disabled}
-              onChange={(e) => setProjectId(e.target.value)}
             >
-              <option value="">独立会话</option>
-              {projects.map((p) => (
-                <option value={p.id} key={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            第一条消息
-            <textarea
-              aria-label="新会话第一条消息"
-              value={prompt}
-              maxLength={16000}
-              required
-              disabled={disabled}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </label>
-          <p className="hint">在原桌面创建，使用桌面默认模型和权限。</p>
-          {error && <p className="hint">{error}</p>}
-          <button className="primary" disabled={disabled || !title.trim() || !prompt.trim()}>
-            创建并发送
-          </button>
-        </form>
+              <span>{settings ? modelLabel(settings.model) : '桌面默认模型'}</span>
+              <Icon name="down" size={16} />
+            </button>
+          }
+        />
+        <p className="hint creation-capabilities">首条消息支持文字；附件、技能与计划模式可在创建后使用。</p>
+      </section>
+      {modelOpen && (
+        <ThreadTools
+          open
+          className="settings-sheet"
+          onClose={() => setModelOpen(false)}
+          title="用于新会话的第一轮任务"
+          heading="模型设置"
+        >
+          <ModelSettings
+            view={modelView}
+            disabled={disabled}
+            creation
+            onSave={async (value) => {
+              setSettings(value);
+              setModelOpen(false);
+              return undefined;
+            }}
+            onApplied={() => setModelOpen(false)}
+          />
+          {settings && (
+            <button
+              className="secondary"
+              onClick={() => {
+                setSettings(undefined);
+                setModelOpen(false);
+              }}
+            >
+              使用桌面默认模型
+            </button>
+          )}
+        </ThreadTools>
       )}
     </div>
   );

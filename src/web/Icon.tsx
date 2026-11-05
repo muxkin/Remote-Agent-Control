@@ -1,5 +1,9 @@
 import type { CSSProperties } from 'react';
 const paths = {
+  chat: 'M21 11a8 8 0 0 1-8 8H7l-4 3V11a9 9 0 0 1 18 0Z',
+  user: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21v-2a8 8 0 0 1 16 0v2',
+  trash: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7',
+
   back: 'm14 5-7 7 7 7',
   chevron: 'm9 5 7 7-7 7',
   arrow: 'M4 12h16m-6-6 6 6-6 6',

@@ -1,3 +1,4 @@
+import { remoteFetch, deviceSession } from './device-session';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import type { Message } from '../shared/types';
 import { DiffView } from './DiffView';
@@ -24,7 +25,14 @@ export function MessageContent({
   async function expand() {
     setBusy(true);
     try {
-      const response = await fetch(
+      const cached = await deviceSession.cached<{ message: Message }>(
+        `/threads/${threadId}/content?messageId=${encodeURIComponent(message.id)}`,
+      );
+      if (cached) {
+        setFull(cached.message);
+        setBusy(false);
+      }
+      const response = await remoteFetch(
         `/api/threads/${threadId}/content?messageId=${encodeURIComponent(message.id)}`,
       );
       const data = await response.json();
@@ -84,11 +92,17 @@ export function MessageContent({
           <pre>{displayed.details}</pre>
         </details>
       )}
-      {displayed.truncated && (
+      {(displayed.truncated || displayed.deferred) && (
         <div className="content-expansion">
-          <p className="hint">这条内容较长，当前显示预览。{streaming ? '任务完成后可展开全文。' : ''}</p>
-          <button className="secondary" disabled={busy || streaming} onClick={() => void expand()}>
-            {busy ? '正在读取…' : '展开完整内容'}
+          {!displayed.deferred && (
+            <p className="hint">这条内容较长，当前显示预览。{streaming ? '任务完成后可展开全文。' : ''}</p>
+          )}
+          <button
+            className="secondary"
+            disabled={busy || (streaming && !displayed.deferred)}
+            onClick={() => void expand()}
+          >
+            {busy ? '正在读取…' : displayed.deferred ? '展开活动详情' : '展开完整内容'}
           </button>
           {error && <p role="alert">{error}</p>}
         </div>

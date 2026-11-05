@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { DesktopAdapter } from './desktop.js';
+import type { DesktopBackend } from './desktop-backend.js';
 import { Store } from './store.js';
 import { DeliveryError } from './transport.js';
 import { turnsOf, orderedEntities } from './timeline.js';
@@ -11,7 +11,7 @@ export class Operations extends EventEmitter {
   private release = new Map<string, () => void>();
   private timers = new Map<string, NodeJS.Timeout>();
   constructor(
-    private desktop: DesktopAdapter,
+    private desktop: DesktopBackend,
     private store: Store,
   ) {
     super();
@@ -28,6 +28,14 @@ export class Operations extends EventEmitter {
   private async execute(operation: Operation, input: string): Promise<void> {
     const { id, threadId, kind } = operation;
     try {
+      // Creation uses Desktop's app-tools socket, not the anchor's history stream.
+      if (kind === 'create') {
+        this.update(id, 'dispatching');
+        const resultId = await this.desktop.control(threadId, kind, input, id);
+        if (resultId) this.store.resultThread(id, resultId);
+        this.update(id, 'completed');
+        return;
+      }
       const release = await this.desktop.acquire(threadId);
       this.release.set(id, release);
       if (kind === 'open') await this.desktop.openThread(threadId);
@@ -35,8 +43,7 @@ export class Operations extends EventEmitter {
       if (!view?.synchronized) throw new DeliveryError('桌面会话尚未同步，请先在桌面打开', true);
       this.update(id, 'dispatching');
       const resultId = await this.desktop.control(threadId, kind, input, id);
-      if (kind === 'create' && resultId) this.store.resultThread(id, resultId);
-      const turnId = kind === 'create' ? null : resultId;
+      const turnId = resultId;
       const current = this.store.operation(id)!;
       if (!['completed', 'interrupted', 'failed'].includes(current.state))
         this.update(

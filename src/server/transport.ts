@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { encodeFrame, FrameReader } from './framing.js';
 import type { Config } from './config.js';
+import { platformRuntime } from './platform.js';
 
 export class DeliveryError extends Error {
   constructor(
@@ -32,10 +33,10 @@ export class DesktopTransport extends EventEmitter implements RpcTransport {
   }
   async connect(): Promise<void> {
     if (this.child) throw new Error('Transport already started');
-    const child = spawn(
-      'python3',
-      ['-I', '-B', this.config.bridgePath, this.config.socketPath, `${this.config.desktopRoot}/ChatGPT`],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
+    const child = (this.config.platform ?? platformRuntime()).verifiedPipe(
+      this.config.bridgePath,
+      this.config.socketPath,
+      this.config.desktopRoot,
     );
     this.child = child;
     const reader = new FrameReader();

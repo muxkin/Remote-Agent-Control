@@ -2,18 +2,18 @@ import { readConfig } from './config.js';
 import { Store } from './store.js';
 import { HistoryIndex } from './history.js';
 import { DesktopAdapter } from './desktop.js';
-import { buildGateway } from './gateway.js';
+import { HostService } from './host-service.js';
 
 process.umask(0o077);
 const config = readConfig();
 const store = new Store(config.stateDir);
 const history = new HistoryIndex(config.codexHome);
 const desktop = new DesktopAdapter(config);
-const app = await buildGateway(config, { store, history, desktop });
-await app.listen({ host: '127.0.0.1', port: config.port });
+const host = await HostService.create(config, { store, history, desktop });
 store.recover();
 await desktop.start();
-console.log(`Codex Pocket Remote listening on 127.0.0.1:${config.port}; browser origin: ${config.origin}`);
+host.start();
+console.log(`Codex Pocket Remote v2 connecting to ${config.origin}; no inbound business port`);
 console.log(
   `Desktop connected: ${desktop.status().connected}; controls enabled: ${desktop.status().writesEnabled}`,
 );
@@ -21,7 +21,7 @@ let closing = false;
 async function close() {
   if (closing) return;
   closing = true;
-  await app.close();
+  host.stop();
   desktop.stop();
   history.close();
   store.close();

@@ -1,3 +1,4 @@
+import { remoteFetch } from './device-session';
 import { useEffect, useRef, useState } from 'react';
 import type { ProjectSummary, ThreadSummary } from '../shared/types';
 import { Icon } from './Icon';
@@ -13,7 +14,6 @@ export function ThreadNavigation({
   onRefresh,
   onMore,
   onCreate,
-  onLogout,
   pendingQuestions,
 }: {
   projects: { projects: ProjectSummary[]; total: number; ungrouped: number };
@@ -26,10 +26,9 @@ export function ThreadNavigation({
   onRefresh: () => void;
   onMore: () => void;
   onCreate: (projectId?: string) => void;
-  onLogout: () => void;
   pendingQuestions: number;
 }) {
-  const [tab, setTab] = useState<'recent' | 'projects'>('projects'),
+  const [tab, setTab] = useState<'recent' | 'projects'>('recent'),
     [query, setQuery] = useState(''),
     [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState(new Set<string>()),
@@ -37,8 +36,7 @@ export function ThreadNavigation({
   const [searchPage, setSearchPage] = useState<Page>(),
     [searching, setSearching] = useState(false);
   const [busy, setBusy] = useState(new Set<string>()),
-    [error, setError] = useState(''),
-    [connectionOpen, setConnectionOpen] = useState(false);
+    [error, setError] = useState('');
   const generation = useRef(0);
   const searchGeneration = useRef(0);
   useEffect(() => {
@@ -53,7 +51,7 @@ export function ThreadNavigation({
     }
     const controller = new AbortController();
     setSearching(true);
-    fetch(`/api/threads?q=${encodeURIComponent(search)}`, { signal: controller.signal })
+    remoteFetch(`/api/threads?q=${encodeURIComponent(search)}`, { signal: controller.signal })
       .then(async (r) => {
         if (!r.ok) throw Error('搜索失败，请重试');
         return r.json();
@@ -81,7 +79,7 @@ export function ThreadNavigation({
     try {
       const q = new URLSearchParams({ project: id });
       if (next) q.set('cursor', next);
-      const r = await fetch(`/api/threads?${q}`);
+      const r = await remoteFetch(`/api/threads?${q}`);
       if (!r.ok) throw Error('项目会话加载失败');
       const data: Page = await r.json();
       if (epoch === generation.current)
@@ -117,7 +115,7 @@ export function ThreadNavigation({
     const current = search;
     setSearching(true);
     try {
-      const r = await fetch(
+      const r = await remoteFetch(
         `/api/threads?${new URLSearchParams({ q: current, cursor: searchPage.nextCursor })}`,
       );
       if (!r.ok) throw Error('搜索失败，请重试');
@@ -154,7 +152,7 @@ export function ThreadNavigation({
   return (
     <aside className="sidebar">
       <header className="sidebar-head">
-        <h1>会话</h1>
+        <h1>工作台</h1>
         <button
           className="new-thread-button"
           disabled={!threads.length && !selected}
@@ -164,6 +162,15 @@ export function ThreadNavigation({
           新会话
         </button>
       </header>
+      <div className="workspace-tool">
+        <span className="tool-avatar">
+          <Icon name="monitor" size={25} />
+        </span>
+        <div>
+          <strong>Codex</strong>
+          <span>项目与任务</span>
+        </div>
+      </div>
       <label className="search-field nav-search">
         <Icon name="search" size={20} />
         <input
@@ -261,24 +268,6 @@ export function ThreadNavigation({
           ))
         )}
       </nav>
-      <footer className="connection-footer">
-        <button
-          className="connection-summary"
-          aria-expanded={connectionOpen}
-          onClick={() => setConnectionOpen(!connectionOpen)}
-        >
-          <Icon name="monitor" size={22} />
-          <span className={`dot ${connected ? 'online' : ''}`} />
-          <span>{connected ? '桌面已连接' : '桌面未连接'}</span>
-          <Icon name={connectionOpen ? 'down' : 'chevron'} size={18} />
-        </button>
-        {connectionOpen && (
-          <div className="connection-details">
-            <small>本机 · 私有连接</small>
-            <button onClick={onLogout}>解除配对</button>
-          </div>
-        )}
-      </footer>
     </aside>
   );
 }

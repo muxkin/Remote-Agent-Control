@@ -9,7 +9,7 @@ import { Store } from '../src/server/store.js';
 import { HistoryIndex } from '../src/server/history.js';
 import { DesktopAdapter } from '../src/server/desktop.js';
 import { DesktopAppTools } from '../src/server/app-tools.js';
-import { buildGateway } from '../src/server/gateway.js';
+import { buildGateway } from '../test/legacy/gateway.js';
 const callbacks: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const f of callbacks.splice(0)) await f();
@@ -290,6 +290,58 @@ it('native creation result is journaled and never replayed on repeated HTTP requ
   } finally {
     create.mockRestore();
   }
+});
+it.each([undefined, '', '  '])(
+  'creates without a title (%s) or an anchor history subscription',
+  async (title) => {
+    const create = vi.spyOn(DesktopAppTools.prototype, 'create').mockResolvedValue(randomUUID());
+    try {
+      const { app, headers, store, transport } = await setup();
+      transport.autoSnapshot = false;
+      const requestId = randomUUID();
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/threads/${THREAD}/create`,
+        headers,
+        payload: { requestId, prompt: 'Only an opening message', ...(title === undefined ? {} : { title }) },
+      });
+      expect(response.statusCode).toBe(202);
+      await vi.waitFor(() => expect(store.operation(requestId)?.state).toBe('completed'));
+      expect(transport.calls).toHaveLength(0);
+      expect(transport.broadcasts).toHaveLength(0);
+      expect(create).toHaveBeenCalledOnce();
+    } finally {
+      create.mockRestore();
+    }
+  },
+);
+it('keeps creation disabled for a read-only desktop even without an anchor subscription', async () => {
+  const create = vi.spyOn(DesktopAppTools.prototype, 'create').mockResolvedValue(randomUUID());
+  try {
+    const { app, headers, store } = await setup((config) => {
+      config.readOnly = true;
+    });
+    const requestId = randomUUID();
+    await app.inject({
+      method: 'POST',
+      url: `/api/threads/${THREAD}/create`,
+      headers,
+      payload: { requestId, prompt: 'hello' },
+    });
+    await vi.waitFor(() => expect(store.operation(requestId)?.state).toBe('rejected'));
+    expect(create).not.toHaveBeenCalled();
+  } finally {
+    create.mockRestore();
+  }
+});
+it('returns a thread summary without reading its rollout for post-creation navigation', async () => {
+  const { app, headers, c } = await setup();
+  rmSync(join(c.codexHome, 'sessions'), { recursive: true });
+  const response = await app.inject({ url: `/api/threads/${THREAD}`, headers });
+  expect(response.statusCode).toBe(200);
+  expect(response.json().thread).toMatchObject({ id: THREAD, title: '测试会话' });
+  expect(response.json().thread.rolloutPath).toBeUndefined();
+  expect(response.json().messages).toBeUndefined();
 });
 it('validates advertised speed tiers before accepting an operation', async () => {
   const { app, headers, c, transport } = await setup();

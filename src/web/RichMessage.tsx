@@ -1,3 +1,4 @@
+import { remoteFetch } from './device-session';
 import { Icon } from './Icon';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown, { defaultUrlTransform, type Components } from 'react-markdown';
@@ -149,7 +150,7 @@ export function Media({ src, label, threadId }: { src: string; label: string; th
       return;
     }
     const controller = new AbortController();
-    void fetch(`/api/threads/${threadId}/media`, {
+    void remoteFetch(`/api/threads/${threadId}/media`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: src }),
@@ -248,7 +249,7 @@ export function LocalLink({
   async function open() {
     const tab = window.open('about:blank', '_blank');
     try {
-      const response = await fetch(`/api/threads/${threadId}/media`, {
+      const response = await remoteFetch(`/api/threads/${threadId}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: href }),

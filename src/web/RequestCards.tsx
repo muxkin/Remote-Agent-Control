@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { PlanRequestCard } from './PlanRequestCard';
 import { QuestionCard } from './QuestionCard';
 import type { Operation, ConversationRequest, RequestResponse } from '../shared/types';
 import { DiffView } from './DiffView';
@@ -6,6 +7,7 @@ export type { RequestResponse } from '../shared/types';
 
 export function RequestCards({
   requests,
+  threadId,
   disabled,
   onRespond,
   response,
@@ -14,13 +16,24 @@ export function RequestCards({
   onDraftChange?: (id: string, dirty: boolean) => void;
   response?: Operation;
   requests: ConversationRequest[];
+  threadId?: string;
   disabled: boolean;
-  onRespond: (response: RequestResponse) => void;
+  onRespond: (response: RequestResponse) => void | Promise<string | undefined>;
 }) {
   return (
     <div className="request-cards">
       {requests.map((request) =>
-        ['question', 'async-question'].includes(request.kind) && request.questions?.length ? (
+        request.kind === 'plan' ? (
+          <PlanRequestCard
+            key={`${request.id}:${request.fingerprint}`}
+            request={request}
+            threadId={threadId ?? ''}
+            disabled={disabled}
+            onRespond={onRespond}
+            onDraftChange={onDraftChange}
+            response={response}
+          />
+        ) : ['question', 'async-question'].includes(request.kind) && request.questions?.length ? (
           <QuestionCard
             key={`${request.id}:${request.fingerprint}`}
             request={request}

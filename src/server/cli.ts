@@ -1,8 +1,7 @@
 import { readConfig } from './config.js';
 import { Store } from './store.js';
 import { createPairingDisplay } from './pairing-display.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { platformRuntime } from './platform.js';
 process.umask(0o077);
 const config = readConfig();
 const store = new Store(config.stateDir);
@@ -19,7 +18,7 @@ try {
     console.log(`备用链接：${display.link}`);
     if (process.argv.includes('--open')) {
       try {
-        await promisify(execFile)('xdg-open', [display.pagePath], { timeout: 5000 });
+        await platformRuntime().openFile(display.pagePath);
       } catch {
         console.error(`未能自动打开浏览器，请在电脑打开上方大图页面。`);
       }

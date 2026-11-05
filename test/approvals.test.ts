@@ -13,6 +13,25 @@ const request = (method: string, params: Record<string, unknown>) => ({
 });
 const target = { targetRequestId: '42', expectedTurnId: turn };
 describe('native approval boundaries', () => {
+  it('requires a bound plan decision and feedback only for revisions', () => {
+    const base = {
+      requestId: crypto.randomUUID(),
+      ...target,
+      expectedFingerprint: 'a'.repeat(64),
+      planDecision: 'implement',
+    };
+    expect(responseBody.safeParse(base).success).toBe(true);
+    expect(
+      responseBody.safeParse({ ...base, planDecision: 'revise', feedback: 'Adjust step 2' }).success,
+    ).toBe(true);
+    for (const extra of [
+      { expectedFingerprint: undefined },
+      { planDecision: 'revise' },
+      { decision: 'accept' },
+      { feedback: 'unexpected' },
+    ])
+      expect(responseBody.safeParse({ ...base, ...extra }).success).toBe(false);
+  });
   it('shows file changes from the matching native item', () => {
     const r = normalizeRequest(request('item/fileChange/requestApproval', { itemId: 'file' }), [
       { id: 'file', changes: [{ path: '/work/a.ts', kind: { type: 'add' }, diff: '+new' }] },

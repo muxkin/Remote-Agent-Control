@@ -104,13 +104,15 @@ export class HistoryIndex {
     };
   }
   get(id: string): (ThreadSummary & { rolloutPath: string }) | null {
-    return (
-      (this.database()
-        .prepare(
-          'SELECT id,COALESCE(name,title) AS title,cwd,updated_at_ms AS updatedAt,rollout_path AS rolloutPath FROM threads WHERE id=?',
-        )
-        .get(id) as any) ?? null
-    );
+    const { names, memberships } = this.projectIndex.snapshot(this.database());
+    const row = this.database()
+      .prepare(
+        `SELECT t.id,COALESCE(t.name,t.title) AS title,t.cwd,t.updated_at_ms AS updatedAt,
+           t.rollout_path AS rolloutPath,COALESCE(t.project_id,a.value) AS projectId
+           FROM threads t LEFT JOIN json_each(?) a ON a.key=t.id WHERE t.id=?`,
+      )
+      .get(memberships, id) as (ThreadSummary & { rolloutPath: string }) | undefined;
+    return row ? { ...row, projectName: names.get(row.projectId!) ?? null } : null;
   }
   async path(id: string): Promise<string> {
     const row = this.get(id);

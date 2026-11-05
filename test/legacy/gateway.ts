@@ -1,5 +1,6 @@
-import { loadStorage } from './object-storage.js';
-import { webBuildReader } from './web-build.js';
+// V1 regression fixture only. Not included in any production entrypoint.
+import { loadStorage } from '../../src/server/object-storage.js';
+import { webBuildReader } from '../../src/server/web-build.js';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import staticFiles from '@fastify/static';
@@ -7,25 +8,25 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import type { Config } from './config.js';
-import { Store, ConflictError } from './store.js';
-import { DesktopAdapter } from './desktop.js';
-import { HistoryIndex } from './history.js';
-import { Operations } from './operations.js';
-import type { ServerEvent, ThreadView } from '../shared/types.js';
-import { diffViews } from '../shared/delta.js';
-import { modelCatalog, validateModelSettings } from './models.js';
-import { SkillCatalog } from './skills.js';
-import { PluginCatalog } from './plugins.js';
-import { SelectionError } from './selection-error.js';
-import { MediaService, authorizeFile, mediaTypes } from './media.js';
+import type { Config } from '../../src/server/config.js';
+import { Store, ConflictError } from '../../src/server/store.js';
+import { DesktopAdapter } from '../../src/server/desktop.js';
+import { HistoryIndex } from '../../src/server/history.js';
+import { Operations } from '../../src/server/operations.js';
+import type { ServerEvent, ThreadView } from '../../src/shared/types.js';
+import { diffViews } from '../../src/shared/delta.js';
+import { modelCatalog, validateModelSettings } from '../../src/server/models.js';
+import { SkillCatalog } from '../../src/server/skills.js';
+import { PluginCatalog } from '../../src/server/plugins.js';
+import { SelectionError } from '../../src/server/selection-error.js';
+import { MediaService, authorizeFile, mediaTypes } from '../../src/server/media.js';
 import { createReadStream } from 'node:fs';
 import { basename, extname } from 'node:path';
 import { PeerEvents } from './peer-events.js';
-import { Uploads, uploadSpec } from './uploads.js';
-import { creationBody } from './app-tools.js';
-import { responseBody } from './approvals.js';
-import { WebSocketOutput } from './websocket-output.js';
+import { Uploads, uploadSpec } from '../../src/server/uploads.js';
+import { creationBody } from '../../src/server/app-tools.js';
+import { responseBody } from '../../src/server/approvals.js';
+import { WebSocketOutput } from '../../src/server/websocket-output.js';
 
 const uuid = z.string().uuid();
 const params = z.object({ id: uuid });
@@ -359,15 +360,27 @@ export async function buildGateway(
     const { rolloutPath: _, ...summary } = thread;
     return { thread: summary, ...(await history.page(id, pageQuery.parse(req.query).cursor)) };
   });
+  app.get('/api/threads/:id', async (req, reply) => {
+    const thread = history.get(params.parse(req.params).id);
+    if (!thread) return reply.code(404).send({ error: '找不到此会话' });
+    const { rolloutPath: _, ...summary } = thread;
+    return { thread: summary };
+  });
   app.get('/api/threads/:id/projects', async (req, reply) => {
     const { id } = params.parse(req.params);
     if (!history.get(id)) return reply.code(404).send({ error: '找不到此会话' });
-    return { projects: await desktop.projects(id) };
+    return { projects: (await desktop.projects(id)).map(({ id, name }) => ({ id, name })) };
   });
   app.post('/api/threads/:id/create', async (req, reply) => {
     const { id } = params.parse(req.params);
     const { requestId, ...value } = creationBody.parse(req.body);
     if (!history.get(id)) return reply.code(404).send({ error: '找不到此会话' });
+    if (value.thinking && !value.model) throw new SelectionError('请先选择模型');
+    if (value.model) {
+      const model = (await modelCatalog(config.codexHome)).models.find((m) => m.id === value.model);
+      if (!model || (value.thinking && !model.efforts.includes(value.thinking)))
+        throw new SelectionError('模型或推理强度不在桌面目录中，请重新选择');
+    }
     return reply
       .code(202)
       .send(
@@ -497,6 +510,7 @@ export async function buildGateway(
       let published: ThreadView | null = null;
       let peer: PeerEvents | undefined;
       let peerAttempted = false;
+      let previewTimer: NodeJS.Timeout | undefined;
       const output = new WebSocketOutput(ws);
       const send = (event: ServerEvent): boolean => {
         if (ws.readyState !== WebSocket.OPEN) return false;
@@ -516,6 +530,7 @@ export async function buildGateway(
         return send({ type: 'status', status: current });
       };
       const publish = (view: ThreadView) => {
+        if (view.synchronized) clearTimeout(previewTimer);
         const delivered =
           published && published.id === view.id
             ? send({ type: 'threadDelta', delta: diffViews(published, view) })
@@ -675,11 +690,39 @@ export async function buildGateway(
         peer?.close();
         clearInterval(ping);
         clearTimeout(flush);
+        clearTimeout(previewTimer);
         release?.();
         desktop.off('status', onStatus);
         desktop.off('thread', onThread);
         operations.off('operation', onOperation);
       });
+      // Reading history should not wait on owner discovery or a full Desktop snapshot.
+      // Give the usually fast live stream a head start to avoid downloading both.
+      const preview = async () => {
+        if (closed || published) return;
+        const page = await history.page(threadId);
+        if (closed || published) return;
+        publish({
+          id: thread.id,
+          title: thread.title,
+          cwd: thread.cwd,
+          updatedAt: thread.updatedAt,
+          messages: page.messages,
+          revision: -1,
+          owner: false,
+          synchronized: false,
+          activeTurnId: null,
+          runtimeStatus: 'notLoaded',
+          model: null,
+          pendingRequests: 0,
+          canSend: false,
+          canInterrupt: false,
+          reason: desktop.observation(threadId).reason,
+        });
+      };
+      previewTimer = setTimeout(() => {
+        void preview().catch(() => {});
+      }, 700);
       void (async () => {
         release = await desktop.acquire(threadId);
         if (closed) {
@@ -689,29 +732,7 @@ export async function buildGateway(
         const view = await desktop.waitForView(threadId);
         if (closed) return;
         if (view) publish(view);
-        else {
-          const page = await history.page(threadId);
-          send({
-            type: 'thread',
-            thread: {
-              id: thread.id,
-              title: thread.title,
-              cwd: thread.cwd,
-              updatedAt: thread.updatedAt,
-              messages: page.messages,
-              revision: -1,
-              owner: false,
-              synchronized: false,
-              activeTurnId: null,
-              runtimeStatus: 'notLoaded',
-              model: null,
-              pendingRequests: 0,
-              canSend: false,
-              canInterrupt: false,
-              reason: desktop.observation(threadId).reason,
-            },
-          });
-        }
+        else await preview();
         for (const operation of store.recent(device.id, threadId)) send({ type: 'operation', operation });
       })().catch(() => send({ type: 'error', message: '无法订阅此会话，请刷新后重试' }));
     });

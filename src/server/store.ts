@@ -1,28 +1,27 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
-import { mkdirSync, chmodSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Operation, OperationState } from '../shared/types.js';
+import { platformRuntime, type PlatformRuntime } from './platform.js';
 
 const hash = (x: string) => createHash('sha256').update(x).digest('hex');
 export class ConflictError extends Error {}
 export class Store {
   private db: DatabaseSync;
-  constructor(directory: string) {
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    if (lstatSync(directory).isSymbolicLink() || lstatSync(directory).uid !== process.getuid?.())
-      throw new Error('Unsafe state directory');
-    chmodSync(directory, 0o700);
+  constructor(directory: string, runtime: PlatformRuntime = platformRuntime()) {
+    runtime.privateDirectory(directory);
     const file = join(directory, 'state.sqlite');
     this.db = new DatabaseSync(file);
-    chmodSync(file, 0o600);
+    runtime.privateFile(file);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;
       CREATE TABLE IF NOT EXISTS pairing (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
         created INTEGER NOT NULL, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, thread_id TEXT NOT NULL,
         kind TEXT NOT NULL, fingerprint TEXT NOT NULL, state TEXT NOT NULL, turn_id TEXT, error TEXT,
-        created INTEGER NOT NULL, updated INTEGER NOT NULL);`);
+        created INTEGER NOT NULL, updated INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS device_keys (peer_id TEXT PRIMARY KEY, device_id TEXT NOT NULL,
+        route_ticket TEXT UNIQUE NOT NULL);`);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const columns = this.db.prepare('PRAGMA table_info(operations)').all();
@@ -44,9 +43,14 @@ export class Store {
     this.db.prepare('INSERT INTO pairing VALUES (?, ?)').run(hash(code), expiresAt);
     return { code, expiresAt };
   }
-  pair(code: string, name: string): { token: string; deviceId: string } | null {
+  pair(
+    code: string,
+    name: string,
+    peerId?: string,
+  ): { token: string; deviceId: string; routeTicket?: string } | null {
     const token = randomBytes(32).toString('base64url');
     const deviceId = randomUUID();
+    const routeTicket = randomBytes(32).toString('base64url');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const changed = this.db
@@ -59,8 +63,18 @@ export class Store {
       this.db
         .prepare('INSERT INTO devices (id,name,token_hash,created,expires) VALUES (?,?,?,?,?)')
         .run(deviceId, name, hash(token), Date.now(), Date.now() + 30 * 86400000);
+      if (peerId) {
+        this.db
+          .prepare(
+            'UPDATE devices SET revoked=1 WHERE id IN (SELECT device_id FROM device_keys WHERE peer_id=?)',
+          )
+          .run(peerId);
+        this.db
+          .prepare('INSERT OR REPLACE INTO device_keys VALUES (?,?,?)')
+          .run(peerId, deviceId, routeTicket);
+      }
       this.db.exec('COMMIT');
-      return { token, deviceId };
+      return { token, deviceId, ...(peerId ? { routeTicket } : {}) };
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -76,6 +90,26 @@ export class Store {
   }
   devices(): any[] {
     return this.db.prepare('SELECT id,name,created,expires,revoked FROM devices ORDER BY created DESC').all();
+  }
+  peer(peerId: string): { id: string; name: string; expires: number; ticket: string } | null {
+    return (
+      (this.db
+        .prepare(
+          'SELECT d.id,d.name,d.expires,k.route_ticket AS ticket FROM devices d JOIN device_keys k ON k.device_id=d.id WHERE k.peer_id=? AND d.revoked=0 AND d.expires>?',
+        )
+        .get(peerId, Date.now()) as any) ?? null
+    );
+  }
+  relayRoutes(): { ticket: string; expires: number; peerId?: string }[] {
+    const pairs = this.db
+      .prepare('SELECT hash AS ticket,expires FROM pairing WHERE expires>?')
+      .all(Date.now());
+    const devices = this.db
+      .prepare(
+        'SELECT k.route_ticket AS ticket,d.expires,k.peer_id AS peerId FROM device_keys k JOIN devices d ON d.id=k.device_id WHERE d.revoked=0 AND d.expires>?',
+      )
+      .all(Date.now());
+    return [...pairs, ...devices] as any;
   }
   revoke(id: string): void {
     this.db.prepare('UPDATE devices SET revoked=1 WHERE id=?').run(id);

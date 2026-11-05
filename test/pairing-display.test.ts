@@ -44,8 +44,8 @@ it('keeps QR artifacts private and replaces the preview when a new code is gener
   const second = await createPairingDisplay(config, store.mintPairing());
   expect(first.pagePath).toBe(second.pagePath);
   const html = await readFile(second.pagePath, 'utf8');
-  expect(html).toContain(second.link);
-  expect(html).not.toContain(first.link);
+  expect(html).toContain(second.link.replaceAll('&', '&amp;'));
+  expect(html).not.toContain(first.link.replaceAll('&', '&amp;'));
   expect(html).toContain('data:image/png;base64,');
   expect((await stat(dirname(second.pagePath))).mode & 0o777).toBe(0o700);
   for (const path of [second.pagePath, second.imagePath]) expect((await stat(path)).mode & 0o777).toBe(0o600);

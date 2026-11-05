@@ -144,20 +144,21 @@ export function messagesOf(state: Json, full = false): Message[] {
             item.clientUserMessageId ??
             (type === 'userMessage' ? turn.params?.clientUserMessageId : undefined),
           phase: item.phase,
+          deferred: !full && role === 'tool' ? true : undefined,
           changes:
-            type === 'fileChange' && Array.isArray(item.changes)
+            full && type === 'fileChange' && Array.isArray(item.changes)
               ? item.changes.map((c: any) => ({
                   path: String(c.path ?? ''),
                   kind: String(c.kind?.type ?? c.kind ?? 'update'),
-                  diff: String(c.diff ?? '').slice(0, full ? undefined : 100000),
+                  diff: String(c.diff ?? ''),
                 }))
               : undefined,
           output:
-            type === 'commandExecution'
-              ? String(item.aggregatedOutput ?? item.output ?? '').slice(0, full ? undefined : 100000)
+            full && type === 'commandExecution'
+              ? String(item.aggregatedOutput ?? item.output ?? '')
               : undefined,
           details:
-            role === 'tool'
+            full && role === 'tool'
               ? JSON.stringify(
                   item,
                   (key, value) =>

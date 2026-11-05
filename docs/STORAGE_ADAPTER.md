@@ -1,6 +1,6 @@
 # 对象存储扩展
 
-默认附件通过 Gateway 上传和下载，无需对象存储。静态资源也可同源提供。需要独立存储时，可实现本地适配器，接入自己选择的服务；仓库不附带厂商 SDK 或部署账号。
+附件优先读取手机缓存或通过 WebRTC 直连传输，无需对象存储。无直连时，8 MiB 以内走加密 WSS，更大文件可使用密文对象存储；存储不可用时回退加密 WSS。静态资源可同源提供或使用公共 CDN。仓库不附带厂商 SDK 或部署账号。
 
 ## 加载方式
 
@@ -17,17 +17,19 @@ POCKET_ASSET_ADAPTER=/absolute/path/to/asset-adapter.mjs
 
 ## 接口约定
 
-| 成员                                                               | 约定                                                                                         |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `version`                                                          | 固定为 `1`                                                                                   |
-| `visibility`                                                       | 媒体为 `private`，静态资源为 `public`；工厂必须检查远端实际权限                              |
-| `uploadOrigins`                                                    | 手机直传使用的精确 HTTPS Origin，不包含通配符、路径或凭证；未使用直传可为空                  |
-| `putFile({ key, file, contentType, cacheControl, allowedOrigin })` | 保留本地文件字节、按提供的元数据上传；只创建新对象，返回 `created` 或 `exists`；其他情况抛错 |
-| `downloadUrl(key, expiresAt)`                                      | 媒体必需；返回单个对象的 HTTPS 签名链接，`expiresAt` 为 Unix 毫秒时间戳                      |
-| `createUpload({ key, size, expiresAt })`                           | 媒体必需；返回单对象、精确大小、限定有效期的浏览器上传授权；不得返回长期密钥                 |
-| `remove(key)`                                                      | 可选；删除测试对象，运行 `test:storage` 时必需                                               |
+| 成员                                                                           | 约定                                                                                                           |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `version`                                                                      | 固定为 `1`                                                                                                     |
+| `visibility`                                                                   | 媒体为 `private`，静态资源为 `public`；工厂必须检查远端实际权限                                                |
+| `uploadOrigins`                                                                | 手机直传使用的精确 HTTPS Origin，不包含通配符、路径或凭证；未使用直传可为空                                    |
+| `putFile({ key, file, contentType, cacheControl, allowedOrigin, expiresAt? })` | 按提供的元数据上传；只创建新对象，返回 `created` 或 `exists`；私有文件输入已经加密，`expiresAt` 为对象过期时间 |
+| `downloadUrl(key, expiresAt)`                                                  | 媒体必需；返回单个对象的 HTTPS 签名链接，`expiresAt` 为 Unix 毫秒时间戳                                        |
+| `createUpload({ key, size, expiresAt })`                                       | 媒体必需；返回单对象、精确密文字节数、限定授权有效期的浏览器上传授权；不得返回长期密钥                         |
+| `remove(key)`                                                                  | 生产建议必需；用于成功消费后的清理和遗留对象重试清理；缺失时只能依赖提供方生命周期                             |
 
-公开资源发布只调用 `putFile`。媒体下载授权五分钟有效，手机直传授权十五分钟有效。适配器应设置临时上传对象的过期清理策略，并支持下载 Range。`putFile` 的文本 `contentType` 可能包含 `charset=utf-8`，不得丢弃或重新编码文件。
+公开资源发布只调用 `putFile`，保留公共文件的 MIME、编码及缓存元数据。私有下载授权五分钟有效，上传授权十五分钟有效。授权有效期不等于对象保留时间：私有临时对象另需提供方的 24 小时内清理策略，电脑离线时也应生效。下载应支持 Range，CORS 应允许精确应用 origin、Range 并暴露 Content-Range。
+
+私有附件输入固定为 AES-256-GCM 密文和 `application/octet-stream`，不得上传原始名称、明文哈希或解密密钥。每个内容版本使用独立文件密钥，按 1 MiB 明文块加密；连续块合并为小于 16 MiB 的对象。对象键为 `private-encrypted-v2/` 下的随机标识，与公共资源前缀完全分离。
 
 ## 手机直传
 
@@ -52,7 +54,7 @@ POCKET_ASSET_ADAPTER=/absolute/path/to/asset-adapter.mjs
 }
 ```
 
-网关验证目标属于 `uploadOrigins` 后才返回授权；CSP 仅加入这些精确地址。手机不携带网页 Cookie，不跟随上传重定向。上传完成后，Gateway 下载对象并验证大小与 SHA-256，未通过验证的文件不能作为消息附件。
+网关验证目标属于 `uploadOrigins` 后才返回授权；云端 CSP 需配置对应精确地址。手机不携带网页 Cookie，不跟随上传重定向。手机先加密再上传；Gateway 按块下载、认证解密并验证大小、块哈希和最终文件 SHA-256，未通过验证的文件不能交给桌面。文件清单、原始名称、密钥和临时授权仅通过 Noise 通道传递。
 
 ## 验证
 
@@ -60,4 +62,6 @@ POCKET_ASSET_ADAPTER=/absolute/path/to/asset-adapter.mjs
 npm run test:storage
 ```
 
-测试使用临时文件，检查原始字节、中文文本类型、Range、过期下载链接以及直传后的校验，最后删除临时对象。它不会操作桌面会话。部署时仍需在手机浏览器验证 CORS、视频播放和签名链接续期。
+测试使用临时文件和独立本机状态，验证密文上传、认证解密、完整文件哈希、下载 Range 和二进制 MIME，并检查密文中没有测试明文/文件名，最后删除测试对象。它不会操作桌面会话。部署时仍需在手机浏览器验证 CORS、视频播放，并核实提供方生命周期的实际删除时限。
+
+旧明文对象仅通过运维脚本生成清单：`node --import ./scripts/env.mjs --import tsx scripts/inventory-legacy-storage.ts`。默认不删除；显式 `--clean-verified` 才清理已找到且哈希一致的本机副本对应对象。无副本的条目保留待处理，公共前缀始终排除。适配器可选实现 `list(prefix, marker?)` 供运维清单使用，此接口不向手机开放。清单可能含私有路径和对象名，应保存在私有目录，不纳入公开报告。

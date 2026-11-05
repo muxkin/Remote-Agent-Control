@@ -1,0 +1,17 @@
+import { expect, it } from 'vitest';
+import { readRoute, routeURL, parentRoute } from '../src/web/shell/routes';
+it('restores a host-scoped conversation and keeps browser back destinations explicit', () => {
+  const route = { page: 'workbench' as const, thread: 'chat-123', host: 'host123' };
+  expect(readRoute(new URL(routeURL(route), 'https://app.invalid'))).toEqual(route);
+  expect(parentRoute(route)).toEqual({ page: 'workbench' });
+  expect(readRoute(new URL('https://app.invalid/?page=settings&thread=chat-123'))).toEqual({
+    page: 'settings',
+  });
+});
+it('handles one-use pairing fragments before ordinary routes without reflecting secrets', () => {
+  expect(readRoute(new URL('https://app.invalid/?page=me#pair=secret&host=computer'))).toEqual({
+    page: 'pair',
+  });
+  expect(routeURL({ page: 'pair' })).toBe('/?page=pair');
+  expect(readRoute(new URL('https://app.invalid/?page=unknown'))).toEqual({ page: 'workbench' });
+});

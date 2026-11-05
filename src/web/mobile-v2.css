@@ -960,3 +960,85 @@ button {
   pointer-events: none;
   z-index: 2;
 }
+
+/* Creation uses the chat composer; only project/title metadata belong to the sheet. */
+.new-conversation-sheet {
+  height: min(440px, 88dvh);
+}
+.new-conversation-sheet:has(.optional-title[open]) {
+  height: min(500px, 88dvh);
+}
+.new-conversation-sheet .tools-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+.new-conversation-sheet .new-conversation {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+}
+.new-conversation-fields {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 20px 12px;
+}
+.new-conversation-fields label {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 16px;
+  font-size: 14px;
+}
+.new-conversation-fields select,
+.new-conversation-fields input {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+}
+.optional-title summary {
+  font-size: 14px;
+  color: var(--muted);
+}
+.optional-title input {
+  margin-top: 8px;
+}
+.project-load-status {
+  min-height: 36px;
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--muted);
+}
+.new-conversation-sheet .new-conversation-composer {
+  padding: 8px 20px max(12px, env(safe-area-inset-bottom));
+}
+.new-conversation-composer .creation-capabilities {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+@media (max-height: 520px) {
+  .new-conversation-sheet {
+    height: 94dvh;
+    max-height: 94dvh;
+  }
+  .new-conversation-sheet .question-dialog-head {
+    padding-top: 12px;
+    padding-bottom: 8px;
+  }
+  .new-conversation-sheet .question-dialog-head p,
+  .new-conversation-composer .creation-capabilities {
+    display: none;
+  }
+}

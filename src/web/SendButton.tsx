@@ -8,6 +8,7 @@ export function SendButton({
   canQueue,
   onInterrupt,
   onQueue,
+  hintId = 'send-queue-hint',
 }: {
   running: boolean;
   hasDraft: boolean;
@@ -15,6 +16,7 @@ export function SendButton({
   canQueue: boolean;
   onInterrupt: () => void;
   onQueue: () => void;
+  hintId?: string;
 }) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined),
     handled = useRef(false);
@@ -36,7 +38,7 @@ export function SendButton({
       className={`primary send-button ${pause ? 'pause-button' : ''} ${holding ? 'holding' : ''}`}
       aria-label={pause ? '中断任务' : running ? '追加指令 ↑' : '发送 ↑'}
       title={pause ? '中断当前任务' : canQueue ? '点击直接发送；长按排队下一轮' : '发送'}
-      aria-describedby={canQueue ? 'send-queue-hint' : undefined}
+      aria-describedby={canQueue ? hintId : undefined}
       disabled={disabled}
       onPointerDown={(e) => {
         handled.current = false;

@@ -10,7 +10,7 @@ import { fixtureConfig, historyFixture, FakeTransport, THREAD, TURN, state } fro
 import { Store } from '../src/server/store.js';
 import { HistoryIndex } from '../src/server/history.js';
 import { DesktopAdapter } from '../src/server/desktop.js';
-import { buildGateway } from '../src/server/gateway.js';
+import { buildGateway } from '../test/legacy/gateway.js';
 const c = fixtureConfig();
 historyFixture(c);
 const db = new DatabaseSync(join(c.codexHome, 'state_5.sqlite'));

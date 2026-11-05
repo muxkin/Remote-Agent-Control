@@ -1,24 +1,30 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
+import { type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { FrameReader, encodeFrame } from './framing.js';
 import { DeliveryError } from './transport.js';
 import type { Config } from './config.js';
+import { platformRuntime } from './platform.js';
 export const creationBody = z
   .object({
     requestId: z.string().uuid(),
-    title: z.string().trim().min(1).max(160),
+    title: z.string().trim().max(160).optional(),
     prompt: z.string().trim().min(1).max(16000),
     projectId: z.string().min(1).max(200).optional(),
+    model: z.string().min(1).max(100).optional(),
+    thinking: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional(),
   })
   .strict();
 export interface DesktopProject {
   id: string;
+  desktopId?: string;
   name: string;
   path: string;
 }
 class VerifiedAppPipe {
+  closed = false;
   private child: ChildProcessWithoutNullStreams;
   private pending = new Map<
     string,
@@ -26,10 +32,11 @@ class VerifiedAppPipe {
   >();
   ready: Promise<void>;
   constructor(config: Config, path: string) {
-    this.child = spawn(
-      'python3',
-      ['-I', '-B', config.bridgePath, path, `${config.desktopRoot}/ChatGPT`, '--app-tools'],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
+    this.child = (config.platform ?? platformRuntime()).verifiedPipe(
+      config.bridgePath,
+      path,
+      config.desktopRoot,
+      true,
     );
     const reader = new FrameReader();
     this.child.stdout.on('data', (bytes) => {
@@ -48,6 +55,7 @@ class VerifiedAppPipe {
     });
     this.child.stdin.on('error', () => this.close());
     this.child.on('close', () => {
+      this.closed = true;
       for (const p of this.pending.values()) {
         clearTimeout(p.timer);
         p.reject(new DeliveryError('桌面应用工具连接断开，结果待确认'));
@@ -100,17 +108,31 @@ class VerifiedAppPipe {
     });
   }
   close() {
+    this.closed = true;
     this.child.kill();
   }
 }
 /** A second Desktop-owned socket, restricted here to project listing and native creation. No general tool forwarding. */
 export class DesktopAppTools {
   available = false;
+  private client?: VerifiedAppPipe;
+  private connecting?: Promise<VerifiedAppPipe>;
+  private projectCache?: { value: DesktopProject[]; expires: number };
+  private loadingProjects?: Promise<DesktopProject[]>;
   constructor(private config: Config) {}
-  private async connect() {
-    const files = await readdir('/tmp/codex-app-tools').catch(() => []);
+  private connect(): Promise<VerifiedAppPipe> {
+    if (this.client && !this.client.closed) return Promise.resolve(this.client);
+    if (this.connecting) return this.connecting;
+    this.connecting = this.open().finally(() => {
+      this.connecting = undefined;
+    });
+    return this.connecting;
+  }
+  private async open() {
+    const directory = (this.config.platform ?? platformRuntime()).appToolsDirectory();
+    const files = await readdir(directory).catch(() => []);
     for (const file of files.filter((f) => /^[a-f0-9-]{36}\.sock$/.test(f)).slice(0, 10)) {
-      const client = new VerifiedAppPipe(this.config, `/tmp/codex-app-tools/${file}`);
+      const client = new VerifiedAppPipe(this.config, join(directory, file));
       try {
         await client.ready;
         const catalog = await client.request('tools/list', { threadStartKind: 'all' }, 5000);
@@ -121,6 +143,7 @@ export class DesktopAppTools {
         )
           throw Error();
         this.available = true;
+        this.client = client;
         return client;
       } catch {
         client.close();
@@ -130,8 +153,7 @@ export class DesktopAppTools {
     throw new DeliveryError('本机桌面应用工具不可用，无法新建会话', true);
   }
   async probe() {
-    const client = await this.connect();
-    client.close();
+    await this.connect();
   }
   private async call(
     client: VerifiedAppPipe,
@@ -163,40 +185,65 @@ export class DesktopAppTools {
     }
   }
   async projects(anchor: string): Promise<DesktopProject[]> {
+    if (this.projectCache && this.projectCache.expires > Date.now()) return this.projectCache.value;
+    if (this.loadingProjects) return this.loadingProjects;
+    this.loadingProjects = this.readProjects(anchor).finally(() => {
+      this.loadingProjects = undefined;
+    });
+    return this.loadingProjects;
+  }
+  private async readProjects(anchor: string): Promise<DesktopProject[]> {
     const client = await this.connect();
-    try {
-      const result = await this.call(client, anchor, randomUUID(), 'list_projects', {});
-      return (result.projects ?? [])
-        .filter(
-          (p: any) => p.hostId === 'local' && p.projectKind === 'local' && typeof p.projectId === 'string',
-        )
-        .map((p: any) => ({ id: p.projectId, name: p.label, path: p.path }));
-    } finally {
-      client.close();
-    }
+    const result = await this.call(client, anchor, randomUUID(), 'list_projects', {});
+    // The catalog uses migrated app-server IDs; Desktop's tool still expects legacy IDs.
+    // Only use Desktop's explicit mapping, never project labels or filesystem paths.
+    const state = await readFile(join(this.config.codexHome, '.codex-global-state.json'), 'utf8')
+      .then((text) => JSON.parse(text))
+      .catch((error) => {
+        if (error.code === 'ENOENT') return {};
+        throw error;
+      });
+    const aliases =
+      state['app-server-project-id-by-legacy-project-id-by-host']?.[`local:${this.config.codexHome}`] ?? {};
+    const value = (result.projects ?? [])
+      .filter(
+        (p: any) => p.hostId === 'local' && p.projectKind === 'local' && typeof p.projectId === 'string',
+      )
+      .map((p: any) => ({
+        id: aliases[p.projectId] ?? p.projectId,
+        desktopId: p.projectId,
+        name: p.label,
+        path: p.path,
+      }));
+    this.projectCache = { value, expires: Date.now() + 30000 };
+    return value;
   }
   async create(
     anchor: string,
     requestId: string,
-    input: { title: string; prompt: string; projectId?: string },
+    input: Omit<z.infer<typeof creationBody>, 'requestId'>,
   ): Promise<string> {
-    if (input.projectId && !(await this.projects(anchor)).some((p) => p.id === input.projectId))
-      throw new DeliveryError('项目不可用，请重新选择本机项目', true);
+    const project = input.projectId
+      ? (await this.projects(anchor)).find((p) => p.id === input.projectId || p.desktopId === input.projectId)
+      : undefined;
+    if (input.projectId && !project) throw new DeliveryError('项目不可用，请重新选择本机项目', true);
     const client = await this.connect();
-    try {
-      const result = await this.call(client, anchor, requestId, 'create_thread', {
-        title: input.title,
-        prompt: input.prompt,
-        target: input.projectId
-          ? { type: 'project', projectId: input.projectId, environment: { type: 'local' } }
-          : { type: 'projectless' },
-      });
-      const id = z.string().uuid().safeParse(result.threadId);
-      if (!id.success || result.hostId !== 'local')
-        throw new DeliveryError('桌面尚未返回本机会话标识，请在列表核对');
-      return id.data;
-    } finally {
-      client.close();
-    }
+    const result = await this.call(client, anchor, requestId, 'create_thread', {
+      ...(input.title?.trim() ? { title: input.title.trim() } : {}),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.thinking ? { thinking: input.thinking } : {}),
+      prompt: input.prompt,
+      target: project
+        ? { type: 'project', projectId: project.desktopId ?? project.id, environment: { type: 'local' } }
+        : { type: 'projectless' },
+    });
+    const id = z.string().uuid().safeParse(result.threadId);
+    if (!id.success || result.hostId !== 'local')
+      throw new DeliveryError('桌面尚未返回本机会话标识，请在列表核对');
+    return id.data;
+  }
+  close() {
+    this.client?.close();
+    this.projectCache = undefined;
   }
 }

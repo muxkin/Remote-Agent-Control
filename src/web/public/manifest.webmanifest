@@ -1,12 +1,12 @@
 {
   "id": "/",
-  "name": "Codex Pocket Remote",
-  "short_name": "Pocket Remote",
+  "name": "Agent 空间",
+  "short_name": "Agent 空间",
   "lang": "zh-CN",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#f5f6f8",
-  "theme_color": "#f5f6f8",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
   "icons": [{ "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any maskable" }]
 }

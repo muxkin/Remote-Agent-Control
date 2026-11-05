@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import QRCode from 'qrcode';
 import type { Config } from './config.js';
+import { hostIdentity } from './device-identity.js';
 
 const escapeHtml = (value: string) =>
   value.replace(
@@ -16,7 +17,8 @@ export async function createPairingDisplay(
   pairing: { code: string; expiresAt: number },
 ) {
   const url = new URL(config.origin);
-  url.hash = new URLSearchParams({ pair: pairing.code }).toString();
+  const identity = await hostIdentity(config.stateDir);
+  url.hash = new URLSearchParams({ pair: pairing.code, host: identity.peerId }).toString();
   const link = url.href;
   const options = { errorCorrectionLevel: 'M' as const, margin: 4, width: 512 };
   const [png, terminal] = await Promise.all([
