@@ -1,0 +1,12 @@
+{
+  "id": "/",
+  "name": "Codex Pocket Remote",
+  "short_name": "Pocket Remote",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#f5f6f8",
+  "icons": [{ "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any maskable" }]
+}

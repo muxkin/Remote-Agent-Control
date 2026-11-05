@@ -1,0 +1,24 @@
+import { mkdtempSync, writeFileSync, rmSync, renameSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, expect, it } from 'vitest';
+import { webBuildReader } from '../src/server/web-build.js';
+const dirs: string[] = [];
+afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+it('detects an atomic release replacement without a gateway restart and ignores transient invalid files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pocket-release-'));
+  dirs.push(dir);
+  const read = webBuildReader(dir);
+  expect(read()).toBeNull();
+  writeFileSync(join(dir, 'version.json'), JSON.stringify({ buildId: '0123456789abcdef' }));
+  expect(read()).toBe('0123456789abcdef');
+  writeFileSync(join(dir, 'next.json'), JSON.stringify({ buildId: 'fedcba9876543210' }));
+  renameSync(join(dir, 'next.json'), join(dir, 'version.json'));
+  expect(read()).toBe('fedcba9876543210');
+  writeFileSync(join(dir, 'version.json'), '{');
+  expect(read()).toBe('fedcba9876543210');
+  writeFileSync(join(dir, 'version.json'), JSON.stringify({ buildId: '<invalid>' }));
+  expect(read()).toBe('fedcba9876543210');
+  rmSync(join(dir, 'version.json'));
+  expect(read()).toBe('fedcba9876543210');
+});
