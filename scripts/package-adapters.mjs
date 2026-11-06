@@ -1,10 +1,11 @@
 import Arborist from '@npmcli/arborist';
 import pacote from 'pacote';
-import { mkdtemp, mkdir, readFile, writeFile, cp } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, cp, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { manual as remove } from 'rimraf';
 
 const directory = resolve('dist/adapters');
@@ -13,7 +14,7 @@ await mkdir(directory, { recursive: true });
 const hashes = [];
 for (const name of ['sdk', 'codex', 'dsh']) {
   const source = resolve(`packages/adapter-${name}`);
-  const stage = await mkdtemp(join(tmpdir(), 'agent-adapter-package-'));
+  const stage = await realpath(await mkdtemp(join(tmpdir(), 'agent-adapter-package-')));
   try {
     const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
     const installManifest = { ...manifest };
@@ -41,7 +42,8 @@ for (const name of ['sdk', 'codex', 'dsh']) {
       }).reify();
       const resolvedLock = await readFile(join(stage, 'package-lock.json'), 'utf8');
       if (process.argv.includes('--update-locks')) await writeFile(lock, resolvedLock);
-      else if (resolvedLock !== (await readFile(lock, 'utf8')))
+      // Git may check out CRLF on Windows; compare dependency data, not line endings.
+      else if (!isDeepStrictEqual(JSON.parse(resolvedLock), JSON.parse(await readFile(lock, 'utf8'))))
         throw Error(`${name}: release dependency lock changed; update and review it explicitly`);
       await writeFile(join(stage, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
     }

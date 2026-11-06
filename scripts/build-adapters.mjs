@@ -27,5 +27,3 @@ for (const name of ['codex', 'dsh']) {
   );
 }
 copyFileSync('packages/adapter-codex/src/peer-bridge.py', 'packages/adapter-codex/dist/peer-bridge.py');
-
-if (!process.argv.includes('--compile-only')) await import('./package-adapters.mjs');

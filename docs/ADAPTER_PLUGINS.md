@@ -47,7 +47,7 @@ flowchart LR
 
 ## 安装、升级与回滚
 
-Node 24.15 或更高版本；Codex 连接还需要 Python 3。`npm run build` 构建三个包与网关。发布包可由 `npm run package:adapters` 生成，位于 `dist/adapters`，附 SHA-256 校验文件。
+Node 24.15 或更高版本；Codex 连接还需要 Python 3。`npm run build` 编译适配器、网关、前端，并生成默认插件发布包，位于 `dist/adapters`，附 SHA-256 校验文件。已有编译产物时，`npm run package:adapters` 只执行打包。
 
 ```sh
 npm run adapter -- list
@@ -83,7 +83,17 @@ npm run adapter -- rollback dsh-one
 
 - [Execa](https://github.com/sindresorhus/execa) 管理宿主进程；[vscode-jsonrpc](https://github.com/microsoft/vscode-languageserver-node/tree/main/jsonrpc) 负责协议帧、请求编号、响应匹配及错误。业务层只保留实例、订阅、心跳恢复、写操作交接和结果不确定语义。
 - [Arborist](https://github.com/npm/cli/tree/latest/workspaces/arborist) 负责插件安装和依赖解析；[pacote](https://github.com/npm/pacote) 负责 npm 包生成、提取及完整性校验。安装无需搜索本机 npm CLI，不执行包生命周期脚本。
-- 两款产品插件分别提交独立 `package-lock.json`。构建先在仓库外安装锁定依赖，再用 npm 的 `bundleDependencies` 生成自包含 tarball。官方客户端路径使用 JavaScript 实现，构建时省略可选的原生加速依赖，三系统 CI 安装同一份 Linux 构建包验证可移植性。网关启动时仅离线解包，不扫描或复制仓库依赖树。发布构建要求锁文件保持不变；更新依赖使用 `node scripts/build-adapters.mjs --update-locks` 并审查锁文件变化。
+- 两款产品插件分别提交独立 `package-lock.json`。构建先在仓库外安装锁定依赖，再用 npm 的 `bundleDependencies` 生成自包含 tarball。官方客户端路径使用 JavaScript 实现，构建时省略可选的原生加速依赖，三系统 CI 安装同一份 Linux 构建包验证可移植性。网关启动时仅离线解包，不扫描或复制仓库依赖树。发布构建要求锁文件保持不变；更新依赖使用 `node scripts/package-adapters.mjs --update-locks` 并审查锁文件变化。
 - [env-paths](https://github.com/sindresorhus/env-paths) 提供系统目录；兼容映射保留 Linux 的 XDG state、macOS Application Support、Windows 原有应用根目录，不移动既有配对或会话文件。
 - [rimraf](https://github.com/isaacs/rimraf) 的平台实现负责暂存包和测试目录清理，包含 Windows 文件占用重试。先等待进程退出，再移除文件。
 - 本机 Socket/Pipe 的对端身份、Windows 私有 ACL 等原生安全语义仍位于已有平台连接层；通用插件库不替代这些校验，也不负责原生聊天的幂等性。
+
+## 构建、测试与发布职责
+
+- `npm test`：运行 210 项普通回归，不编译、不生成发布包、不隐式安装依赖。
+- `npm run test:adapters`：只运行宿主与监督器专项测试。
+- `npm run build:adapters`、`build:server`、`build:web`：分别编译对应部分，均不重复触发其他构建。
+- `npm run build`：生产构建入口，依次编译并打包一次，产物可以直接部署。
+- `npm run test:packages`：对已构建发布包做 3 项独立安装契约检查；它不生成待测产物。
+- CI 只在 Linux 构建一次。Linux 运行完整普通回归，macOS/Windows 运行平台与宿主契约；三系统分别验证同一份发布包和编译版宿主，均不重建。
+- 标签发布要求同一个提交已有成功的三系统 CI，直接下载该次验证的产物并检查 SHA-256，再发布 GitHub Release；发布阶段不重新编译或安装依赖。

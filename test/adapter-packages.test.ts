@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import Arborist from '@npmcli/arborist';
 import pacote from 'pacote';
 import { execaNode } from 'execa';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises';
 import { manual as remove } from 'rimraf';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -37,7 +37,7 @@ it('installs self-contained release archives offline outside the repository', as
 }, 240000);
 
 it('pins bundled runtime dependencies so a later gateway build cannot mutate installed plugins', async () => {
-  const { mkdir, writeFile, cp } = await import('node:fs/promises');
+  const { mkdir, writeFile, cp, symlink } = await import('node:fs/promises');
   const { readAdapterPackage } = await import('../src/server/adapters/package.js');
   const { snapshotBundled } = await import('../src/server/adapters/bundled.js');
   const directory = await mkdtemp(join(tmpdir(), 'adapter-pin-'));
@@ -59,9 +59,12 @@ it('pins bundled runtime dependencies so a later gateway build cannot mutate ins
       join(source, 'index.mjs'),
       'import "fixture-dependency";\n' + (await readFile(join(source, 'index.mjs'), 'utf8')),
     );
-    const pack = readAdapterPackage(source),
+    // macOS temp paths commonly contain /var -> /private/var symlinks.
+    const alias = join(directory, 'source-alias');
+    await symlink(source, alias, 'junction');
+    const pack = readAdapterPackage(alias),
       archive = join(directory, 'fixture.tgz');
-    await pacote.tarball.file(source, archive, { Arborist, ignoreScripts: true });
+    await pacote.tarball.file(pack.root, archive, { Arborist, ignoreScripts: true });
     const pinned = await snapshotBundled(pack, join(directory, 'private'), archive);
     await writeFile(join(source, 'index.mjs'), 'throw Error("changed gateway package");');
     expect(await snapshotBundled(pack, join(directory, 'private'), archive)).toBe(pinned);
@@ -85,7 +88,10 @@ it('installs through npm libraries without a CLI and never executes package life
     manifest.scripts = { preinstall: 'node -e "process.exit(93)"', install: 'node -e "process.exit(94)"' };
     await writeFile(join(source, 'package.json'), JSON.stringify(manifest));
     const archive = join(root, 'test-adapter.tgz');
-    await pacote.tarball.file(source, archive, { Arborist, ignoreScripts: true });
+    await pacote.tarball.file(await realpath(source), archive, {
+      Arborist,
+      ignoreScripts: true,
+    });
     const key = await installAdapter(config, archive);
     expect(key).toBe('test-adapter@1.0.0');
     await validatePackage(loadCatalog(config).packages[key].root);

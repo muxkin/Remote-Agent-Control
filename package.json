@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "node --import ./scripts/env.mjs --import tsx src/server/main.ts",
-    "build": "npm run build:adapters && node scripts/build-server.mjs && vite build",
+    "build": "npm run build:adapters && npm run build:server && npm run build:web && npm run package:adapters",
     "start": "node --import ./scripts/env.mjs dist/server/main.js",
     "pair": "node --import ./scripts/env.mjs --import tsx src/server/cli.ts pair",
     "devices": "node --import ./scripts/env.mjs --import tsx src/server/cli.ts devices",
@@ -47,11 +47,13 @@
     "test:controls": "node --import tsx scripts/conversation-controls-smoke.ts",
     "build:adapters": "node scripts/build-adapters.mjs",
     "adapter": "node --import ./scripts/env.mjs --import tsx src/server/adapters/cli.ts",
-    "pretest": "npm run build:adapters && node scripts/build-server.mjs",
-    "predev": "npm run build:adapters",
-    "test:adapters": "npm run build:adapters && node scripts/build-server.mjs && vitest run test/adapter-host.test.ts test/adapter-packages.test.ts test/adapter-manager.test.ts",
+    "predev": "npm run build:adapters && npm run package:adapters",
+    "test:adapters": "vitest run test/adapter-host.test.ts test/adapter-manager.test.ts",
     "test:adapter-ui": "node --import tsx scripts/adapter-ui-smoke.ts",
-    "package:adapters": "npm run build:adapters"
+    "package:adapters": "node scripts/package-adapters.mjs",
+    "build:server": "node scripts/build-server.mjs",
+    "build:web": "vite build",
+    "test:packages": "vitest run --config vitest.packages.config.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",

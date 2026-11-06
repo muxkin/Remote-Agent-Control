@@ -4,20 +4,23 @@ on:
     tags: ['adapters-v*']
 permissions:
   contents: write
+  actions: read
 jobs:
   packages:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - run: node scripts/build-server.mjs
-      - run: npm run test:adapters
-      - run: npm run package:adapters
+      - name: Retrieve the exact build already verified on all three systems
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          run_id=$(gh api "repos/$GH_REPO/actions/workflows/compatibility.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=30" --jq ".workflow_runs | map(select(.head_sha == \"$GITHUB_SHA\" and .conclusion == \"success\")) | first | .id // empty")
+          test -n "$run_id" || { echo "No successful three-system verification for this commit"; exit 1; }
+          gh run download "$run_id" --name verified-build --dir verified
+          cd verified/dist/adapters
+          sha256sum --check SHA256SUMS
       - name: Publish independently installable packages
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/adapters/*.tgz dist/adapters/SHA256SUMS --title "$GITHUB_REF_NAME" --notes "Independent SDK, Codex and DSH packages. Install locally with npm run adapter -- install /path/to/release.tgz; upgrade a configured instance explicitly. Native Agents are never managed by the plugin host."
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" verified/dist/adapters/*.tgz verified/dist/adapters/SHA256SUMS --title "$GITHUB_REF_NAME" --notes "Independent SDK, Codex and DSH packages, using the exact artifacts verified on Linux, macOS and Windows. Install locally with npm run adapter -- install /path/to/release.tgz; upgrade a configured instance explicitly. Native Agents are never managed by the plugin host."

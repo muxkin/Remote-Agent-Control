@@ -7,7 +7,7 @@ concurrency:
   group: compatibility-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  release-packages:
+  build-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,15 +15,26 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/*/package-lock.json
       - run: npm ci --ignore-scripts
+      - run: npm run typecheck
       - run: npm run build:adapters
+      - run: npm run build:server
+      - run: npm run build:web
+      - run: npm run package:adapters
       - uses: actions/upload-artifact@v4
         with:
-          name: adapter-release-packages
-          path: dist/adapters/
+          name: verified-build
+          path: |
+            dist/
+            packages/adapter-sdk/dist/
+            packages/adapter-codex/dist/
+            packages/adapter-dsh/dist/
           retention-days: 7
   native-connectors:
-    needs: release-packages
+    needs: build-release
     strategy:
       fail-fast: false
       matrix:
@@ -35,18 +46,19 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/*/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: npm ci --ignore-scripts
-      - run: node scripts/build-adapters.mjs --compile-only
-      - run: node scripts/build-server.mjs
       - uses: actions/download-artifact@v4
         with:
-          name: adapter-release-packages
-          path: dist/adapters/
-      - run: npm run typecheck
-      - run: npx vitest run test/platform-connectors.test.ts packages/adapter-dsh/test/backend.test.ts packages/adapter-dsh/test/connection.test.ts test/adapter-host.test.ts test/adapter-packages.test.ts test/adapter-manager.test.ts test/conversation-controls.test.ts test/store.test.ts
+          name: verified-build
+          path: .
       - run: npm test
         if: runner.os == 'Linux'
-      - run: npm run build
+      - run: npx vitest run test/platform-connectors.test.ts packages/adapter-dsh/test/backend.test.ts packages/adapter-dsh/test/connection.test.ts test/adapter-host.test.ts test/adapter-manager.test.ts test/conversation-controls.test.ts test/store.test.ts
+        if: runner.os != 'Linux'
+      - run: npm run test:packages
