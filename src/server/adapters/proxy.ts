@@ -53,7 +53,7 @@ export function hostLaunch() {
     : ['./adapters/host.js', './host.js']
         .map((p) => fileURLToPath(new URL(p, import.meta.url)))
         .find(existsSync)!;
-  return { path, execArgv: development ? ['--import', fileURLToPath(import.meta.resolve('tsx'))] : [] };
+  return { path, execArgv: development ? ['--import', import.meta.resolve('tsx')] : [] };
 }
 type Pending = {
   resolve: (value: any) => void;
@@ -71,6 +71,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
   fileReferences?: AgentBackend['fileReferences'];
   attachment?: AgentBackend['attachment'];
   private child?: ChildProcess;
+  private processes = new Set<ChildProcess>();
   private generation = 0;
   private sequence = 0;
   private pending = new Map<number, Pending>();
@@ -138,10 +139,15 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     this.stopped = false;
     await this.launch();
   }
-  stop() {
+  async stop() {
     this.stopped = true;
     clearTimeout(this.restartTimer);
     this.retire('插件已断开');
+    await Promise.all(
+      [...this.processes].map(
+        (child) => new Promise<void>((resolve) => child.once('close', () => resolve())),
+      ),
+    );
   }
   private publish(info: BackendInfo, status: GatewayStatus) {
     this.descriptor = {
@@ -215,6 +221,8 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
       windowsHide: true,
     });
     this.child = child;
+    this.processes.add(child);
+    child.once('close', () => this.processes.delete(child));
     const promise = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => this.failed('插件启动超时'), this.timing.startup);
       this.starting = { resolve, reject, timer };

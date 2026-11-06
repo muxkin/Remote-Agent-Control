@@ -2,7 +2,7 @@ import { readConfig } from '../src/server/config.js';
 import { builtinBackends } from '../src/server/backends/builtins.js';
 import { DEFAULT_BACKEND } from '../src/shared/backends.js';
 const config = { ...readConfig(), readOnly: true };
-const registry = builtinBackends(config,false);
+const registry = builtinBackends(config, false);
 const args = process.argv.slice(2),
   backendFlag = args.indexOf('--backend');
 const backendId = backendFlag >= 0 ? args.splice(backendFlag, 2)[1] : DEFAULT_BACKEND;
@@ -43,5 +43,5 @@ try {
     }
   }
 } finally {
-  registry.stop();
+  await registry.stop();
 }

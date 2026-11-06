@@ -21,7 +21,7 @@ async function close() {
   if (closing) return;
   closing = true;
   host.stop();
-  registry.stop();
+  await registry.stop();
   store.close();
 }
 process.on('SIGINT', () => void close());

@@ -106,10 +106,10 @@ export class AdapterManager extends BackendRegistry {
     }, 1000);
     this.timer.unref();
   }
-  override stop() {
+  override async stop() {
     this.closed = true;
     clearInterval(this.timer);
-    super.stop();
+    await super.stop();
     if (this.supervisorLock) {
       try {
         unlinkSync(this.supervisorLock);

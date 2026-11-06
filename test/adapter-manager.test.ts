@@ -7,13 +7,10 @@ import { AdapterManager } from '../src/server/adapters/manager.js';
 import { adapterDirectory, loadCatalog, saveCatalog, writeJson } from '../src/server/adapters/catalog.js';
 import { fixtureConfig } from './helpers.js';
 import { readInstances } from '../src/server/adapters/config.js';
-const clean: (() => void)[] = [];
-afterEach(() =>
-  clean
-    .splice(0)
-    .reverse()
-    .forEach((fn) => fn()),
-);
+const clean: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+  for (const fn of clean.splice(0).reverse()) await fn();
+});
 it('applies per-instance upgrades and rollback through the supervisor while an incompatible instance stays isolated', async () => {
   const config = fixtureConfig(),
     root = config.desktopRoot;

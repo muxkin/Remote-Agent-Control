@@ -115,7 +115,7 @@ async function close() {
   if (closing) return;
   closing = true;
   host.stop();
-  registry.stop();
+  await registry.stop();
   store.close();
   await relay.app.close();
   await rm(config.desktopRoot, { recursive: true, force: true });

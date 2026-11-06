@@ -25,8 +25,8 @@ export class BackendRegistry extends EventEmitter {
   async start() {
     await Promise.allSettled(this.all().map((b) => b.start()));
   }
-  stop() {
-    for (const backend of this.all()) backend.stop();
+  async stop() {
+    await Promise.allSettled(this.all().map((backend) => backend.stop()));
   }
 }
 export function requireCapability(backend: AgentBackend, name: CapabilityName) {

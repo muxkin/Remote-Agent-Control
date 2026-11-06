@@ -7,13 +7,10 @@ import { AdapterProxy } from '../src/server/adapters/proxy.js';
 import { readAdapterPackage } from '../src/server/adapters/package.js';
 import { Operations } from '../src/server/operations.js';
 import { Store } from '../src/server/store.js';
-const clean: (() => void)[] = [];
-afterEach(() =>
-  clean
-    .splice(0)
-    .reverse()
-    .forEach((fn) => fn()),
-);
+const clean: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+  for (const fn of clean.splice(0).reverse()) await fn();
+});
 const presentation = {
   creation: { empty: true, permission: 'select', preset: false, plan: false },
   plan: 'none',
@@ -52,8 +49,8 @@ async function instance(id = 'one', p = pack(), config: Record<string, unknown> 
     { id, name: id, stateDirectory: directory, readOnly: false, config },
     { startup: 10000, request: 10000, heartbeat: 100, hang: 1000, restart: 100 },
   );
-  clean.push(() => {
-    backend.stop();
+  clean.push(async () => {
+    await backend.stop();
     rmSync(directory, { recursive: true, force: true });
   });
   await backend.start();
