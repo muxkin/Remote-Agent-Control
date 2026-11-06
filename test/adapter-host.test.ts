@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, cpSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -7,6 +7,9 @@ import { AdapterProxy } from '../src/server/adapters/proxy.js';
 import { readAdapterPackage } from '../src/server/adapters/package.js';
 import { Operations } from '../src/server/operations.js';
 import { Store } from '../src/server/store.js';
+// Native Windows ACL setup can block the test parent for more than one second.
+// Keep a short but realistic heartbeat budget; the hang test still verifies forced recovery.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 const clean: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
   for (const fn of clean.splice(0).reverse()) await fn();
@@ -47,7 +50,7 @@ async function instance(id = 'one', p = pack(), config: Record<string, unknown> 
   const backend = new AdapterProxy(
     p,
     { id, name: id, stateDirectory: directory, readOnly: false, config },
-    { startup: 10000, request: 10000, heartbeat: 100, hang: 1000, restart: 100 },
+    { startup: 20000, request: 20000, heartbeat: 250, hang: 5000, restart: 100 },
   );
   clean.push(async () => {
     await backend.stop();
