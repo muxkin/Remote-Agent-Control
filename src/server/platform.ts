@@ -42,9 +42,12 @@ export class MacRuntime extends LinuxRuntime {
   }
 }
 export function powershell(script: string, env: NodeJS.ProcessEnv = process.env) {
+  // A Node process launched by pwsh inherits PowerShell 7 module paths, which
+  // Windows PowerShell cannot load. These OS helpers need only its own modules.
+  const command = `$env:PSModulePath = $PSHOME + '\\Modules'\n${script}`;
   return execFileSync(
     'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')],
     { encoding: 'utf8', env, timeout: 10000, windowsHide: true },
   ).trim();
 }

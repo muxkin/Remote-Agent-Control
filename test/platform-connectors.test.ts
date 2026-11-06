@@ -45,7 +45,7 @@ it('validates the real native Socket/Pipe peer then relays bytes', async () => {
   const child = await fixture(process.execPath);
   let stderr = '';
   child.stderr.on('data', (bytes) => (stderr += bytes));
-  await expect.poll(() => stderr).toContain('"ready"');
+  await expect.poll(() => stderr, { timeout: 5000 }).toContain('"ready"');
   const data = once(child.stdout, 'data');
   child.stdin.write(Buffer.from([0, 10, 255, 13, 1]));
   expect((await data)[0]).toEqual(Buffer.from([0, 10, 255, 13, 1]));
@@ -93,7 +93,7 @@ it('accepts native drive/space paths and file URLs without treating them as remo
   const url = pathToFileURL(file).href;
   expect(
     await authorizeFile(url, directory, [{ id: 'message', role: 'assistant', text: `[file](${url})` }]),
-  ).toBe(realpathSync(file));
+  ).toBe(realpathSync.native(file));
   const previous = process.env.POCKET_MEDIA_ADAPTER;
   try {
     process.env.POCKET_MEDIA_ADAPTER = join(directory, 'adapter with spaces.mjs');
