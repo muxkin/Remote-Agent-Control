@@ -44,6 +44,7 @@ const operationNames: Record<string, string> = {
   steer: '追加',
   send: '消息',
   settings: '设置',
+  control: '会话控制',
   respond: '回复',
   interrupt: '中断',
 };
@@ -739,24 +740,7 @@ export default function AgentWorkspace({
                   data-operation-id={op.id}
                   role="status"
                 >
-                  {op.kind === 'create'
-                    ? '新建会话'
-                    : op.kind === 'open'
-                      ? '打开会话'
-                      : op.kind === 'queue'
-                        ? '排队'
-                        : op.kind === 'queue-remove'
-                          ? '移除排队'
-                          : op.kind === 'steer'
-                            ? '追加'
-                            : op.kind === 'send'
-                              ? '消息'
-                              : op.kind === 'settings'
-                                ? '设置'
-                                : op.kind === 'respond'
-                                  ? '回复'
-                                  : '中断'}{' '}
-                  · {labels[op.state]}
+                  {operationNames[op.kind] ?? '操作'} · {labels[op.state]}
                   {op.error ? `：${op.error}` : ''}
                 </p>
               ))}
