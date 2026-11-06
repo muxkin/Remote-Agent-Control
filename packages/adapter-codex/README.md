@@ -1,4 +1,4 @@
-# Codex adapter 1.0.0
+# Codex adapter 1.0.1
 
 Connects to an existing Codex desktop through verified Unix sockets (Linux/macOS) or named pipes (Windows). Includes the Python byte bridge and product-specific history, follower controls, permissions, model, skill and native plugin catalogs. It never launches or terminates Codex.
 

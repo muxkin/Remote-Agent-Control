@@ -48,7 +48,7 @@ export interface AgentBackend extends EventEmitter {
   readonly history: BackendHistory;
   info(): BackendInfo;
   start(): Promise<void>;
-  stop(): void;
+  stop(): void | Promise<void>;
   status(): GatewayStatus;
   acquire(id: string): Promise<() => void>;
   view(id: string): ThreadView | null;

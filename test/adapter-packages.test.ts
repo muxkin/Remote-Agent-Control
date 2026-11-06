@@ -1,49 +1,38 @@
 import { expect, it } from 'vitest';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import Arborist from '@npmcli/arborist';
+import pacote from 'pacote';
+import { execaNode } from 'execa';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { manual as remove } from 'rimraf';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { validatePackage } from '../src/server/adapters/install.js';
-const exec = promisify(execFile);
-it('installs release tarballs outside the repository with their own dependencies and SDK declarations', async () => {
+import { validatePackage, installAdapter } from '../src/server/adapters/install.js';
+import { loadCatalog } from '../src/server/adapters/catalog.js';
+import { fixtureConfig } from './helpers.js';
+import { hostEnvironment } from '../src/server/adapters/package.js';
+
+it('installs self-contained release archives offline outside the repository', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'adapter-release-'));
-  const npm = process.env.npm_execpath!;
   try {
-    const packages = ['sdk', 'codex', 'dsh'];
-    const tarballs: string[] = [];
-    for (const name of packages) {
-      const result = await exec(
-        process.execPath,
-        [npm, 'pack', '--ignore-scripts', '--json', '--pack-destination', directory],
-        { cwd: resolve(`packages/adapter-${name}`) },
-      );
-      const tarball = join(directory, JSON.parse(result.stdout)[0].filename);
-      tarballs.push(tarball);
+    for (const name of ['sdk', 'codex', 'dsh']) {
+      const manifest = JSON.parse(await readFile(`packages/adapter-${name}/package.json`, 'utf8'));
+      const archive = resolve(`dist/adapters/agent-remote-adapter-${name}-${manifest.version}.tgz`);
       const destination = join(directory, name);
-      await exec(
-        process.execPath,
-        [
-          npm,
-          'install',
-          '--prefix',
-          destination,
-          '--ignore-scripts',
-          '--omit=dev',
-          '--no-audit',
-          '--no-fund',
-          '--',
-          tarball,
-        ],
-        { timeout: 180000, maxBuffer: 2 * 1024 * 1024 },
-      );
-      const root = join(destination, 'node_modules', `@agent-remote/adapter-${name}`);
+      await new Arborist({
+        path: destination,
+        ignoreScripts: true,
+        omit: ['dev'],
+        audit: false,
+        offline: true,
+        cache: join(directory, 'empty-cache'),
+      }).reify({ add: [archive] });
+      const root = join(destination, 'node_modules', manifest.name);
       if (name !== 'sdk') await validatePackage(root);
       else expect(await readFile(join(root, 'dist/index.d.ts'), 'utf8')).toContain('AdapterFactory');
       expect(await readFile(join(root, 'package.json'), 'utf8')).not.toContain('workspace:');
     }
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await remove(directory);
   }
 }, 240000);
 
@@ -57,6 +46,7 @@ it('pins bundled runtime dependencies so a later gateway build cannot mutate ins
     await cp('test/fixtures/adapter', source, { recursive: true });
     const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
     manifest.dependencies = { 'fixture-dependency': '1.0.0' };
+    manifest.bundleDependencies = true;
     await writeFile(join(source, 'package.json'), JSON.stringify(manifest));
     const dependency = join(source, 'node_modules/fixture-dependency');
     await mkdir(dependency, { recursive: true });
@@ -70,12 +60,47 @@ it('pins bundled runtime dependencies so a later gateway build cannot mutate ins
       'import "fixture-dependency";\n' + (await readFile(join(source, 'index.mjs'), 'utf8')),
     );
     const pack = readAdapterPackage(source),
-      pinned = snapshotBundled(pack, join(directory, 'private'));
+      archive = join(directory, 'fixture.tgz');
+    await pacote.tarball.file(source, archive, { Arborist, ignoreScripts: true });
+    const pinned = await snapshotBundled(pack, join(directory, 'private'), archive);
     await writeFile(join(source, 'index.mjs'), 'throw Error("changed gateway package");');
-    expect(snapshotBundled(pack, join(directory, 'private'))).toBe(pinned);
+    expect(await snapshotBundled(pack, join(directory, 'private'), archive)).toBe(pinned);
     await rm(source, { recursive: true, force: true });
     await validatePackage(pinned);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await remove(directory);
   }
 }, 30000);
+
+it('installs through npm libraries without a CLI and never executes package lifecycle scripts', async () => {
+  const { cp, writeFile } = await import('node:fs/promises');
+  const config = fixtureConfig(),
+    root = config.desktopRoot;
+  const previous = process.env.npm_execpath;
+  try {
+    process.env.npm_execpath = join(root, 'no-npm-cli-here.js');
+    const source = join(root, 'source');
+    await cp('test/fixtures/adapter', source, { recursive: true });
+    const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+    manifest.scripts = { preinstall: 'node -e "process.exit(93)"', install: 'node -e "process.exit(94)"' };
+    await writeFile(join(source, 'package.json'), JSON.stringify(manifest));
+    const archive = join(root, 'test-adapter.tgz');
+    await pacote.tarball.file(source, archive, { Arborist, ignoreScripts: true });
+    const key = await installAdapter(config, archive);
+    expect(key).toBe('test-adapter@1.0.0');
+    await validatePackage(loadCatalog(config).packages[key].root);
+    await expect(installAdapter(config, archive)).rejects.toThrow('immutable');
+    await expect(installAdapter(config, 'test-adapter@latest')).rejects.toThrow('exact npm version');
+    // Exercise the production JS host without tsx or a repository-local plugin dependency.
+    const compiled = await execaNode(resolve('dist/server/adapters/cli.js'), ['install', archive], {
+      nodeOptions: [],
+      extendEnv: false,
+      env: { ...hostEnvironment(), POCKET_STATE_DIR: join(root, 'compiled state 中文') },
+    });
+    expect(compiled.stdout.trim()).toBe(key);
+  } finally {
+    if (previous === undefined) delete process.env.npm_execpath;
+    else process.env.npm_execpath = previous;
+    await remove(root);
+  }
+}, 60000);

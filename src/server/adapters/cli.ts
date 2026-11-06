@@ -1,6 +1,6 @@
 import { readConfig } from '../config.js';
 import { installAdapter } from './install.js';
-import { adapterDirectory, loadCatalog, writeJson } from './catalog.js';
+import { adapterDirectory, loadCatalog, prepareBundled, writeJson } from './catalog.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,7 @@ const config = readConfig(),
 try {
   if (command === 'install') console.log(await installAdapter(config, args[0] ?? ''));
   else if (command === 'list') {
+    await prepareBundled(config);
     const catalog = loadCatalog(config);
     console.table(
       Object.entries(catalog.packages).map(([key, p]) => ({ package: key, stateVersion: p.stateVersion })),

@@ -26,7 +26,7 @@ flowchart LR
     "id": "dsh-one",
     "name": "我的 DSH",
     "plugin": "@agent-remote/adapter-dsh",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "config": { "url": "http://127.0.0.1:3080", "version": "0.2.1-rc.5" },
     "secrets": { "token": "DSH_ONE_TOKEN" }
   },
@@ -47,11 +47,11 @@ flowchart LR
 
 ## 安装、升级与回滚
 
-Node 24 或更高版本；Codex 连接还需要 Python 3。`npm run build` 构建三个包与网关。发布包可由 `npm run package:adapters` 生成，位于 `dist/adapters`，附 SHA-256 校验文件。
+Node 24.15 或更高版本；Codex 连接还需要 Python 3。`npm run build` 构建三个包与网关。发布包可由 `npm run package:adapters` 生成，位于 `dist/adapters`，附 SHA-256 校验文件。
 
 ```sh
 npm run adapter -- list
-npm run adapter -- install /absolute/path/agent-remote-adapter-dsh-1.0.0.tgz
+npm run adapter -- install /absolute/path/agent-remote-adapter-dsh-1.0.1.tgz
 npm run adapter -- install my-agent-adapter@1.2.3
 npm run adapter -- upgrade dsh-one @agent-remote/adapter-dsh@1.1.0
 npm run adapter -- rollback dsh-one
@@ -65,18 +65,25 @@ npm run adapter -- rollback dsh-one
 
 ## IPC 与恢复边界
 
-宿主使用固定 Node IPC 方法表，传递 SDK 请求、结果和归一化事件。查询异步，订阅以标识管理；函数与 EventEmitter 不跨进程。界面读取代理缓存的状态和快照。附件源仍经原有授权及分块加密通道，浏览器得不到上游地址或凭据。
+宿主通过 `vscode-jsonrpc` 的标准流传输和固定方法白名单传递 SDK 请求、结果及归一化事件。Execa 管理启动、超时与协作式退出；独立的 Node IPC 通道只用于 Execa 的取消通知。产品日志写入 stderr，避免破坏 RPC 帧。查询异步，订阅以标识管理；函数与 EventEmitter 不跨进程。界面读取代理缓存的状态和快照。附件源仍经原有授权及分块加密通道，浏览器得不到上游地址或凭据。
 
-进程代次同时校验在回复和事件上。宿主崩溃/心跳停止时，仅对应实例暂时不可用；重新连接后重建订阅与快照。已分发的写操作返回“结果待确认”，不自动重发创建、发送或审批。网关已有的持久操作去重和启动恢复继续适用。实例 SDK 不兼容或缺少安装包不会停用其他实例。
+每个宿主连接有独立的 JSON-RPC 请求生命周期；进程代次同时校验回复和事件。旧连接先释放，等待旧宿主退出后才启动新宿主；正常退出等待适配器的异步清理，卡死时由 Execa 强制结束辅助宿主。宿主崩溃/心跳停止时，仅对应实例暂时不可用；重新连接后重建订阅与快照。已分发的写操作返回“结果待确认”，不自动重发创建、发送或审批。网关已有的持久操作去重和启动恢复继续适用。实例 SDK 不兼容或缺少安装包不会停用其他实例。
 
 权限、预设、创建规则、计划模式、模型与工具菜单从目录/能力声明读取。第三个插件可使用现有公共聊天能力而不改前端。超出现有公共能力的新交互仍需扩展 SDK 与共享组件；不加载浏览器插件 JS，不转发任意上游 RPC。存储适配器继续使用原有独立契约。
 
 ## 验证记录（2026-11-06）
 
-- 原有 199 项回归已通过；新增真实宿主测试覆盖三实例同 ID、崩溃、挂起、订阅恢复、迟到代次、未知写结果、重复点击、升级等待/回退、私有状态拒绝迁移、配置迁移及监督器应用。
-- SDK、Codex、DSH 的 tarball 各自在仓库外独立安装，模块和 SDK 声明均可加载。
+- 完整自动回归 213 项通过；真实宿主测试覆盖三实例同 ID、崩溃、挂起、订阅恢复、迟到代次、未知写结果、重复点击、升级等待/回退、私有状态拒绝迁移、配置迁移及监督器应用。
+- SDK、Codex、DSH 的 tarball 在仓库外、空缓存、离线条件下独立安装，模块和 SDK 声明均可加载；另测无 npm CLI 安装、禁用生命周期脚本、编译版宿主、带空格及中文的路径、异步退出清理。
 - 第三个测试插件从仓库外发布包加载，使用同一个已构建前端完成加密聊天、刷新恢复和能力菜单；未修改核心产品分支、未重新构建前端。
 - 真实 Linux Codex 与两个独立 DSH 宿主同时连接；测试会话历史、权限、模型及快照同步通过。杀死一个 DSH 宿主后自动恢复，另一个保持连接。此轮未向真实会话发送测试消息或反馈，也未启动/关闭原生 Agent。
 - 手机视口权限菜单、计划/目标/反馈/导出入口，以及现有配对、草稿、审批、计划卡片、刷新恢复和 320–1280 像素布局回归通过。Android/iOS 真机、macOS/Windows 真桌面仍需另行验收；三系统 CI 的宿主与 Socket/Pipe 契约测试独立记录。
 
-宿主 IPC 参考 [Node child_process.fork](https://nodejs.org/api/child_process.html#child_processforkmodulepath-args-options)；安装流程参考 [npm install](https://docs.npmjs.com/cli/v11/commands/npm-install/)。
+## 可复用的跨平台基础设施
+
+- [Execa](https://github.com/sindresorhus/execa) 管理宿主进程；[vscode-jsonrpc](https://github.com/microsoft/vscode-languageserver-node/tree/main/jsonrpc) 负责协议帧、请求编号、响应匹配及错误。业务层只保留实例、订阅、心跳恢复、写操作交接和结果不确定语义。
+- [Arborist](https://github.com/npm/cli/tree/latest/workspaces/arborist) 负责插件安装和依赖解析；[pacote](https://github.com/npm/pacote) 负责 npm 包生成、提取及完整性校验。安装无需搜索本机 npm CLI，不执行包生命周期脚本。
+- 两款产品插件分别提交独立 `package-lock.json`。构建先在仓库外安装锁定依赖，再用 npm 的 `bundleDependencies` 生成自包含 tarball。官方客户端路径使用 JavaScript 实现，构建时省略可选的原生加速依赖，三系统 CI 安装同一份 Linux 构建包验证可移植性。网关启动时仅离线解包，不扫描或复制仓库依赖树。发布构建要求锁文件保持不变；更新依赖使用 `node scripts/build-adapters.mjs --update-locks` 并审查锁文件变化。
+- [env-paths](https://github.com/sindresorhus/env-paths) 提供系统目录；兼容映射保留 Linux 的 XDG state、macOS Application Support、Windows 原有应用根目录，不移动既有配对或会话文件。
+- [rimraf](https://github.com/isaacs/rimraf) 的平台实现负责暂存包和测试目录清理，包含 Windows 文件占用重试。先等待进程退出，再移除文件。
+- 本机 Socket/Pipe 的对端身份、Windows 私有 ACL 等原生安全语义仍位于已有平台连接层；通用插件库不替代这些校验，也不负责原生聊天的幂等性。

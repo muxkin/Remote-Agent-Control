@@ -1,4 +1,4 @@
-# DSH Web adapter 1.0.0
+# DSH Web adapter 1.0.1
 
 Connects to an **already running** DSH Web through its external-client authentication, HTTP and multiplexed WebSocket APIs. Client-only DSH dependencies are pinned to `0.2.1-rc.5`. No Agent startup entry is imported.
 

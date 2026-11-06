@@ -27,30 +27,36 @@ export function loadCatalog(config: Config): Catalog {
     ? JSON.parse(readFileSync(path, 'utf8'))
     : { format: 1, packages: {}, instances: {} };
   if (catalog.format !== 1) throw Error('Unsupported adapter registry format');
-  // Reading manifests never imports product implementations into the gateway.
+  return catalog;
+}
+/** Prepare immutable official packages before creating instance proxies. Existing bindings stay pinned. */
+export async function prepareBundled(config: Config) {
+  const directory = adapterDirectory(config),
+    catalog = loadCatalog(config);
   for (const name of ['codex', 'dsh']) {
     const root = resolve(config.webRoot, '../../packages', `adapter-${name}`);
     if (!existsSync(root)) continue;
-    let pack;
     try {
-      pack = readAdapterPackage(root);
-    } catch {
-      continue;
-    }
-    const key = packageKey(pack);
-    try {
-      if (!catalog.packages[key])
-        catalog.packages[key] = {
-          root: snapshotBundled(pack, directory),
+      const pack = readAdapterPackage(root),
+        key = packageKey(pack);
+      if (catalog.packages[key]) continue;
+      const filename = `${pack.name.replace('@', '').replace('/', '-')}-${pack.version}.tgz`;
+      const pinned = await snapshotBundled(pack, directory, resolve(config.webRoot, '../adapters', filename));
+      await catalogLock(config, () => {
+        const current = loadCatalog(config);
+        current.packages[key] ??= {
+          root: pinned,
           name: pack.name,
           version: pack.version,
           stateVersion: pack.agentAdapter.stateVersion,
         };
-    } catch {
-      /* A damaged bundled package must not stop other instances. */
+        saveCatalog(config, current);
+      });
+    } catch (error) {
+      // A damaged bundled package must not stop other instances.
+      console.error(`Cannot prepare bundled adapter ${name}: ${(error as Error).message}`);
     }
   }
-  return catalog;
 }
 export function saveCatalog(config: Config, catalog: Catalog) {
   writeJson(join(adapterDirectory(config), 'registry.json'), catalog);

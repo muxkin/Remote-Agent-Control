@@ -25,7 +25,7 @@ export function readInstances(): AdapterInstance[] {
     id: 'codex-local',
     name: 'Codex',
     plugin: '@agent-remote/adapter-codex',
-    version: '1.0.0',
+    version: '1.0.1',
     config: {},
   };
   for (const [key, env] of Object.entries({
@@ -60,7 +60,7 @@ export function readInstances(): AdapterInstance[] {
         id: legacy.id,
         name: legacy.name,
         plugin: '@agent-remote/adapter-dsh',
-        version: '1.0.0',
+        version: '1.0.1',
         config: { url: legacy.url, token: process.env[legacy.tokenEnv] ?? '', version: legacy.version },
       };
     }

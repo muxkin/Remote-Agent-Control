@@ -3,6 +3,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 export function createAdapter(context) {
   if (context.config.fail) throw Error('Fixture rejected startup');
+  if (context.config.noisy) console.log('Fixture diagnostic on stdout');
   const backend = new EventEmitter(),
     file = join(context.stateDirectory, 'dispatches.jsonl');
   const messages = () => {
@@ -62,7 +63,10 @@ export function createAdapter(context) {
     id: context.id,
     history: {
       get: async (id) => (id === 'shared' ? summary : null),
-      list: async () => ({ threads: [summary], nextCursor: null }),
+      list: async (cursor, limit = 25) => {
+        if (typeof limit !== 'number') throw Error('Optional list limit lost its default');
+        return { threads: [summary], nextCursor: null };
+      },
       page: async () => ({ messages: messages(), nextCursor: null }),
       projects: async () => ({ projects: [], total: 1, ungrouped: 1 }),
     },
@@ -92,13 +96,24 @@ export function createAdapter(context) {
     }),
     status,
     start: async () => {},
-    stop: () => {},
+    stop: async () => {
+      if (context.config.stopDelay) {
+        await new Promise((resolve) => setTimeout(resolve, context.config.stopDelay));
+        appendFileSync(
+          join(context.stateDirectory, 'stopped.jsonl'),
+          JSON.stringify({ pid: process.pid }) + '\n',
+        );
+      }
+    },
     acquire: async () => {
       backend.emit('thread', view());
       return () => {};
     },
     view,
-    waitForView: async () => view(),
+    waitForView: async (id, timeout = 1000) => {
+      if (typeof timeout !== 'number') throw Error('Optional view timeout lost its default');
+      return view();
+    },
     projects: async () => [],
     openThread: async () => {},
     execute: async (id, command, requestId) => {

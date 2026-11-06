@@ -1,7 +1,29 @@
 name: Compatibility contracts
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+concurrency:
+  group: compatibility-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  release-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build:adapters
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adapter-release-packages
+          path: dist/adapters/
+          retention-days: 7
   native-connectors:
+    needs: release-packages
     strategy:
       fail-fast: false
       matrix:
@@ -17,7 +39,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci --ignore-scripts
-      - run: npm run build:adapters
+      - run: node scripts/build-adapters.mjs --compile-only
+      - run: node scripts/build-server.mjs
+      - uses: actions/download-artifact@v4
+        with:
+          name: adapter-release-packages
+          path: dist/adapters/
       - run: npm run typecheck
       - run: npx vitest run test/platform-connectors.test.ts packages/adapter-dsh/test/backend.test.ts packages/adapter-dsh/test/connection.test.ts test/adapter-host.test.ts test/adapter-packages.test.ts test/adapter-manager.test.ts test/conversation-controls.test.ts test/store.test.ts
       - run: npm test

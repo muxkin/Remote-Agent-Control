@@ -1,5 +1,6 @@
+import { manual as remove } from 'rimraf';
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, cpSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, cpSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -22,8 +23,10 @@ const presentation = {
   nativeCommands: false,
 };
 function pack(version = '1.0.0', options: { fail?: boolean; stateVersion?: number; sdk?: number } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'adapter-host-'));
-  clean.push(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = mkdtempSync(join(tmpdir(), 'adapter host 中文-'));
+  clean.push(async () => {
+    await remove(dir);
+  });
   cpSync(resolve('test/fixtures/adapter/index.mjs'), join(dir, 'index.mjs'));
   if (options.fail)
     writeFileSync(join(dir, 'index.mjs'), 'export function createAdapter(){throw Error("Startup failed");}');
@@ -46,7 +49,7 @@ function pack(version = '1.0.0', options: { fail?: boolean; stateVersion?: numbe
   return readAdapterPackage(dir);
 }
 async function instance(id = 'one', p = pack(), config: Record<string, unknown> = {}) {
-  const directory = mkdtempSync(join(tmpdir(), 'adapter-state-'));
+  const directory = mkdtempSync(join(tmpdir(), 'adapter state 中文-'));
   const backend = new AdapterProxy(
     p,
     { id, name: id, stateDirectory: directory, readOnly: false, config },
@@ -54,7 +57,8 @@ async function instance(id = 'one', p = pack(), config: Record<string, unknown> 
   );
   clean.push(async () => {
     await backend.stop();
-    rmSync(directory, { recursive: true, force: true });
+    // Windows may release a dev-loader helper's CWD after the host close event.
+    await remove(directory);
   });
   await backend.start();
   return { backend, directory };
@@ -65,6 +69,18 @@ const send = (text: string) => ({
   attachments: [],
   skillIds: [],
   pluginIds: [],
+});
+it('preserves optional arguments and RPC framing, rejects unknown methods, and awaits graceful cleanup', async () => {
+  const { backend, directory } = await instance('lifecycle', pack(), { noisy: true, stopDelay: 150 });
+  const pid = backend.pid;
+  expect((await backend.waitForView('shared'))?.id).toBe('shared');
+  expect((await backend.history.list(undefined, undefined, undefined, 'query')).threads).toHaveLength(1);
+  await expect(
+    (backend as any).host.connection.sendRequest('adapter/arbitraryNativeRPC', {}),
+  ).rejects.toThrow('Unhandled method');
+  expect(backend.status().connected).toBe(true);
+  await backend.stop();
+  expect(JSON.parse(readFileSync(join(directory, 'stopped.jsonl'), 'utf8'))).toEqual({ pid });
 });
 it('isolates same native IDs, credentials and subscriptions in three independent hosts', async () => {
   process.env.POCKET_RELAY_ENROLLMENT = 'must-not-inherit';
@@ -144,15 +160,23 @@ it('defers unsafe upgrades, restores subscriptions, rolls back failed starts and
 it('ignores replies from an earlier generation and enforces SDK compatibility', async () => {
   const { backend } = await instance();
   await backend.acquire('shared');
-  const child = (backend as any).child,
+  const host = (backend as any).host,
     generation = (backend as any).generation;
   await backend.replace(pack('1.1.0'));
-  child.emit('message', {
-    generation,
-    type: 'event',
-    event: 'thread',
-    args: [{ ...backend.view('shared'), title: 'stale' }],
+  expect(host.child.exitCode).not.toBeNull();
+  expect(() =>
+    host.connection.sendRequest('adapter/history.get', { generation, args: ['shared'] }),
+  ).toThrow();
+  const stale = JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'adapter/event',
+    params: {
+      generation,
+      event: 'thread',
+      args: [{ ...backend.view('shared'), title: 'stale' }],
+    },
   });
+  host.child.stdout.emit('data', Buffer.from(`Content-Length: ${Buffer.byteLength(stale)}\r\n\r\n${stale}`));
   expect(backend.view('shared')?.title).not.toBe('stale');
   expect(() => pack('3.0.0', { sdk: 2 })).toThrow();
 });

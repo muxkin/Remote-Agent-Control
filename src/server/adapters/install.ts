@@ -1,41 +1,30 @@
-import { fork, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdtemp, rm, readFile, mkdir, rename } from 'node:fs/promises';
+import Arborist from '@npmcli/arborist';
+import { manual as remove } from 'rimraf';
+import { mkdtemp, readFile, mkdir, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Config } from '../config.js';
 import { adapterDirectory, loadCatalog, saveCatalog, catalogLock, packageKey } from './catalog.js';
-import { hostEnvironment, readAdapterPackage } from './package.js';
-import { hostLaunch } from './proxy.js';
+import { readAdapterPackage } from './package.js';
+import { startHostProcess } from './process.js';
+import { checkPackage } from './protocol.js';
 export async function validatePackage(directory: string) {
   readAdapterPackage(directory);
-  const launch = hostLaunch();
-  await new Promise<void>((resolve, reject) => {
-    const child = fork(launch.path, [directory, '--check'], {
-      execArgv: launch.execArgv,
-      env: hostEnvironment(),
-      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      serialization: 'advanced',
-      windowsHide: true,
+  const host = startHostProcess(directory, undefined, true);
+  host.connection.listen();
+  const timer = setTimeout(() => void host.close(), 20000);
+  try {
+    const result = await host.connection.sendRequest(checkPackage);
+    if (result.sdk !== 1) throw Error('Unsupported adapter SDK protocol');
+  } catch (error) {
+    throw new Error(`Adapter factory or dependency check failed: ${(error as Error).message}`, {
+      cause: error,
     });
-    let valid = false;
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(Error('Adapter import check timed out'));
-    }, 20000);
-    child.on('message', (message: any) => {
-      if (message?.type === 'validated' && message.sdk === 1) valid = true;
-    });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      valid && code === 0 ? resolve() : reject(Error('Adapter factory or dependency check failed'));
-    });
-  });
+  } finally {
+    clearTimeout(timer);
+    await host.close();
+  }
 }
 export async function installAdapter(config: Config, spec: string) {
   const local = /\.(?:tgz|tar\.gz)$/.test(spec) && existsSync(resolve(spec));
@@ -45,31 +34,18 @@ export async function installAdapter(config: Config, spec: string) {
   loadCatalog(config);
   const stage = await mkdtemp(join(directory, 'stage-'));
   try {
-    const npm =
-      process.env.npm_execpath ??
-      [
-        join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'),
-        join(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js'),
-        '/usr/share/nodejs/npm/bin/npm-cli.js',
-      ].find(existsSync);
-    if (!npm) throw Error('npm CLI not found; run through npm run adapter');
-    await promisify(execFile)(
-      process.execPath,
-      [
-        npm,
-        'install',
-        '--prefix',
-        stage,
-        '--ignore-scripts',
-        '--omit=dev',
-        '--no-audit',
-        '--no-fund',
-        '--save-exact',
-        '--',
-        local ? resolve(spec) : spec,
-      ],
-      { timeout: 180000, maxBuffer: 1024 * 1024, windowsHide: true },
-    );
+    // Use npm's own dependency resolver/installer without locating or spawning a platform CLI.
+    const installer = new Arborist({
+      path: stage,
+      ignoreScripts: true,
+      omit: ['dev'],
+      audit: false,
+      saveExact: true,
+      packageLock: true,
+      fetchTimeout: 180000,
+      fetchRetries: 1,
+    });
+    await installer.reify({ add: [local ? resolve(spec) : spec] });
     const installed = JSON.parse(await readFile(join(stage, 'package.json'), 'utf8')).dependencies;
     const names = Object.keys(installed ?? {});
     if (names.length !== 1) throw Error('Expected exactly one adapter package');
@@ -94,6 +70,6 @@ export async function installAdapter(config: Config, spec: string) {
     });
     return key;
   } finally {
-    await rm(stage, { recursive: true, force: true });
+    await remove(stage);
   }
 }

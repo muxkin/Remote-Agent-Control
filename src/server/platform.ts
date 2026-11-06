@@ -1,7 +1,7 @@
 import { mkdirSync, chmodSync, lstatSync } from 'node:fs';
 import { execFile, execFileSync } from 'node:child_process';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import envPaths from 'env-paths';
+import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 
 /** OS facilities only. Product paths and protocols belong to their connectors. */
@@ -15,7 +15,7 @@ export interface PlatformRuntime {
 export class LinuxRuntime implements PlatformRuntime {
   readonly id: string = 'linux';
   stateDirectory() {
-    return join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'codex-pocket-remote');
+    return envPaths('codex-pocket-remote', { suffix: '' }).log;
   }
   privateDirectory(path: string) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
@@ -35,7 +35,7 @@ export class LinuxRuntime implements PlatformRuntime {
 export class MacRuntime extends LinuxRuntime {
   readonly id = 'darwin';
   stateDirectory() {
-    return join(homedir(), 'Library', 'Application Support', 'codex-pocket-remote');
+    return envPaths('codex-pocket-remote', { suffix: '' }).data;
   }
   async openFile(path: string) {
     await promisify(execFile)('open', [path], { timeout: 5000 });
@@ -54,7 +54,8 @@ export function powershell(script: string, env: NodeJS.ProcessEnv = process.env)
 export class WindowsRuntime implements PlatformRuntime {
   readonly id = 'win32';
   stateDirectory() {
-    return join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'codex-pocket-remote');
+    // Preserve the existing app root; env-paths adds a Data subdirectory on Windows.
+    return dirname(envPaths('codex-pocket-remote', { suffix: '' }).data);
   }
   privateDirectory(path: string) {
     mkdirSync(path, { recursive: true });

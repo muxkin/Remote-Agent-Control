@@ -1,10 +1,10 @@
 {
   "name": "codex-pocket-remote",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.15.0"
   },
   "scripts": {
     "dev": "node --import ./scripts/env.mjs --import tsx src/server/main.ts",
@@ -47,11 +47,11 @@
     "test:controls": "node --import tsx scripts/conversation-controls-smoke.ts",
     "build:adapters": "node scripts/build-adapters.mjs",
     "adapter": "node --import ./scripts/env.mjs --import tsx src/server/adapters/cli.ts",
-    "pretest": "npm run build:adapters",
+    "pretest": "npm run build:adapters && node scripts/build-server.mjs",
     "predev": "npm run build:adapters",
-    "test:adapters": "npm run build:adapters && vitest run test/adapter-host.test.ts test/adapter-packages.test.ts test/adapter-manager.test.ts",
+    "test:adapters": "npm run build:adapters && node scripts/build-server.mjs && vitest run test/adapter-host.test.ts test/adapter-packages.test.ts test/adapter-manager.test.ts",
     "test:adapter-ui": "node --import tsx scripts/adapter-ui-smoke.ts",
-    "package:adapters": "npm run build:adapters && node scripts/package-adapters.mjs"
+    "package:adapters": "npm run build:adapters"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -63,14 +63,18 @@
     "@libp2p/peer-id": "6.0.18",
     "@libp2p/utils": "7.4.5",
     "@noble/hashes": "2.0.1",
+    "@npmcli/arborist": "10.0.4",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "dompurify": "^3.4.17",
+    "env-paths": "4.0.0",
+    "execa": "10.2.1",
     "fastify": "^5.12.8",
     "idb": "8.0.4",
     "immer": "^11.2.9",
     "katex": "^0.19.1",
     "mermaid": "^12.3.0",
+    "pacote": "22.0.1",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
@@ -79,10 +83,12 @@
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "remark-parse": "^11.0.0",
+    "rimraf": "6.1.4",
     "shiki": "^4.6.0",
     "smol-toml": "^1.9.1",
     "uint8arraylist": "3.0.2",
     "unified": "^11.0.5",
+    "vscode-jsonrpc": "10.0.0",
     "werift": "^0.26.0",
     "ws": "^8.22.1",
     "yaml": "^2.9.1",
@@ -91,19 +97,21 @@
   "devDependencies": {
     "@playwright/test": "^1.64.1",
     "@types/node": "^24.19.2",
+    "@types/npmcli__arborist": "6.3.3",
+    "@types/pacote": "11.1.8",
     "@types/pngjs": "^6.0.5",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.2",
+    "esbuild": "^0.25.0",
     "jsqr": "^1.4.0",
     "pngjs": "^7.0.0",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vite": "^7.3.7",
-    "vitest": "^4.1.12",
-    "esbuild": "^0.25.0"
+    "vitest": "^4.1.12"
   },
   "license": "MIT",
   "description": "Encrypted mobile remote for existing Codex desktop and DSH Web conversations",

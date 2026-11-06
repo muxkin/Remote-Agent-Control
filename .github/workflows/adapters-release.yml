@@ -14,6 +14,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      - run: node scripts/build-server.mjs
       - run: npm run test:adapters
       - run: npm run package:adapters
       - name: Publish independently installable packages

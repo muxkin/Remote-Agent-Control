@@ -6,7 +6,7 @@ import { HostService } from './host-service.js';
 process.umask(0o077);
 const config = readConfig();
 const store = new Store(config.stateDir);
-const registry = builtinBackends(config);
+const registry = await builtinBackends(config);
 const host = await HostService.create(config, { store, registry });
 store.recover();
 await registry.start(false);

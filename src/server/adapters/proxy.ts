@@ -1,8 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { fork, type ChildProcess } from 'node:child_process';
+import { ResponseError } from 'vscode-jsonrpc/node';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import type { AgentBackend, BackendHistory } from '../backends/types.js';
 import type { BackendCommand } from '../backends/commands.js';
 import type { AdapterContext } from '../../../packages/adapter-sdk/src/index.js';
@@ -10,8 +8,9 @@ import type { BackendInfo, CapabilityName } from '../../shared/backends.js';
 import type { GatewayStatus, ThreadView } from '../../shared/types.js';
 import { DeliveryError } from '../delivery-error.js';
 import { SelectionError } from '../selection-error.js';
-import { hostEnvironment, type AdapterPackage } from './package.js';
-import type { Calls, FromHost, ToHost } from './protocol.js';
+import type { AdapterPackage } from './package.js';
+import { startHostProcess, type HostProcess } from './process.js';
+import { initialize, snapshot, event, fatal, request, type Calls, type RemoteError } from './protocol.js';
 const capabilities = [
   'history',
   'send',
@@ -46,21 +45,6 @@ const offline = (reason: string): GatewayStatus => ({
     queue: false,
   },
 });
-export function hostLaunch() {
-  const development = import.meta.url.endsWith('.ts');
-  const path = development
-    ? fileURLToPath(new URL('./host.ts', import.meta.url))
-    : ['./adapters/host.js', './host.js']
-        .map((p) => fileURLToPath(new URL(p, import.meta.url)))
-        .find(existsSync)!;
-  return { path, execArgv: development ? ['--import', import.meta.resolve('tsx')] : [] };
-}
-type Pending = {
-  resolve: (value: any) => void;
-  reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
-  write: boolean;
-};
 /** Stable gateway identity; only the private host behind it is replaceable. */
 export class AdapterProxy extends EventEmitter implements AgentBackend {
   readonly id: string;
@@ -70,11 +54,10 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
   exportLog?: AgentBackend['exportLog'];
   fileReferences?: AgentBackend['fileReferences'];
   attachment?: AgentBackend['attachment'];
-  private child?: ChildProcess;
-  private processes = new Set<ChildProcess>();
+  private host?: HostProcess;
+  private processes = new Set<HostProcess>();
   private generation = 0;
-  private sequence = 0;
-  private pending = new Map<number, Pending>();
+  private requests = new Set<{ write: boolean }>();
   private subscriptions = new Map<string, string>();
   private views = new Map<string, ThreadView>();
   private state = offline('插件正在连接');
@@ -87,7 +70,6 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
   private restartTimer?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
   private lastHeartbeat = 0;
-  private starting?: { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
   constructor(
     public packageInfo: AdapterPackage,
     private context: AdapterContext,
@@ -116,10 +98,10 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     };
   }
   get pid() {
-    return this.child?.pid;
+    return this.host?.child.pid;
   }
   get activeWrites() {
-    return [...this.pending.values()].filter((p) => p.write).length;
+    return [...this.requests].filter((p) => p.write).length;
   }
   info() {
     return { ...this.descriptor, connected: this.state.connected };
@@ -143,12 +125,8 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
   async stop() {
     this.stopped = true;
     clearTimeout(this.restartTimer);
-    this.retire('插件已断开');
-    await Promise.all(
-      [...this.processes].map(
-        (child) => new Promise<void>((resolve) => child.once('close', () => resolve())),
-      ),
-    );
+    await this.retire('插件已断开');
+    await Promise.all([...this.processes].map((host) => host.finished));
   }
   private publish(info: BackendInfo, status: GatewayStatus) {
     this.descriptor = {
@@ -181,24 +159,14 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     ++this.generation;
     this.ready = false;
     clearInterval(this.heartbeat);
-    const child = this.child;
-    this.child = undefined;
-    // Kill only our auxiliary host. It never owns the native Agent process.
-    child?.kill('SIGKILL');
-    if (this.starting) {
-      clearTimeout(this.starting.timer);
-      this.starting.reject(Error(reason));
-      this.starting = undefined;
-    }
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new DeliveryError(reason, !pending.write));
-    }
-    this.pending.clear();
+    const host = this.host;
+    this.host = undefined;
     this.unavailable(reason);
+    // Execa cancels only our auxiliary host; the native Agent is never its child.
+    return host?.close() ?? Promise.resolve();
   }
   private failed(reason: string) {
-    this.retire(reason);
+    void this.retire(reason);
     if (!this.stopped && !this.replacing) {
       clearTimeout(this.restartTimer);
       this.restartTimer = setTimeout(
@@ -209,104 +177,80 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     }
   }
   private async launch() {
-    if (this.child) throw Error('Plugin host already running');
     clearTimeout(this.restartTimer);
-    const generation = ++this.generation,
-      launch = hostLaunch();
-    const child = fork(launch.path, [this.packageInfo.root], {
-      execArgv: launch.execArgv,
-      env: hostEnvironment(),
-      cwd: this.context.stateDirectory,
-      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      serialization: 'advanced',
-      windowsHide: true,
+    // Do not overlap old/new hosts against one instance's private state directory.
+    await Promise.all([...this.processes].map((host) => host.finished));
+    if (this.stopped) throw Error('插件监督器已停止');
+    if (this.host) throw Error('Plugin host already running');
+    const generation = ++this.generation;
+    const host = startHostProcess(this.packageInfo.root, this.context.stateDirectory);
+    this.host = host;
+    this.processes.add(host);
+    const current = () => this.host === host && generation === this.generation;
+    void host.finished.then(() => {
+      this.processes.delete(host);
+      if (current()) this.failed('插件宿主退出，正在恢复');
     });
-    this.child = child;
-    this.processes.add(child);
-    child.once('close', () => this.processes.delete(child));
-    const promise = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => this.failed('插件启动超时'), this.timing.startup);
-      this.starting = { resolve, reject, timer };
+    const connection = host.connection;
+    connection.onClose(() => {
+      if (current()) this.failed('插件通信中断，正在恢复');
     });
-    child.on('error', () => {
-      if (this.child === child) this.failed('插件宿主无法启动');
+    connection.onError(() => {
+      if (current()) this.failed('插件通信失败，正在恢复');
     });
-    child.on('exit', () => {
-      if (this.child === child) this.failed('插件宿主退出，正在恢复');
+    connection.onNotification(fatal, (raw) => {
+      if (current() && raw.generation === generation) this.failed(`插件初始化失败：${raw.error}`);
     });
-    child.on('message', (raw: FromHost) => {
-      if (this.child !== child || generation !== this.generation || !raw || raw.generation !== generation)
-        return;
-      if (raw.type === 'fatal') {
-        this.failed(`插件初始化失败：${raw.error}`);
-        return;
+    connection.onNotification(snapshot, (raw) => {
+      if (current() && raw.generation === generation) this.publish(raw.info, raw.status);
+    });
+    connection.onNotification(event, (raw) => {
+      if (!current() || raw.generation !== generation) return;
+      if (raw.event === 'thread') {
+        const view = raw.args[0] as ThreadView;
+        if (![...this.subscriptions.values()].includes(view.id)) return;
+        this.views.set(view.id, view);
       }
-      if (raw.type === 'ready') {
-        for (const name of ['controls', 'exportLog', 'fileReferences', 'attachment'] as const)
-          (this as any)[name] = raw.optionalMethods.includes(name)
-            ? (...args: any[]) => this.call(name, args as any)
-            : undefined;
-        const subscriptions = [...this.subscriptions];
-        this.ready = true;
-        this.maxUploadBytes = raw.maxUploadBytes;
-        this.publish(raw.info, raw.status);
-        this.lastHeartbeat = Date.now();
-        this.heartbeat = setInterval(() => {
-          if (Date.now() - this.lastHeartbeat > this.timing.hang) {
-            this.failed('插件宿主无响应，正在恢复');
-            return;
-          }
-          void this.call('ping', [])
-            .then(() => {
-              if (this.child === child) this.lastHeartbeat = Date.now();
-            })
-            .catch(() => {});
-        }, this.timing.heartbeat);
-        this.heartbeat.unref();
-        void this.restore(subscriptions)
-          .then(() => {
-            if (this.child !== child) return;
-            this.attempts = 0;
-            if (this.starting) {
-              clearTimeout(this.starting.timer);
-              this.starting.resolve();
-              this.starting = undefined;
-            }
-          })
-          .catch(() => {
-            if (this.child === child) this.failed('插件订阅恢复失败');
-          });
-      } else if (raw.type === 'snapshot') {
-        this.publish(raw.info, raw.status);
-      } else if (raw.type === 'reply') {
-        const pending = this.pending.get(raw.id);
-        if (!pending) return;
-        this.pending.delete(raw.id);
-        clearTimeout(pending.timer);
-        if (raw.error) {
-          const e = raw.error;
-          pending.reject(
-            e.kind === 'delivery'
-              ? new DeliveryError(e.message, e.notSent, e.outcome)
-              : e.kind === 'selection'
-                ? new SelectionError(e.message)
-                : new Error(e.message),
-          );
-        } else pending.resolve(raw.value);
-      } else if (raw.type === 'event') {
-        if (raw.event === 'thread') {
-          const view = raw.args[0] as ThreadView;
-          if (![...this.subscriptions.values()].includes(view.id)) return;
-          this.views.set(view.id, view);
+      this.emit(raw.event, ...raw.args);
+    });
+    connection.listen();
+    const timer = setTimeout(() => {
+      if (current()) this.failed('插件启动超时');
+    }, this.timing.startup);
+    try {
+      const raw = await connection.sendRequest(initialize, { generation, sdk: 1, context: this.context });
+      if (!current() || raw.generation !== generation) throw Error('插件连接已更换');
+      for (const name of ['controls', 'exportLog', 'fileReferences', 'attachment'] as const)
+        (this as any)[name] = raw.optionalMethods.includes(name)
+          ? (...args: any[]) => this.call(name, args as any)
+          : undefined;
+      const subscriptions = [...this.subscriptions];
+      this.ready = true;
+      this.maxUploadBytes = raw.maxUploadBytes;
+      this.publish(raw.info, raw.status);
+      this.lastHeartbeat = Date.now();
+      this.heartbeat = setInterval(() => {
+        if (!current()) return;
+        if (Date.now() - this.lastHeartbeat > this.timing.hang) {
+          this.failed('插件宿主无响应，正在恢复');
+          return;
         }
-        this.emit(raw.event, ...raw.args);
-      }
-    });
-    const init: ToHost = { type: 'init', generation, sdk: 1, context: this.context };
-    child.send(init, (error) => {
-      if (error && this.child === child) this.failed('插件初始化通道中断');
-    });
-    await promise;
+        void this.call('ping', [])
+          .then(() => {
+            if (current()) this.lastHeartbeat = Date.now();
+          })
+          .catch(() => {});
+      }, this.timing.heartbeat);
+      this.heartbeat.unref();
+      await this.restore(subscriptions);
+      if (!current()) throw Error('插件订阅恢复时连接已更换');
+      this.attempts = 0;
+    } catch (error) {
+      if (current()) this.failed(`插件初始化失败：${(error as Error).message}`);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
   private async restore(subscriptions: [string, string][]) {
     for (const [token, id] of subscriptions) {
@@ -318,27 +262,41 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
       if (!this.subscriptions.has(token)) await this.call('unsubscribe', [token]);
     }
   }
-  private call<K extends keyof Calls>(method: K, args: Calls[K]['args']): Promise<Calls[K]['result']> {
+  private async call<K extends keyof Calls>(method: K, args: Calls[K]['args']): Promise<Calls[K]['result']> {
     const write = method === 'execute' || method === 'openThread';
-    if (!this.child || !this.ready || (write && this.draining))
-      return Promise.reject(
-        new DeliveryError(
-          this.draining ? '此实例正在升级，请稍后重试' : (this.state.reason ?? '插件未连接'),
-          true,
-        ),
+    const host = this.host,
+      generation = this.generation;
+    if (!host || !this.ready || (write && this.draining))
+      throw new DeliveryError(
+        this.draining ? '此实例正在升级，请稍后重试' : (this.state.reason ?? '插件未连接'),
+        true,
       );
-    const id = ++this.sequence,
-      child = this.child;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (this.pending.has(id)) this.failed('插件请求超时，结果待确认');
-      }, this.timing.request);
-      this.pending.set(id, { resolve, reject, timer, write });
-      const message: ToHost = { type: 'call', generation: this.generation, id, method, args };
-      child.send(message, (error) => {
-        if (error && this.child === child) this.failed('插件通信中断，结果待确认');
-      });
-    });
+    // This set tracks business handoff only. JSON-RPC manages request IDs and promises.
+    const pending = { write };
+    this.requests.add(pending);
+    const timer = setTimeout(() => {
+      if (this.host === host) this.failed('插件请求超时，结果待确认');
+    }, this.timing.request);
+    try {
+      const value = await host.connection.sendRequest(request(method), { generation, args });
+      if (this.host !== host || generation !== this.generation)
+        throw new DeliveryError('插件连接已更换，结果待确认', !write);
+      return value;
+    } catch (error) {
+      if (error instanceof DeliveryError) throw error;
+      if (this.host !== host || generation !== this.generation)
+        throw new DeliveryError(this.state.reason ?? '插件连接已更换，结果待确认', !write);
+      if (error instanceof ResponseError) {
+        const e = error.data as RemoteError | undefined;
+        if (e?.kind === 'delivery') throw new DeliveryError(e.message, e.notSent, e.outcome);
+        if (e?.kind === 'selection') throw new SelectionError(e.message);
+        if (e?.kind === 'error') throw new Error(error.message);
+      }
+      throw new DeliveryError(this.state.reason ?? '插件通信中断，结果待确认', !write);
+    } finally {
+      clearTimeout(timer);
+      this.requests.delete(pending);
+    }
   }
   async acquire(id: string) {
     const token = randomUUID();
@@ -380,14 +338,15 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
       if (this.stopped) throw Error('插件监督器已停止');
       if (this.generation !== generation) throw Error('宿主在交接期间断开，升级已延后；正在恢复原版本');
       if (this.activeWrites) throw Error('仍有操作等待原生确认，升级已延后；旧宿主继续运行');
-      this.retire('插件正在升级');
+      await this.retire('插件正在升级');
+      if (this.stopped) throw Error('插件监督器已停止');
       this.issue = undefined;
       this.stopped = false;
       this.packageInfo = next;
       try {
         await this.launch();
       } catch (error) {
-        this.retire('升级失败，正在恢复旧版本');
+        await this.retire('升级失败，正在恢复旧版本');
         this.packageInfo = previous;
         if (this.stopped) throw error;
         await this.launch();
@@ -396,7 +355,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     } finally {
       this.replacing = false;
       this.draining = false;
-      if (!this.child && !this.stopped) this.failed('插件连接中断，正在恢复');
+      if (!this.host && !this.stopped) this.failed('插件连接中断，正在恢复');
     }
   }
   waitForView(id: string, timeout?: number) {
