@@ -68,11 +68,19 @@ it('creates private storage using native permissions', () => {
   writeFileSync(file, 'fixture');
   runtime.privateFile(file);
   if (process.platform === 'win32') {
-    const identities = powershell(
-      '(Get-Acl -LiteralPath $env:POCKET_PRIVATE_PATH).Access | ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}',
-      { ...process.env, POCKET_PRIVATE_PATH: file },
-    ).split(/\r?\n/);
-    expect(identities.every((id) => id === 'S-1-5-18' || id.startsWith('S-1-5-21-'))).toBe(true);
+    const permissions = JSON.parse(
+      powershell(
+        `$acl=Get-Acl -LiteralPath $env:POCKET_PRIVATE_PATH
+@{owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;
+user=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
+protected=$acl.AreAccessRulesProtected;
+identities=@($acl.Access | ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value})} | ConvertTo-Json -Compress`,
+        { ...process.env, POCKET_PRIVATE_PATH: file },
+      ),
+    );
+    expect(permissions.owner).toBe(permissions.user);
+    expect(permissions.protected).toBe(true);
+    expect(new Set(permissions.identities)).toEqual(new Set(['S-1-5-18', permissions.user]));
   } else {
     expect(statSync(dir).mode & 0o777).toBe(0o700);
     expect(statSync(file).mode & 0o777).toBe(0o600);

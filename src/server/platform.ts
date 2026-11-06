@@ -65,9 +65,16 @@ export class WindowsRuntime implements PlatformRuntime {
     powershell(
       `$ErrorActionPreference='Stop'
 $p=$env:POCKET_PRIVATE_PATH
-$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$identity=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+$sid=$identity.User
 $acl=Get-Acl -LiteralPath $p
-if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) {throw 'Unexpected private path owner'}
+$owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+if ($owner -ne $sid.Value) {
+  # Elevated Windows processes create files owned by the token's default Administrators owner.
+  # Normalize only that case; unrelated owners are still rejected.
+  if ($owner -ne 'S-1-5-32-544' -or $owner -ne $identity.Owner.Value) {throw 'Unexpected private path owner'}
+  $acl.SetOwner($sid)
+}
 $acl.SetAccessRuleProtection($true,$false)
 foreach($r in @($acl.Access)) {$acl.RemoveAccessRuleSpecific($r)}
 $inherit=if(Test-Path -LiteralPath $p -PathType Container){'ContainerInherit,ObjectInherit'}else{'None'}

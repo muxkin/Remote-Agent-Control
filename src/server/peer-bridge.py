@@ -24,6 +24,9 @@ def windows_pipe(path, expected_exe):
     def api(lib, name, restype, *argtypes):
         fn = getattr(lib, name); fn.restype = restype; fn.argtypes = argtypes
         return fn
+    class Overlapped(ctypes.Structure):
+        _fields_ = [('Internal', ctypes.c_size_t), ('InternalHigh', ctypes.c_size_t),
+                    ('Offset', w.DWORD), ('OffsetHigh', w.DWORD), ('hEvent', w.HANDLE)]
     create = api(k, 'CreateFileW', w.HANDLE, w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE)
     close = api(k, 'CloseHandle', w.BOOL, w.HANDLE)
     server_pid = api(k, 'GetNamedPipeServerProcessId', w.BOOL, w.HANDLE, ctypes.POINTER(w.ULONG))
@@ -33,8 +36,10 @@ def windows_pipe(path, expected_exe):
     open_token = api(a, 'OpenProcessToken', w.BOOL, w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE))
     token_info = api(a, 'GetTokenInformation', w.BOOL, w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD))
     equal_sid = api(a, 'EqualSid', w.BOOL, ctypes.c_void_p, ctypes.c_void_p)
-    read = api(k, 'ReadFile', w.BOOL, w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p)
-    write = api(k, 'WriteFile', w.BOOL, w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p)
+    read = api(k, 'ReadFile', w.BOOL, w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.POINTER(Overlapped))
+    write = api(k, 'WriteFile', w.BOOL, w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.POINTER(Overlapped))
+    create_event = api(k, 'CreateEventW', w.HANDLE, ctypes.c_void_p, w.BOOL, w.BOOL, w.LPCWSTR)
+    result = api(k, 'GetOverlappedResult', w.BOOL, w.HANDLE, ctypes.POINTER(Overlapped), ctypes.POINTER(w.DWORD), w.BOOL)
     def user(process):
         token = w.HANDLE()
         if not open_token(process, 8, ctypes.byref(token)): raise RuntimeError('cannot-read-peer-token')
@@ -47,8 +52,20 @@ def windows_pipe(path, expected_exe):
         finally: close(token)
     if not path.lower().startswith('\\\\.\\pipe\\'): raise RuntimeError('not-a-local-named-pipe')
     # Identification-only security context prevents the server impersonating this client.
-    handle = create(path, 0xc0000000, 0, None, 3, 0x00110000, None)
+    # Independent overlapped operations allow writes while the reader waits for input.
+    handle = create(path, 0xc0000000, 0, None, 3, 0x00110000 | 0x40000000, None)
     if handle == ctypes.c_void_p(-1).value: raise RuntimeError('pipe-unavailable')
+    def transfer(operation, buf, size):
+        pending = Overlapped()
+        pending.hEvent = create_event(None, True, False, None)
+        if not pending.hEvent: raise RuntimeError('cannot-create-pipe-event')
+        try:
+            count = w.DWORD()
+            if not operation(handle, buf, size, ctypes.byref(count), ctypes.byref(pending)):
+                if ctypes.get_last_error() != 997: return 0  # ERROR_IO_PENDING
+                if not result(handle, ctypes.byref(pending), ctypes.byref(count), True): return 0
+            return count.value
+        finally: close(pending.hEvent)
     try:
         pid = w.ULONG()
         if not server_pid(handle, ctypes.byref(pid)): raise RuntimeError('cannot-identify-pipe-server')
@@ -64,9 +81,11 @@ def windows_pipe(path, expected_exe):
         for fd in (0, 1): msvcrt.setmode(fd, os.O_BINARY)
         print(json.dumps({'type': 'ready', 'pid': pid.value}), file=sys.stderr, flush=True)
         def downlink():
-            buf = ctypes.create_string_buffer(65536); count = w.DWORD()
-            while read(handle, buf, len(buf), ctypes.byref(count), None) and count.value:
-                data = memoryview(buf.raw)[:count.value]
+            buf = ctypes.create_string_buffer(65536)
+            while True:
+                count = transfer(read, buf, len(buf))
+                if not count: break
+                data = memoryview(buf.raw)[:count]
                 while data: data = data[os.write(1, data):]
             os._exit(0)
         threading.Thread(target=downlink, daemon=True).start()
@@ -74,9 +93,10 @@ def windows_pipe(path, expected_exe):
             data = os.read(0, 65536)
             if not data: return
             while data:
-                count = w.DWORD(); buf = ctypes.create_string_buffer(data)
-                if not write(handle, buf, len(data), ctypes.byref(count), None) or not count.value: return
-                data = data[count.value:]
+                buf = ctypes.create_string_buffer(data)
+                count = transfer(write, buf, len(data))
+                if not count: return
+                data = data[count:]
     finally: close(handle)
 
 
