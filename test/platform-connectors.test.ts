@@ -15,7 +15,7 @@ const cleanup: (() => void)[] = [];
 it.skipIf(process.platform === 'win32')(
   'discovers user-scoped and legacy app sockets without accepting other users or regular files',
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'pocket-discovery-'));
+    const root = mkdtempSync(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'pocket-discovery-'));
     const servers: ReturnType<typeof createServer>[] = [];
     cleanup.push(() => {
       servers.forEach((server) => server.close());
