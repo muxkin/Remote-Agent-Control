@@ -1,5 +1,6 @@
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote';
 import questionRemote from '@deepseek-ai/dsh-user-questions/remote';
+import workspaceRemote from '@deepseek-ai/dsh-api-workspace-controller/remote';
 import { EventEmitter } from 'node:events';
 import type { DshConnection } from '../src/server/connectors/dsh-web.js';
 export class DshFixtureConnection extends EventEmitter implements DshConnection {
@@ -16,6 +17,7 @@ export class DshFixtureConnection extends EventEmitter implements DshConnection 
   created = new Map<string, string>();
   streams = new Map<string, (frame: any) => void>();
   opens = 0;
+  workspaces: any[] = [];
   async start() {
     this.connected = true;
     this.emit('connected');
@@ -30,7 +32,13 @@ export class DshFixtureConnection extends EventEmitter implements DshConnection 
     this.emit('disconnected');
   }
   async call<T = any>(endpoint: string, args: any): Promise<T> {
-    const method = ({ ...sessionRemote.methods, ...questionRemote.methods } as Record<string, any>)[endpoint];
+    const method = (
+      { ...sessionRemote.methods, ...questionRemote.methods, ...workspaceRemote.methods } as Record<
+        string,
+        any
+      >
+    )[endpoint];
+    if (!method && endpoint !== '$events/result') throw Error(`Unknown DSH endpoint: ${endpoint}`);
     method?.input({ strict: true }).create().parse(args);
     this.calls.push({ endpoint, args });
     if (endpoint === 'session/create') this.created.set(args.request.sessionId, '新会话');
@@ -62,7 +70,6 @@ export class DshFixtureConnection extends EventEmitter implements DshConnection 
           })),
         ],
       },
-      'workspace/list': { items: [] },
       'session/modelCatalog': {
         groups: [{ id: 'provider', name: 'Provider', models: [{ id: 'model', name: 'Model' }] }],
       },
@@ -73,6 +80,19 @@ export class DshFixtureConnection extends EventEmitter implements DshConnection 
     }[endpoint] ?? {}) as T;
   }
   stream(endpoint: string, args: any, item: (frame: any) => void) {
+    if (endpoint === 'workspace/follow') {
+      let cancelled = false;
+      queueMicrotask(() => {
+        if (!cancelled)
+          item({
+            type: 'baseline',
+            value: { items: this.workspaces, archivedSessionIds: [], pinnedSessionIds: [] },
+          });
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     const key = endpoint === 'session/follow' ? args.request.address.sessionId : endpoint;
     this.streams.set(key, item);
     if (endpoint === 'session/follow') {

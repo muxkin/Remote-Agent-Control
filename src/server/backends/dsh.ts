@@ -5,6 +5,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, win32, posix } from 'node:path';
 import { attachmentLinks } from '../media.js';
 import { assembleAssistantStream } from '@deepseek-ai/dsh-llm/assistant-stream';
+import type { WorkspaceFollowFrame, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/types';
 import type {
   SessionFollowFrame,
   SessionWireEvent,
@@ -165,9 +166,9 @@ export class DshBackend extends EventEmitter implements AgentBackend {
           ? { state: 'unsupported', reason: 'DSH 使用原生技能目录' }
           : !this.connection.connected
             ? { state: 'unavailable', reason: 'DSH Web 未连接，请检查实例地址和访问凭据' }
-            : name !== 'history' && (this.readOnly || this.config.version !== '0.2.1-rc.5')
-              ? { state: 'unavailable', reason: this.readOnly ? '只读模式' : '此 DSH 协议版本尚未验证' }
-              : { state: 'experimental', reason: '0.2.1-rc.5 契约适配；需完成实际实例验收' };
+            : name !== 'history' && this.readOnly
+              ? { state: 'unavailable', reason: '只读模式' }
+              : { state: 'experimental' };
     }
     return {
       id: this.id,
@@ -269,9 +270,9 @@ export class DshBackend extends EventEmitter implements AgentBackend {
   }
   private async list(cursor?: string, limit = 10000, project?: string, query = '') {
     const result = await this.connection.call<{ items: SessionSummary[] }>('session/list', { _request: {} });
-    let workspaces: any[] = [];
+    let workspaces: readonly WorkspaceView[] = [];
     try {
-      workspaces = (await this.connection.call('workspace/list', {})).items;
+      workspaces = await this.workspaces();
     } catch {
       /* Optional native workspace service. */
     }
@@ -302,9 +303,40 @@ export class DshBackend extends EventEmitter implements AgentBackend {
       nextCursor: offset + limit < rows.length ? String(offset + limit) : null,
     };
   }
+  private workspaces(): Promise<readonly WorkspaceView[]> {
+    // The native API exposes a replacement baseline through follow, not a list RPC.
+    return new Promise((resolve, reject) => {
+      let cancel: (() => void) | undefined,
+        settled = false;
+      const finish = (items?: readonly WorkspaceView[]) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.connection.off('disconnected', disconnected);
+        cancel?.();
+        if (items) resolve(items);
+        else reject(new DeliveryError('DSH 工作区目录暂不可用', true));
+      };
+      const disconnected = () => finish();
+      const timer = setTimeout(disconnected, 10000);
+      this.connection.once('disconnected', disconnected);
+      try {
+        cancel = this.connection.stream(
+          'workspace/follow',
+          {},
+          (frame: WorkspaceFollowFrame) => {
+            if (frame.type === 'baseline') finish(frame.value.items);
+          },
+          disconnected,
+        );
+        if (settled) cancel();
+      } catch {
+        finish();
+      }
+    });
+  }
   async projects(_id: string) {
-    const result = await this.connection.call('workspace/list', {});
-    return result.items.map((w: any) => ({ id: w.workspaceId, name: w.title, path: w.path }));
+    return (await this.workspaces()).map((w) => ({ id: w.workspaceId, name: w.title, path: w.path }));
   }
   private initial(id: string): ThreadView {
     return {
@@ -505,17 +537,19 @@ export class DshBackend extends EventEmitter implements AgentBackend {
         const op = e.surfaceOp as any;
         if (op?.op === 'replace')
           for (const seq of messages.keys()) if (seq >= op.startSeq && seq <= op.endSeq) messages.delete(seq);
+        const context = m.role === 'user' && m.source?.kind && m.source.kind !== 'user';
         messages.set(e.seq, {
           id: m.id ?? `event-${e.seq}`,
-          role: m.role,
-          text: text(m.content),
+          role: context ? 'tool' : m.role,
+          text: context ? `DSH 上下文 · ${m.source.kind}` : text(m.content),
           turnId: turnId ?? undefined,
           clientMessageId: m.source?.rpcId,
-          details:
-            m.content
-              ?.filter((b: any) => b.type === 'reasoning')
-              .map((b: any) => b.text)
-              .join('\n') || undefined,
+          details: context
+            ? text(m.content)
+            : m.content
+                ?.filter((b: any) => b.type === 'reasoning')
+                .map((b: any) => b.text)
+                .join('\n') || undefined,
           attachments: m.content
             ?.filter((b: any) => b.type === 'image' || b.type === 'file')
             .map((b: any) => ({

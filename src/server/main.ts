@@ -14,7 +14,7 @@ host.start();
 console.log(`Codex Pocket Remote v2 connecting to ${config.origin}; no inbound business port`);
 for (const backend of registry.all())
   console.log(
-    `${backend.id}: connected=${backend.status().connected}; controls=${backend.status().writesEnabled}`,
+    `${backend.id}: connected=${backend.status().connected}; controls=${backend.status().writesEnabled}; version=${backend.status().desktopVersion ?? 'unknown'}; referenceBuild=${backend.status().supportedVersion}`,
   );
 let closing = false;
 async function close() {

@@ -83,16 +83,14 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   }
   status(): GatewayStatus {
     const profile = codexProfile((this.config.platform ?? platformRuntime()).id, this.version);
-    const supportedVersion = profile.controls;
-    const writesEnabled = this.ready && supportedVersion && !this.config.readOnly;
+    const supportedVersion = profile.verified;
+    const writesEnabled = this.ready && profile.controls && !this.config.readOnly;
     return {
       connected: this.ready,
       desktopVersion: this.version,
       supportedVersion,
       writesEnabled,
-      reason:
-        this.lastError ??
-        (!supportedVersion ? '桌面版本未经验证，控制已关闭' : this.config.readOnly ? '只读模式' : null),
+      reason: this.lastError ?? (this.config.readOnly ? '只读模式' : null),
       capabilities: {
         send: writesEnabled,
         steer: writesEnabled,
@@ -115,7 +113,9 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   private async connect(): Promise<void> {
     if (this.stopped) return;
     try {
-      this.version = await connectorFor(this.config).version(this.config.desktopRoot);
+      this.version = await connectorFor(this.config)
+        .version(this.config.desktopRoot)
+        .catch(() => null);
       const transport = this.factory();
       this.transport = transport;
       transport.on('broadcast', (message) => this.receive(message));
@@ -138,7 +138,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
         return;
       }
       this.ready = true;
-      if (this.status().supportedVersion) await this.appTools.probe().catch(() => {});
+      await this.appTools.probe().catch(() => {});
       this.lastError = null;
       this.attempt = 0;
       this.emit('status', this.status());
@@ -393,7 +393,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
     requestId: string,
   ): Promise<string | null> {
     if (kind === 'create') {
-      if (!this.status().writesEnabled) throw new DeliveryError('桌面未连接或版本不兼容', true);
+      if (!this.status().writesEnabled) throw new DeliveryError('桌面未连接或处于只读模式', true);
       return this.appTools.create(id, requestId, JSON.parse(input));
     }
     const sub = this.subscriptions.get(id);

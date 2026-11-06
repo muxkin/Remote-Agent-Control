@@ -37,7 +37,7 @@ After=network-online.target
 WorkingDirectory=${unitPath(process.cwd())}
 EnvironmentFile=${unitPath(resolve(values['env-file']!))}
 ExecStart=${quote(process.execPath)} ${quote(resolve('dist/server/main.js'))}
-Restart=on-failure
+Restart=always
 RestartSec=3
 UMask=0077
 [Install]

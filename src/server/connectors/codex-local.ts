@@ -143,11 +143,13 @@ export class LocalCodexConnector implements CodexConnector {
 }
 export const connectorFor = (config: Config) => config.codexConnector ?? new LocalCodexConnector();
 export function codexProfile(platform: string, version: string | null) {
-  const known = ['linux', 'darwin', 'win32'].includes(platform) && version === '26.1029.61003';
+  const supportedPlatform = ['linux', 'darwin', 'win32'].includes(platform);
   return {
     id: `codex/${platform}/${version ?? 'unknown'}/follower-v1`,
-    controls: known,
+    // A product build is diagnostic metadata, not a negotiated protocol version.
+    verified: supportedPlatform && version === '26.1029.61003',
+    controls: supportedPlatform,
     experimental: platform !== 'linux',
-    nativeOpen: known && platform === 'linux',
+    nativeOpen: platform === 'linux',
   };
 }

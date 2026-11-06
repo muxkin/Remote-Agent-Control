@@ -86,8 +86,10 @@ identities=@($acl.Access | ForEach-Object {$_.IdentityReference.Translate([Syste
     expect(statSync(file).mode & 0o777).toBe(0o600);
   }
 });
-it('keeps unverified versions read-only and never describes other OS profiles as desktop-verified', () => {
-  expect(codexProfile('win32', 'unknown').controls).toBe(false);
+it('keeps build verification separate from controls and platform support', () => {
+  expect(codexProfile('win32', 'unknown').controls).toBe(true);
+  expect(codexProfile('win32', 'unknown').verified).toBe(false);
+  expect(codexProfile('linux', null).nativeOpen).toBe(true);
   expect(codexProfile('darwin', '26.1029.61003').experimental).toBe(true);
   expect(codexPaths('linux', '/home/test/.codex').socketPath).toBe(
     join('/home/test/.codex', 'ipc', 'ipc.sock'),

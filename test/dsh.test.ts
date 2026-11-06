@@ -63,6 +63,49 @@ it('maps native durable events to shared messages and operation completion witho
   expect(conn.calls.filter((c) => c.endpoint === 'session/prompt')).toHaveLength(1);
   expect(conn.calls.some((c) => /launch|start|shutdown|dispose/.test(c.endpoint))).toBe(false);
 });
+it('reads workspace baselines and refreshes grouping without a fabricated list RPC', async () => {
+  const { conn, backend } = await setup();
+  conn.workspaces = [
+    {
+      workspaceId: 'workspace',
+      title: 'Project',
+      path: '/fixture',
+      sessionIds: ['shared'],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ];
+  expect(await backend.projects('shared')).toEqual([{ id: 'workspace', name: 'Project', path: '/fixture' }]);
+  expect((await backend.history.list()).threads[0].projectId).toBe('workspace');
+  expect(await backend.history.projects()).toMatchObject({
+    projects: [{ id: 'workspace', count: 1 }],
+    ungrouped: 0,
+  });
+  conn.workspaces = [];
+  expect((await backend.history.list()).threads[0].projectId).toBeNull();
+  expect(conn.calls.some((c) => c.endpoint === 'workspace/list')).toBe(false);
+});
+it('preserves injected context as collapsed activity rather than impersonating user messages', async () => {
+  const { conn, backend } = await setup();
+  conn.push({
+    type: 'event',
+    event: {
+      seq: 0,
+      time: 1,
+      type: 'user/message',
+      surfaceOp: 'append',
+      data: {
+        id: 'context',
+        role: 'user',
+        source: { kind: 'runtime-context', form: 'snapshot', sections: [] },
+        content: [{ type: 'text', text: 'Runtime instructions' }],
+      },
+    },
+  });
+  expect(backend.view('shared')!.messages).toMatchObject([
+    { role: 'tool', text: 'DSH 上下文 · runtime-context', details: 'Runtime instructions' },
+  ]);
+});
 it('withdraws native answers, delegates unknown interactions and rejects replies from old connections', async () => {
   const { conn, backend } = await setup();
   const event = {

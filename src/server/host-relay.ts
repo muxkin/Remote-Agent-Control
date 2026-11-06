@@ -117,7 +117,8 @@ export class HostRelay {
           },
           Math.min(15000, 500 * 2 ** attempt),
         );
-        timer.unref();
+        // The gateway must stay alive while the network or relay is unavailable,
+        // including at login before a desktop IPC connection exists.
         this.timers.add(timer);
       }
     });

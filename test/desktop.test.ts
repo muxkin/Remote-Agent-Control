@@ -437,10 +437,29 @@ describe('Desktop follower', () => {
     });
     expect(d.view(THREAD)?.canSend).toBe(false);
   });
-  it('disables writes on an unrecognized desktop version', async () => {
-    const { d } = await setup('future');
-    expect(d.status().writesEnabled).toBe(false);
-    await expect(d.control(THREAD, 'send', 'text', 'id')).rejects.toThrow();
+  it('keeps compatible controls available after a desktop build update without UI warnings', async () => {
+    const { d, t } = await setup('future');
+    expect(d.status().supportedVersion).toBe(false);
+    expect(d.status().writesEnabled).toBe(true);
+    expect(d.status().reason).toBeNull();
+    expect(d.view(THREAD)?.canSend).toBe(true);
+    await d.control(THREAD, 'send', 'text', 'id');
+    expect(t.calls.at(-1).method).toBe('thread-follower-start-turn');
+  });
+  it('connects even when product version metadata cannot be read', async () => {
+    const { d, c, t } = await setup();
+    d.stop();
+    rmSync(join(c.desktopRoot, 'resources/linux-package-metadata.json'));
+    await d.start();
+    await d.acquire(THREAD);
+    expect(d.status()).toMatchObject({
+      connected: true,
+      desktopVersion: null,
+      writesEnabled: true,
+      reason: null,
+    });
+    await d.control(THREAD, 'send', 'text', 'id');
+    expect(t.calls.at(-1).method).toBe('thread-follower-start-turn');
   });
   it('loses authority when the desktop owner disconnects', async () => {
     const { t, d } = await setup();
