@@ -1,5 +1,6 @@
 import { readInstances, type AdapterInstance } from './adapters/config.js';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { assetSettings } from '../shared/assets.js';
@@ -40,7 +41,15 @@ export function readConfig(): Config {
   ) {
     throw new Error('POCKET_PUBLIC_ORIGIN must be an HTTPS origin (HTTP is allowed only on loopback).');
   }
-  const projectRoot = fileURLToPath(new URL('../..', import.meta.url));
+  let projectRoot = dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const manifest = resolve(projectRoot, 'package.json');
+    if (existsSync(manifest) && JSON.parse(readFileSync(manifest, 'utf8')).name === 'codex-pocket-remote')
+      break;
+    const parent = dirname(projectRoot);
+    if (parent === projectRoot) throw Error('Gateway package root not found');
+    projectRoot = parent;
+  }
   const platform = platformRuntime();
   return {
     port,
