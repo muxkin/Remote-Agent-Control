@@ -98,7 +98,7 @@ export class AdapterManager extends BackendRegistry {
     const connections = super.start();
     if (waitForConnections) await connections;
     else void connections;
-    if (!this.supervise) return;
+    if (!this.supervise || this.closed) return;
     this.writeStatus();
     this.timer = setInterval(() => {
       this.writeStatus();
@@ -118,22 +118,26 @@ export class AdapterManager extends BackendRegistry {
     }
   }
   private writeStatus() {
-    writeJson(join(adapterDirectory(this.config), 'status.json'), {
-      updatedAt: Date.now(),
-      pid: process.pid,
-      instances: this.all().map((raw) => {
-        const p = raw as AdapterProxy;
-        return {
-          id: p.id,
-          plugin: p.packageInfo.name,
-          version: p.packageInfo.version,
-          pid: p.pid,
-          connected: p.status().connected,
-          reason: p.status().reason,
-          activeWrites: p.activeWrites,
-        };
-      }),
-    });
+    writeJson(
+      join(adapterDirectory(this.config), 'status.json'),
+      {
+        updatedAt: Date.now(),
+        pid: process.pid,
+        instances: this.all().map((raw) => {
+          const p = raw as AdapterProxy;
+          return {
+            id: p.id,
+            plugin: p.packageInfo.name,
+            version: p.packageInfo.version,
+            pid: p.pid,
+            connected: p.status().connected,
+            reason: p.status().reason,
+            activeWrites: p.activeWrites,
+          };
+        }),
+      },
+      true,
+    );
   }
   private async applyRequests() {
     if (this.applying || this.closed) return;
@@ -170,7 +174,6 @@ export class AdapterManager extends BackendRegistry {
       }
     } finally {
       this.applying = false;
-      this.writeStatus();
     }
   }
 }

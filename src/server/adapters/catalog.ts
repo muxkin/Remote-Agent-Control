@@ -12,11 +12,12 @@ export interface Catalog {
 }
 export const packageKey = (pack: AdapterPackage) => `${pack.name}@${pack.version}`;
 export const adapterDirectory = (config: Config) => join(config.stateDir, 'adapters');
-export function writeJson(path: string, value: unknown) {
+export function writeJson(path: string, value: unknown, privateParent = false) {
   const temp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
   renameSync(temp, path);
-  platformRuntime().privateFile(path);
+  // Atomic files inherit the already restricted Windows parent ACL.
+  if (!privateParent) platformRuntime().privateFile(path);
 }
 export function loadCatalog(config: Config): Catalog {
   const directory = adapterDirectory(config);

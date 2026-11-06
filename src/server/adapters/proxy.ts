@@ -131,6 +131,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     return this.views.get(id) ?? null;
   }
   async start() {
+    this.stopped = false;
     if (this.issue) {
       this.unavailable(this.issue);
       return;
@@ -363,6 +364,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
   }
   /** Drain before replacing. A timeout leaves the old process alive and accepting work again. */
   async replace(next: AdapterPackage, drainMs = 10000) {
+    if (this.stopped) throw Error('插件监督器已停止');
     if (this.replacing) throw Error('此实例已有升级正在进行');
     if (next.name !== this.packageInfo.name) throw Error('实例不能通过升级更换插件类型');
     if (next.agentAdapter.stateVersion !== this.packageInfo.agentAdapter.stateVersion)
@@ -374,6 +376,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     try {
       while (this.activeWrites && Date.now() < deadline)
         await new Promise((resolve) => setTimeout(resolve, 50));
+      if (this.stopped) throw Error('插件监督器已停止');
       if (this.activeWrites) throw Error('仍有操作等待原生确认，升级已延后；旧宿主继续运行');
       this.retire('插件正在升级');
       this.issue = undefined;
@@ -384,6 +387,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
       } catch (error) {
         this.retire('升级失败，正在恢复旧版本');
         this.packageInfo = previous;
+        if (this.stopped) throw error;
         await this.launch();
         throw Error(`升级失败，已恢复旧版本：${(error as Error).message}`);
       }
