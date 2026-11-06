@@ -9,7 +9,7 @@ const store = new Store(config.stateDir);
 const registry = builtinBackends(config);
 const host = await HostService.create(config, { store, registry });
 store.recover();
-await registry.start();
+await registry.start(false);
 host.start();
 console.log(`Codex Pocket Remote v2 connecting to ${config.origin}; no inbound business port`);
 for (const backend of registry.all())

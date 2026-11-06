@@ -1,4 +1,4 @@
-import {snapshotBundled} from './bundled.js';
+import { snapshotBundled } from './bundled.js';
 import { existsSync, statSync, unlinkSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -37,13 +37,17 @@ export function loadCatalog(config: Config): Catalog {
       continue;
     }
     const key = packageKey(pack);
-    if (!catalog.packages[key])
-      catalog.packages[key] = {
-        root: snapshotBundled(pack,directory),
-        name: pack.name,
-        version: pack.version,
-        stateVersion: pack.agentAdapter.stateVersion,
-      };
+    try {
+      if (!catalog.packages[key])
+        catalog.packages[key] = {
+          root: snapshotBundled(pack, directory),
+          name: pack.name,
+          version: pack.version,
+          stateVersion: pack.agentAdapter.stateVersion,
+        };
+    } catch {
+      /* A damaged bundled package must not stop other instances. */
+    }
   }
   return catalog;
 }

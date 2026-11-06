@@ -74,7 +74,7 @@ export class AdapterManager extends BackendRegistry {
     for (const name of ['requests', 'results'])
       platformRuntime().privateDirectory(join(adapterDirectory(config), name));
   }
-  override async start() {
+  override async start(waitForConnections = true) {
     if (this.supervise)
       await catalogLock(this.config, () => {
         const path = join(adapterDirectory(this.config), 'supervisor.json');
@@ -95,7 +95,9 @@ export class AdapterManager extends BackendRegistry {
         writeJson(path, { pid: process.pid });
         this.supervisorLock = path;
       });
-    await super.start();
+    const connections = super.start();
+    if (waitForConnections) await connections;
+    else void connections;
     if (!this.supervise) return;
     this.writeStatus();
     this.timer = setInterval(() => {
