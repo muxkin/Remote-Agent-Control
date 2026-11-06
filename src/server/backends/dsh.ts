@@ -1088,7 +1088,8 @@ export class DshBackend extends EventEmitter implements AgentBackend {
       });
       this.emit('created', requestId, created.sessionId);
       // A lost create response is uncertain. Operations never retries this sequence automatically.
-      const release = value.permission || value.plan ? await this.acquire(created.sessionId) : undefined;
+      const release =
+        value.permission || value.plan !== undefined ? await this.acquire(created.sessionId) : undefined;
       try {
         if (release && !(await this.waitForView(created.sessionId))?.synchronized)
           throw new DeliveryError('新会话尚未同步，首条消息未发送');
@@ -1098,7 +1099,8 @@ export class DshBackend extends EventEmitter implements AgentBackend {
             value: value.permission,
             expected: this.controlState(created.sessionId).permission,
           });
-        if (value.plan) await this.applyControl(created.sessionId, { action: 'plan', enabled: true });
+        if (value.plan !== undefined && value.plan !== this.controlState(created.sessionId).plan)
+          await this.applyControl(created.sessionId, { action: 'plan', enabled: value.plan });
         if (value.model) {
           const [provider, model] = JSON.parse(value.model);
           await this.connection.call(

@@ -44,12 +44,7 @@ export function BackendChooser({ navigate }: { navigate: (route: AppRoute) => vo
           >
             <strong>{backend.name}</strong>
             <span>{backend.product === 'dsh' ? 'DSH Web' : 'Codex 桌面'}</span>
-            <small>
-              {backend.connected ? '已连接' : '未连接'}
-              {Object.values(backend.capabilities ?? {}).some((c) => c.state === 'experimental')
-                ? ' · 实验性'
-                : ''}
-            </small>
+            <small>{backend.connected ? '已连接' : '未连接'}</small>
             {backend.capabilities?.send.reason && backend.capabilities.send.state === 'unavailable' && (
               <small>{backend.capabilities.send.reason}</small>
             )}
