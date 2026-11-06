@@ -372,11 +372,13 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     this.replacing = true;
     this.draining = true;
     const previous = this.packageInfo,
+      generation = this.generation,
       deadline = Date.now() + drainMs;
     try {
       while (this.activeWrites && Date.now() < deadline)
         await new Promise((resolve) => setTimeout(resolve, 50));
       if (this.stopped) throw Error('插件监督器已停止');
+      if (this.generation !== generation) throw Error('宿主在交接期间断开，升级已延后；正在恢复原版本');
       if (this.activeWrites) throw Error('仍有操作等待原生确认，升级已延后；旧宿主继续运行');
       this.retire('插件正在升级');
       this.issue = undefined;
@@ -394,6 +396,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     } finally {
       this.replacing = false;
       this.draining = false;
+      if (!this.child && !this.stopped) this.failed('插件连接中断，正在恢复');
     }
   }
   waitForView(id: string, timeout?: number) {

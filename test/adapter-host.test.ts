@@ -177,3 +177,25 @@ it.each(['create', 'respond'] as const)('does not repeat a lost %s after host re
   operations.submit('phone', 'shared', id, kind, input);
   expect(readFileSync(join(directory, 'dispatches.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1);
 });
+
+it('defers an upgrade if its host dies during handoff, and recovers the original version', async () => {
+  const { backend, directory } = await instance();
+  await backend.acquire('shared');
+  const write = backend.execute('shared', send('delay'), randomUUID()).catch((error) => error);
+  await expect
+    .poll(() => {
+      try {
+        return readFileSync(join(directory, 'dispatches.jsonl'), 'utf8').length > 0;
+      } catch {
+        return false;
+      }
+    })
+    .toBe(true);
+  const upgrade = backend.replace(pack('1.1.0')).catch((error) => error);
+  process.kill(backend.pid!, 'SIGKILL');
+  expect((await write).notSent).toBe(false);
+  expect((await upgrade).message).toContain('升级已延后');
+  await expect.poll(() => backend.status().connected, { timeout: 10000 }).toBe(true);
+  expect(backend.packageInfo.version).toBe('1.0.0');
+  expect(readFileSync(join(directory, 'dispatches.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1);
+});
