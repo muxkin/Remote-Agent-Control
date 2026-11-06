@@ -1,3 +1,4 @@
+import { temporaryRuntime } from './temporary-runtime.js';
 import { it, expect, afterEach, vi } from 'vitest';
 import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,7 +19,7 @@ async function setup(configure?: (config: ReturnType<typeof fixtureConfig>) => v
   const c = fixtureConfig();
   configure?.(c);
   historyFixture(c);
-  const store = new Store(c.stateDir);
+  const store = new Store(c.stateDir, temporaryRuntime);
   const history = new HistoryIndex(c.codexHome);
   const transport = new FakeTransport();
   const desktop = new DesktopAdapter(c, () => transport);

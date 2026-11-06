@@ -1,3 +1,4 @@
+import { temporaryRuntime } from './temporary-runtime.js';
 import { afterEach, expect, it } from 'vitest';
 import { readFile, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -15,7 +16,7 @@ afterEach(async () => {
 it('decodes the generated PNG into a working, single-use pairing link', async () => {
   const config = fixtureConfig();
   config.origin = 'https://pocket.example.com';
-  const store = new Store(config.stateDir);
+  const store = new Store(config.stateDir, temporaryRuntime);
   cleanup.push(async () => {
     store.close();
     await rm(config.desktopRoot, { recursive: true, force: true });
@@ -35,7 +36,7 @@ it('decodes the generated PNG into a working, single-use pairing link', async ()
 
 it('keeps QR artifacts private and replaces the preview when a new code is generated', async () => {
   const config = fixtureConfig();
-  const store = new Store(config.stateDir);
+  const store = new Store(config.stateDir, temporaryRuntime);
   cleanup.push(async () => {
     store.close();
     await rm(config.desktopRoot, { recursive: true, force: true });

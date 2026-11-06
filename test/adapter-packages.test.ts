@@ -47,7 +47,9 @@ it.each(['sdk', 'codex', 'dsh'])(
       await timed(`${name} offline installation cleanup`, () => remove(directory));
     }
   },
-  240000,
+  // Windows cold extraction of the DSH client's 10k dependency files can take minutes.
+  // This bounds installation/cleanup only; host validation retains its own 20s deadline.
+  process.platform === 'win32' ? 360000 : 60000,
 );
 
 it('pins bundled runtime dependencies so a later gateway build cannot mutate installed plugins', async () => {

@@ -1,3 +1,4 @@
+import { temporaryRuntime } from './temporary-runtime.js';
 import { afterEach, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -99,7 +100,7 @@ async function setup() {
     false,
     connection,
   );
-  const store = new Store(join(dir, 'store'));
+  const store = new Store(join(dir, 'store'), temporaryRuntime);
   const operations = new Operations(backend, store, 'dsh');
   cleanup.push(
     () => rmSync(dir, { recursive: true, force: true }),

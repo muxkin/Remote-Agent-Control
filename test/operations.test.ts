@@ -1,3 +1,4 @@
+import { temporaryRuntime } from './temporary-runtime.js';
 import { codexObservations } from '../packages/adapter-codex/src/observations.js';
 import { EventEmitter } from 'node:events';
 import { rmSync } from 'node:fs';
@@ -13,7 +14,7 @@ it.each(['accepted', 'rejected'])(
   (status) => {
     const config = fixtureConfig();
     const desktop = new EventEmitter() as AgentBackend;
-    const store = new Store(config.stateDir);
+    const store = new Store(config.stateDir, temporaryRuntime);
     const operations = new Operations(desktop, store);
     cleanup.push(() => {
       operations.close();

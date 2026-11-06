@@ -1,3 +1,4 @@
+import { temporaryRuntime } from './temporary-runtime.js';
 import { manual as remove } from 'rimraf';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, cpSync } from 'node:fs';
@@ -108,7 +109,7 @@ it('isolates same native IDs, credentials and subscriptions in three independent
 });
 it('marks lost writes uncertain, restores subscriptions and never replays creates, sends or approvals', async () => {
   const { backend, directory } = await instance();
-  const store = new Store(join(directory, 'store'));
+  const store = new Store(join(directory, 'store'), temporaryRuntime);
   const operations = new Operations(backend, store, backend.id);
   clean.push(() => {
     operations.close();
@@ -183,7 +184,7 @@ it('ignores replies from an earlier generation and enforces SDK compatibility', 
 
 it.each(['create', 'respond'] as const)('does not repeat a lost %s after host recovery', async (kind) => {
   const { backend, directory } = await instance(kind, pack(), { crashKind: kind });
-  const store = new Store(join(directory, 'store')),
+  const store = new Store(join(directory, 'store'), temporaryRuntime),
     operations = new Operations(backend, store, backend.id);
   clean.push(() => {
     operations.close();

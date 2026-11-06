@@ -7,10 +7,11 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
-import { platformRuntime, powershell } from '../src/server/platform.js';
+import { powershell } from '../src/server/platform.js';
 import { codexPaths, codexProfile, discoverAppTools } from '../packages/adapter-codex/src/connector.js';
 import { authorizeFile } from '../src/server/media.js';
 import { readStorageSettings } from '../src/server/config.js';
+import { Store } from '../src/server/store.js';
 const cleanup: (() => void)[] = [];
 it.skipIf(process.platform === 'win32')(
   'discovers user-scoped and legacy app sockets without accepting other users or regular files',
@@ -70,7 +71,9 @@ it('validates the real native Socket/Pipe peer then relays bytes', async () => {
   const child = await fixture(process.execPath);
   let stderr = '';
   child.stderr.on('data', (bytes) => (stderr += bytes));
-  await expect.poll(() => stderr, { timeout: 5000 }).toContain('"ready"');
+  await expect
+    .poll(() => stderr, { timeout: process.platform === 'win32' ? 20000 : 5000 })
+    .toContain('"ready"');
   const data = once(child.stdout, 'data');
   child.stdin.write(Buffer.from([0, 10, 255, 13, 1]));
   expect((await data)[0]).toEqual(Buffer.from([0, 10, 255, 13, 1]));
@@ -85,13 +88,13 @@ it('refuses the actual endpoint when its server executable is not the expected p
   expect(stderr).not.toContain('"ready"');
 });
 it('creates private storage using native permissions', () => {
-  const runtime = platformRuntime(),
-    dir = mkdtempSync(join(tmpdir(), 'pocket-private-'));
-  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-  runtime.privateDirectory(dir);
-  const file = join(dir, 'secret');
-  writeFileSync(file, 'fixture');
-  runtime.privateFile(file);
+  const root = mkdtempSync(join(tmpdir(), 'pocket-private-')),
+    dir = join(root, 'state');
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  // Exercise Store's production default, including both directory and database ACLs.
+  const store = new Store(dir);
+  store.close();
+  const file = join(dir, 'state.sqlite');
   if (process.platform === 'win32') {
     const permissions = JSON.parse(
       powershell(

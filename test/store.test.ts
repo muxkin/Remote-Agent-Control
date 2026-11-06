@@ -1,3 +1,4 @@
+import { temporaryRuntime } from './temporary-runtime.js';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ afterEach(() => {
 });
 function setup() {
   const c = fixtureConfig();
-  const s = new Store(c.stateDir);
+  const s = new Store(c.stateDir, temporaryRuntime);
   callbacks.push(() => {
     s.close();
     rmSync(c.desktopRoot, { recursive: true, force: true });
@@ -85,7 +86,7 @@ it('migrates an original database without losing pairing, devices or operation d
     1,
   );
   db.close();
-  let s = new Store(c.stateDir);
+  let s = new Store(c.stateDir, temporaryRuntime);
   callbacks.push(() => {
     s.close();
     rmSync(c.desktopRoot, { recursive: true, force: true });
@@ -100,7 +101,7 @@ it('migrates an original database without losing pairing, devices or operation d
   ).toBe(true);
   s.recover();
   s.close();
-  s = new Store(c.stateDir);
+  s = new Store(c.stateDir, temporaryRuntime);
   expect(s.operation('existing-op')?.state).toBe('uncertain');
   expect(s.authenticate('existing-token')?.id).toBe('existing-device');
 });

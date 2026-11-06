@@ -1,3 +1,4 @@
+import { temporaryRuntime } from '../../../test/temporary-runtime.js';
 import { DshFixtureConnection as Connection, snapshot } from './fixture.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ async function setup(id = 'dsh-one') {
       false,
       conn,
     );
-  const store = new Store(join(dir, 'state'));
+  const store = new Store(join(dir, 'state'), temporaryRuntime);
   const operations = new Operations(backend, store, id);
   cleanup.push(() => {
     operations.close();

@@ -1,3 +1,4 @@
+import { temporaryRuntime } from './temporary-runtime.js';
 import { BackendRegistry } from '../src/server/backends/registry.js';
 import { CodexBackend } from '../packages/adapter-codex/src/backend.js';
 import { DshBackend } from '../packages/adapter-dsh/src/backend.js';
@@ -47,7 +48,7 @@ async function setup(direct = false, multiple = false) {
   config.origin = `http://127.0.0.1:${config.port}`;
   config.p2p = { enabled: direct, stunUrls: [] };
   config.relay = { origin: config.origin, enrollment: 'fixture-enrollment-secret-32-characters' };
-  const store = new Store(config.stateDir),
+  const store = new Store(config.stateDir, temporaryRuntime),
     history = new HistoryIndex(config.codexHome);
   const transport = new FakeTransport(),
     desktop = new DesktopAdapter(config, () => transport);
