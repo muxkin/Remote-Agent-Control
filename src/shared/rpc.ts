@@ -1,5 +1,9 @@
 /** The only public business methods. Paths are a UI compatibility mapping, not an HTTP proxy. */
 export const RPC_ROUTES = {
+  'controls.read': ['GET', '/api/threads/:id/controls'],
+  'control.execute': ['POST', '/api/threads/:id/control'],
+  'log.export': ['POST', '/api/threads/:id/export'],
+  'references.list': ['GET', '/api/threads/:id/references'],
   'backends.list': ['GET', '/api/backends'],
   'session.read': ['GET', '/api/session'],
   'device.revoke': ['POST', '/api/logout'],

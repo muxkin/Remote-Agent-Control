@@ -1,3 +1,4 @@
+import { codexPermissions } from '../codex-permissions.js';
 import type { BackendCommand } from './commands.js';
 import { EventEmitter } from 'node:events';
 import type { Config } from '../config.js';
@@ -128,6 +129,15 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
   }
   fullMessage(id: string, messageId: string) {
     return this.desktop.fullMessage(id, messageId);
+  }
+  async controls(id: string): Promise<import('../../shared/controls.js').ControlCatalog> {
+    return {
+      product: 'codex',
+      permissions: codexPermissions,
+      presets: [],
+      actions: ['permission'],
+      state: this.view(id)?.controls ?? { permission: null },
+    };
   }
   models() {
     return modelCatalog(this.config.codexHome);

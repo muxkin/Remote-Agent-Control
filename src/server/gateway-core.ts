@@ -1,3 +1,4 @@
+import { controlAction } from '../shared/controls.js';
 import { join } from 'node:path';
 import { DEFAULT_BACKEND } from '../shared/backends.js';
 import { requireCapability } from './backends/registry.js';
@@ -39,7 +40,10 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
   const operations = new Operations(desktop, store, backendId);
   const submit = operations.submit.bind(operations);
   operations.submit = (...args) => {
-    requireCapability(desktop, args[3] === 'queue-remove' ? 'queue' : args[3]);
+    requireCapability(
+      desktop,
+      args[3] === 'control' ? 'settings' : args[3] === 'queue-remove' ? 'queue' : args[3],
+    );
     return submit(...args);
   };
   const media = new MediaService({ ...scopedConfig, media: undefined });
@@ -127,6 +131,49 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
   app.post('/api/threads/:id/uploads/:uploadId/complete', async (req) => {
     const { id, uploadId } = uploadParams.parse(req.params);
     return uploads.finish(uploadId, req.device.id, id);
+  });
+  app.get('/api/threads/:id/controls', async (req, reply) => {
+    const { id } = params.parse(req.params);
+    if (!desktop.controls) return reply.code(404).send({ error: '此实例没有会话控制目录' });
+    if (id === 'new') return desktop.controls(id);
+    if (!(await history.get(id))) return reply.code(404).send({ error: '找不到此会话' });
+    const release = await desktop.acquire(id);
+    try {
+      await desktop.waitForView(id);
+      return await desktop.controls(id);
+    } finally {
+      release();
+    }
+  });
+  app.post('/api/threads/:id/control', async (req, reply) => {
+    const { id } = params.parse(req.params);
+    const body = z.object({ requestId: uuid, control: controlAction }).strict().parse(req.body);
+    if (!desktop.controls || !(await history.get(id)))
+      return reply.code(404).send({ error: '会话控制不可用' });
+    return reply
+      .code(202)
+      .send(
+        operations.submit(
+          req.device.id,
+          id,
+          body.requestId,
+          'control',
+          JSON.stringify({ control: body.control }),
+        ),
+      );
+  });
+  app.get('/api/threads/:id/references', async (req, reply) => {
+    const { id } = params.parse(req.params);
+    const { q } = z.object({ q: z.string().max(500).default('') }).parse(req.query);
+    if (!desktop.fileReferences || !(await history.get(id)))
+      return reply.code(404).send({ error: '文件目录不可用' });
+    return { files: await desktop.fileReferences(id, q) };
+  });
+  app.post('/api/threads/:id/export', async (req, reply) => {
+    const { id } = params.parse(req.params);
+    if (!desktop.exportLog || !(await history.get(id)))
+      return reply.code(404).send({ error: '日志导出不可用' });
+    return files.describe(await desktop.exportLog(id), req.device.id, id, 'application/zip');
   });
   app.get('/api/models', async () => desktop.models());
   app.get('/api/threads/:id/skills', async (req) => ({

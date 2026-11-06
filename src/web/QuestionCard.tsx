@@ -13,6 +13,7 @@ type Props = {
 export function QuestionCard({ request, disabled, onRespond, response, onDraftChange }: Props) {
   const questions = request.questions!;
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [multiple, setMultiple] = useState<Record<string, string[]>>({});
   const [custom, setCustom] = useState<Record<string, boolean>>({});
   const [customDrafts, setCustomDrafts] = useState<Record<string, string>>({});
   const [open, setOpen] = useState(false);
@@ -44,7 +45,12 @@ export function QuestionCard({ request, disabled, onRespond, response, onDraftCh
       targetRequestId: request.id,
       expectedTurnId: request.turnId,
       expectedFingerprint: request.fingerprint,
-      answers: Object.fromEntries(questions.map((q) => [q.id, [answers[q.id]]])),
+      answers: Object.fromEntries(
+        questions.map((q) => [
+          q.id,
+          q.multiSelect && !custom[q.id] ? (multiple[q.id] ?? []) : [answers[q.id]],
+        ]),
+      ),
     });
   }
   return (
@@ -73,7 +79,7 @@ export function QuestionCard({ request, disabled, onRespond, response, onDraftCh
           <QuestionDialog onClose={() => setOpen(false)}>
             <header className="question-dialog-head">
               <div>
-                <h2 id="question-dialog-title">回答 Codex</h2>
+                <h2 id="question-dialog-title">回答问题</h2>
                 <p>
                   {review ? '核对答案' : `第 ${step + 1} / ${questions.length} 题`} · 已答 {answered}/
                   {questions.length}
@@ -139,15 +145,28 @@ export function QuestionCard({ request, disabled, onRespond, response, onDraftCh
                 <fieldset disabled={locked}>
                   <legend>{question.header || `问题 ${step + 1}`}</legend>
                   <p className="question-title">{question.question}</p>
+                  {question.detail && <pre className="question-detail">{question.detail}</pre>}
                   {question.options.map((option, index) => (
                     <label className="question-option" key={`${index}:${option.label}`}>
                       <input
-                        type="radio"
+                        type={question.multiSelect ? 'checkbox' : 'radio'}
                         name={`answer-${request.id}-${question.id}`}
-                        checked={!custom[question.id] && answers[question.id] === option.label}
+                        checked={
+                          !custom[question.id] &&
+                          (question.multiSelect
+                            ? (multiple[question.id]?.includes(option.label) ?? false)
+                            : answers[question.id] === option.label)
+                        }
                         onChange={() => {
                           setCustom((old) => ({ ...old, [question.id]: false }));
-                          update(option.label);
+                          if (question.multiSelect) {
+                            const values = multiple[question.id] ?? [];
+                            const next = values.includes(option.label)
+                              ? values.filter((v) => v !== option.label)
+                              : [...values, option.label];
+                            setMultiple((old) => ({ ...old, [question.id]: next }));
+                            update(next.join('、'));
+                          } else update(option.label);
                         }}
                       />
                       <span>

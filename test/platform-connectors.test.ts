@@ -1,6 +1,6 @@
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
@@ -8,10 +8,35 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
 import { platformRuntime, powershell } from '../src/server/platform.js';
-import { codexPaths, codexProfile } from '../src/server/connectors/codex-local.js';
+import { codexPaths, codexProfile, discoverAppTools } from '../src/server/connectors/codex-local.js';
 import { authorizeFile } from '../src/server/media.js';
 import { readStorageSettings } from '../src/server/config.js';
 const cleanup: (() => void)[] = [];
+it.skipIf(process.platform === 'win32')(
+  'discovers user-scoped and legacy app sockets without accepting other users or regular files',
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pocket-discovery-'));
+    const servers: ReturnType<typeof createServer>[] = [];
+    cleanup.push(() => {
+      servers.forEach((server) => server.close());
+      rmSync(root, { recursive: true, force: true });
+    });
+    const expected: string[] = [];
+    for (const name of ['codex-app-tools-1000', 'codex-app-tools', 'codex-app-tools-1001']) {
+      const directory = join(root, name);
+      mkdirSync(directory);
+      const path = join(directory, `${randomUUID()}.sock`);
+      const server = createServer();
+      servers.push(server);
+      server.listen(path);
+      await once(server, 'listening');
+      writeFileSync(join(directory, `${randomUUID()}.sock`), 'not a socket');
+      if (name !== 'codex-app-tools-1001') expected.push(path);
+    }
+    expect(await discoverAppTools(root, 1000)).toEqual(expected.sort());
+    expect(await discoverAppTools(join(root, 'missing'), 1000)).toEqual([]);
+  },
+);
 afterEach(() =>
   cleanup
     .splice(0)

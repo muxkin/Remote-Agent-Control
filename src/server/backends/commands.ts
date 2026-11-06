@@ -1,6 +1,7 @@
 import type { RequestResponse } from '../../shared/types.js';
 import type { LocalAttachment } from './types.js';
 export type BackendCommand =
+  | { kind: 'control'; control: import('../../shared/controls.js').ControlAction }
   | { kind: 'send'; text: string; attachments: LocalAttachment[]; skillIds: string[]; pluginIds: string[] }
   | { kind: 'steer'; text: string; expectedTurnId: string; attachments?: LocalAttachment[] }
   | { kind: 'interrupt'; expectedTurnId: string }
@@ -18,7 +19,17 @@ export type BackendCommand =
     }
   | { kind: 'queue'; text: string; expectedQueueFingerprint: string }
   | { kind: 'queue-remove'; messageId: string; expectedQueueFingerprint: string }
-  | { kind: 'create'; prompt: string; title?: string; projectId?: string; model?: string; thinking?: string }
+  | {
+      kind: 'create';
+      prompt: string;
+      title?: string;
+      projectId?: string;
+      model?: string;
+      thinking?: string;
+      permission?: string;
+      agentPreset?: string;
+      plan?: boolean;
+    }
   | { kind: 'open' };
 /** The persisted input is the validated shared command, never an upstream RPC envelope. */
 export function commandInput(kind: BackendCommand['kind'], input: string): BackendCommand {

@@ -1,3 +1,4 @@
+import type { ControlCatalog } from '../shared/controls';
 import { remoteFetch, deviceSession } from './device-session';
 import { useEffect, useState } from 'react';
 import type { ProjectSummary, ThreadView } from '../shared/types';
@@ -13,6 +14,9 @@ export interface NewConversationInput {
   projectId?: string;
   model?: string;
   thinking?: string;
+  permission?: string;
+  agentPreset?: string;
+  plan?: boolean;
 }
 export function NewConversation({
   anchor,
@@ -33,6 +37,19 @@ export function NewConversation({
   onDirtyChange: (dirty: boolean) => void;
   feedback?: string;
 }) {
+  const [catalog, setCatalog] = useState<ControlCatalog>();
+  const [permission, setPermission] = useState('');
+  const [preset, setPreset] = useState('');
+  const [plan, setPlan] = useState(false);
+  useEffect(() => {
+    const c = new AbortController();
+    remoteFetch('/api/threads/new/controls', { signal: c.signal })
+      .then(async (r) => {
+        if (r.ok) setCatalog(await r.json());
+      })
+      .catch(() => {});
+    return () => c.abort();
+  }, []);
   const [title, setTitle] = useState('');
   const [draft, setDraft] = useState<ChatDraft>({ text: '', uploads: [], skills: [], plugins: [] });
   const [projectId, setProjectId] = useState(defaultProject ?? '');
@@ -43,13 +60,46 @@ export function NewConversation({
   const [refresh, setRefresh] = useState(0);
   const [modelOpen, setModelOpen] = useState(false);
   const [settings, setSettings] = useState<ModelUpdate>();
+  const draftKey = deviceSession.contentKey(`new-conversation:${anchor}`);
+  const [restored, setRestored] = useState(false);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(draftKey) ?? 'null');
+      if (saved) {
+        setTitle(typeof saved.title === 'string' ? saved.title : '');
+        setDraft({
+          text: typeof saved.text === 'string' ? saved.text : '',
+          uploads: [],
+          skills: [],
+          plugins: [],
+        });
+        setPermission(saved.permission ?? '');
+        setPreset(saved.preset ?? '');
+        setPlan(saved.plan === true);
+        if (saved.settings) setSettings(saved.settings);
+      }
+    } catch {
+    } finally {
+      setRestored(true);
+    }
+  }, [draftKey]);
+  useEffect(() => {
+    if (!restored) return;
+    try {
+      localStorage.setItem(
+        draftKey,
+        JSON.stringify({ title, text: draft.text, permission, preset, plan, settings }),
+      );
+    } catch {}
+  }, [draftKey, restored, title, draft.text, permission, preset, plan, settings]);
+
   useEffect(() => {
     setProjectId(defaultProject ?? '');
   }, [defaultProject]);
   useEffect(() => {
-    onDirtyChange(!!draft.text.trim() || !!title.trim() || !!settings);
+    onDirtyChange(!!draft.text.trim() || !!title.trim() || !!settings || !!permission || !!preset || plan);
     return () => onDirtyChange(false);
-  }, [draft.text, title, settings, onDirtyChange]);
+  }, [draft.text, title, settings, permission, preset, plan, onDirtyChange]);
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
@@ -126,6 +176,53 @@ export function NewConversation({
             ))}
           </select>
         </label>
+        {catalog?.product === 'dsh' ? (
+          <>
+            <label>
+              Agent 预设
+              <select
+                aria-label="新会话 Agent 预设"
+                value={preset}
+                disabled={disabled}
+                onChange={(e) => setPreset(e.target.value)}
+              >
+                <option value="">原生默认</option>
+                {catalog.presets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              权限
+              <select
+                aria-label="新会话权限"
+                value={permission}
+                disabled={disabled}
+                onChange={(e) => setPermission(e.target.value)}
+              >
+                <option value="">原生默认</option>
+                {catalog.permissions.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={plan}
+                disabled={disabled}
+                onChange={(e) => setPlan(e.target.checked)}
+              />
+              计划模式
+            </label>
+          </>
+        ) : (
+          <p className="hint">沿用 Codex 创建权限；创建后可在会话中调整。</p>
+        )}
         <details className="optional-title">
           <summary>自定义标题（可选）</summary>
           <input
@@ -165,6 +262,9 @@ export function NewConversation({
           onSubmit={() =>
             onCreate({
               prompt: draft.text,
+              ...(catalog?.product === 'dsh'
+                ? { permission: permission || undefined, agentPreset: preset || undefined, plan }
+                : {}),
               ...(title.trim() ? { title: title.trim() } : {}),
               ...(projectId ? { projectId } : {}),
               ...(settings ? { model: settings.model, thinking: settings.effort } : {}),

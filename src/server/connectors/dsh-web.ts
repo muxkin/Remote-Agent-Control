@@ -1,3 +1,8 @@
+import feedbackRemote from '@deepseek-ai/dsh-command-feedback/remote';
+import presetRemote from '@deepseek-ai/dsh-agent-preset-registry/remote';
+import permissionRemote from '@deepseek-ai/dsh-permission-presets/remote';
+import commandRemote from '@deepseek-ai/dsh-commands/remote';
+import goalRemote from '@deepseek-ai/dsh-goal/remote';
 import questionRemote from '@deepseek-ai/dsh-user-questions/remote';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
@@ -30,10 +35,16 @@ export interface DshConnection extends EventEmitter {
   ): () => void;
   fetch(path: string, init?: RequestInit): Promise<Response>;
 }
-const methods = { ...sessionRemote.methods, ...workspaceRemote.methods, ...questionRemote.methods } as Record<
-  string,
-  any
->;
+const methods = {
+  ...goalRemote.methods,
+  ...commandRemote.methods,
+  ...permissionRemote.methods,
+  ...presetRemote.methods,
+  ...feedbackRemote.methods,
+  ...sessionRemote.methods,
+  ...workspaceRemote.methods,
+  ...questionRemote.methods,
+} as Record<string, any>;
 /** Connects only to an existing Web carrier. No DSH host/Agent entry point is imported. */
 export class DshWebConnection extends EventEmitter implements DshConnection {
   connected = false;

@@ -1,7 +1,8 @@
+import type { ControlAction, ControlCatalog, ControlState } from '../../shared/controls.js';
 import type { BackendCommand } from './commands.js';
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, open, unlink } from 'node:fs/promises';
 import { join, win32, posix } from 'node:path';
 import { attachmentLinks } from '../media.js';
 import { assembleAssistantStream } from '@deepseek-ai/dsh-llm/assistant-stream';
@@ -558,6 +559,28 @@ export class DshBackend extends EventEmitter implements AgentBackend {
             })),
         });
       }
+      if (e.type === 'command/run')
+        messages.set(e.seq, {
+          id: `command-${d.commandId}`,
+          role: 'tool',
+          text: `/${d.name}`,
+          details: d.args ?? '',
+          phase: 'running',
+        });
+      if (e.type === 'command/done') {
+        const entry = [...messages.values()].find((m) => m.id === `command-${d.commandId}`);
+        if (entry) {
+          entry.phase = d.kind;
+          entry.output = d.text ?? (d.kind === 'success' ? '已完成' : '执行失败');
+        } else
+          messages.set(e.seq, {
+            id: `command-${d.commandId}`,
+            role: 'tool',
+            text: '原生命令',
+            phase: d.kind,
+            output: d.text,
+          });
+      }
       if (e.type === 'tool/call')
         messages.set(e.seq, {
           id: `tool-${d.callId}`,
@@ -611,6 +634,9 @@ export class DshBackend extends EventEmitter implements AgentBackend {
             id: q.id,
             header: q.header ?? '',
             question: q.question,
+            detail: q.detail,
+            multiSelect: q.multiSelect,
+            intent: q.intent?.kind,
             options: (q.options ?? []).map((o: any) => ({
               label: o.label,
               description: o.description ?? '',
@@ -650,6 +676,8 @@ export class DshBackend extends EventEmitter implements AgentBackend {
       runtimeStatus: result.turnId ? 'running' : 'idle',
       model: model ? JSON.stringify([model.provider, model.model]) : null,
       reasoningEffort: model?.reasoningEffort ?? 'default',
+      controls: this.controlState(id),
+      mode: live.projections.plan?.active ? 'plan' : 'default',
       pendingRequests: requests.length,
       requests,
       queuedMessages: queue.map((m: any) => ({ id: m.id, text: text(m.content), status: 'queued' })),
@@ -734,6 +762,176 @@ export class DshBackend extends EventEmitter implements AgentBackend {
       this.historyMessages.get(id)?.get(messageId) ??
       null
     );
+  }
+  private controlState(id: string): ControlState {
+    const p = this.live.get(id)?.projections ?? {};
+    return {
+      permission: p.permissions?.currentValue ?? null,
+      preset: p.agentPreset ?? null,
+      presetLocked: Array.isArray(p.turnOutline) && p.turnOutline.length > 0,
+      plan: p.plan?.active ?? false,
+    };
+  }
+  async controls(id: string): Promise<ControlCatalog> {
+    const [permissions, presets, commands] = await Promise.all([
+      this.connection.call('permissionPresets/catalog', {}),
+      this.connection.call('agentPresets/list', {}),
+      id === 'new' ? Promise.resolve([]) : this.connection.call('commands/list', { agentId: id }),
+    ]);
+    const p = this.live.get(id)?.projections ?? {};
+    const actions: ControlAction['action'][] = [];
+    if (id === 'new' || p.permissions) actions.push('permission');
+    if (id === 'new' || 'agentPreset' in p) actions.push('preset');
+    for (const action of ['plan', 'compact', 'feedback', 'goal'] as const)
+      if (commands.some((c: any) => c.name === action)) actions.push(action);
+    const goal = actions.includes('goal') ? await this.connection.call('goals/get', { agentId: id }) : null;
+    return {
+      product: 'dsh',
+      permissions: permissions.options.map((p: any) => ({
+        id: p.value,
+        name: p.name,
+        description: p.description,
+      })),
+      presets: presets.presets
+        .filter((p: any) => !p.broken)
+        .map((p: any) => ({ id: p.id, name: p.name ?? p.id, description: p.description })),
+      actions,
+      state:
+        id === 'new'
+          ? {
+              permission: permissions.defaultPreset,
+              preset: presets.presets.find((p: any) => p.isDefault)?.id ?? null,
+              plan: false,
+            }
+          : this.controlState(id),
+      goal: goal
+        ? {
+            ref: { id: goal.id, revision: goal.revision },
+            objective: goal.objective,
+            phase: goal.phase,
+            activation: goal.activation,
+          }
+        : null,
+    };
+  }
+  private async nativeCommand(id: string, line: string) {
+    const result = await this.connection.call(
+      'commands/execute',
+      { agentId: id, line, submittedAttachments: [] },
+      true,
+    );
+    if (!result) throw new DeliveryError('原生命令未返回结果');
+    // Record the upstream identity before confirming the gateway operation.
+    await mkdir(join(this.directory, 'commands'), { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(this.directory, 'commands', digest([id, result.commandId]) + '.json'),
+      JSON.stringify({ sessionId: id, ...result }),
+      { mode: 0o600 },
+    );
+    if (result.result.kind === 'error')
+      throw new DeliveryError(result.result.text ?? '原生命令执行失败', false, 'failed');
+    return result.commandId as string;
+  }
+  private async applyControl(id: string, control: ControlAction): Promise<string | null> {
+    if (!this.status().writesEnabled) throw new DeliveryError('实例未连接或只读', true);
+    const catalog = await this.controls(id);
+    if (!catalog.actions.includes(control.action)) throw new DeliveryError('此会话未提供该操作', true);
+    if (control.action === 'permission') {
+      if (catalog.state.permission !== control.expected)
+        throw new DeliveryError('原生权限已变化，请重新选择', true);
+      if (!catalog.permissions.some((p) => p.id === control.value) || !/^[\w:-]+$/.test(control.value))
+        throw new DeliveryError('权限选项不可用', true);
+      await this.nativeCommand(id, '/permission ' + control.value);
+      await this.confirmControl(id, () => this.controlState(id).permission === control.value);
+    } else if (control.action === 'preset') {
+      if (catalog.state.presetLocked || !catalog.presets.some((p) => p.id === control.value))
+        throw new DeliveryError('Agent 预设已锁定或不可用', true);
+      await this.connection.call('agentPresets/select', { agentId: id, agentPreset: control.value }, true);
+      await this.confirmControl(id, () => this.controlState(id).preset === control.value);
+    } else if (control.action === 'plan') {
+      await this.nativeCommand(id, control.enabled ? '/plan' : '/plan off');
+      await this.confirmControl(id, () => this.controlState(id).plan === control.enabled);
+    } else if (control.action === 'compact') return this.nativeCommand(id, '/compact');
+    else if (control.action === 'feedback') {
+      const result = await this.connection.call(
+        'sessionFeedback/record',
+        { request: { sessionId: id, text: control.text } },
+        true,
+      );
+      if (!result.ok) throw new DeliveryError('反馈未保存');
+    } else if (control.action === 'goal') {
+      const { operation, ref, objective } = control;
+      if ((operation !== 'create' && !ref) || (['create', 'edit'].includes(operation) && !objective))
+        throw new DeliveryError('目标信息不完整', true);
+      await this.connection.call(
+        'goals/' + operation,
+        {
+          agentId: id,
+          ...(operation === 'create' ? {} : { ref }),
+          ...(['create', 'edit'].includes(operation) ? { request: { objective } } : {}),
+        },
+        true,
+      );
+    }
+    return null;
+  }
+  private async confirmControl(id: string, matches: () => boolean) {
+    if (matches()) return;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.off('thread', listener);
+        resolve();
+      };
+      const listener = () => {
+        if (matches()) done();
+      };
+      const timer = setTimeout(done, 8000);
+      this.on('thread', listener);
+    });
+    if (!this.view(id)?.synchronized || !matches()) throw new DeliveryError('原生设置尚未确认');
+  }
+  async fileReferences(id: string, query: string) {
+    const rows = await this.connection.call('fileReferences/list', { agentId: id, query });
+    return rows.map((r: any) => ({ path: r.path, name: r.name ?? r.path }));
+  }
+  private exports = new Map<string, Promise<string>>();
+  exportLog(id: string): Promise<string> {
+    const existing = this.exports.get(id);
+    if (existing) return existing;
+    const task = this.downloadExport(id).finally(() => this.exports.delete(id));
+    this.exports.set(id, task);
+    return task;
+  }
+  private async downloadExport(id: string) {
+    const response = await this.connection.fetch(
+      'api/session.export?sessionId=' + encodeURIComponent(id) + '&includeDescendants=true',
+    );
+    if (!response.ok || !response.body) throw new DeliveryError('原生日志暂不可导出', true);
+    const directory = join(this.directory, 'exports');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const file = join(directory, randomUUID() + '.zip');
+    const handle = await open(file, 'wx', 0o600);
+    let size = 0;
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+        size += chunk.length;
+        if (size > 256 * 1024 * 1024) {
+          await reader.cancel();
+          throw Error('日志超过 256 MB 导出限制');
+        }
+        await handle.writeFile(chunk);
+      }
+    } catch (e) {
+      await handle.close();
+      await unlink(file).catch(() => {});
+      throw e;
+    }
+    await handle.close();
+    return file;
   }
   async models() {
     const catalog = await this.connection.call<DshModels>('session/modelCatalog', {});
@@ -869,10 +1067,17 @@ export class DshBackend extends EventEmitter implements AgentBackend {
         ? {}
         : JSON.parse(input.startsWith('\u001e') ? input.slice(1) : input || '{}');
     const view = this.view(id);
+    if (kind === 'control') return this.applyControl(id, value.control);
     if (kind === 'create') {
       const created = await this.connection.call(
         'session/create',
-        { request: { sessionId: requestId, ...(value.projectId ? { workspaceId: value.projectId } : {}) } },
+        {
+          request: {
+            sessionId: requestId,
+            ...(value.projectId ? { workspaceId: value.projectId } : {}),
+            ...(value.agentPreset ? { agentPreset: value.agentPreset } : {}),
+          },
+        },
         true,
       );
       this.summaries.set(created.sessionId, {
@@ -883,40 +1088,56 @@ export class DshBackend extends EventEmitter implements AgentBackend {
       });
       this.emit('created', requestId, created.sessionId);
       // A lost create response is uncertain. Operations never retries this sequence automatically.
-      if (value.model) {
-        const [provider, model] = JSON.parse(value.model);
+      const release = value.permission || value.plan ? await this.acquire(created.sessionId) : undefined;
+      try {
+        if (release && !(await this.waitForView(created.sessionId))?.synchronized)
+          throw new DeliveryError('新会话尚未同步，首条消息未发送');
+        if (value.permission)
+          await this.applyControl(created.sessionId, {
+            action: 'permission',
+            value: value.permission,
+            expected: this.controlState(created.sessionId).permission,
+          });
+        if (value.plan) await this.applyControl(created.sessionId, { action: 'plan', enabled: true });
+        if (value.model) {
+          const [provider, model] = JSON.parse(value.model);
+          await this.connection.call(
+            'session/selectModel',
+            {
+              request: {
+                sessionId: created.sessionId,
+                provider,
+                model,
+                ...(value.thinking && value.thinking !== 'default'
+                  ? { reasoningEffort: value.thinking }
+                  : {}),
+              },
+            },
+            true,
+          );
+        }
+        if (value.title)
+          await this.connection.call(
+            'session/rename',
+            { request: { sessionId: created.sessionId, title: value.title } },
+            true,
+          );
         await this.connection.call(
-          'session/selectModel',
+          'session/prompt',
           {
             request: {
               sessionId: created.sessionId,
-              provider,
-              model,
-              ...(value.thinking && value.thinking !== 'default' ? { reasoningEffort: value.thinking } : {}),
+              requestId,
+              mode: 'queue',
+              content: [{ type: 'text', text: value.prompt }],
             },
           },
           true,
         );
+        return created.sessionId;
+      } finally {
+        release?.();
       }
-      if (value.title)
-        await this.connection.call(
-          'session/rename',
-          { request: { sessionId: created.sessionId, title: value.title } },
-          true,
-        );
-      await this.connection.call(
-        'session/prompt',
-        {
-          request: {
-            sessionId: created.sessionId,
-            requestId,
-            mode: 'queue',
-            content: [{ type: 'text', text: value.prompt }],
-          },
-        },
-        true,
-      );
-      return created.sessionId;
     }
     if (!view?.synchronized) throw new DeliveryError('DSH 会话尚未同步', true);
     if (kind === 'open') return null;
@@ -937,8 +1158,8 @@ export class DshBackend extends EventEmitter implements AgentBackend {
     if (kind === 'settings') {
       if (value.expectedModel !== view.model || value.expectedEffort !== (view.reasoningEffort ?? null))
         throw new DeliveryError('原生设置已变化，请刷新', true);
-      if (value.mode && value.mode !== 'default')
-        throw new DeliveryError('DSH 不支持 Codex 的计划模式设置', true);
+      if (value.mode && value.mode !== (view.mode ?? 'default'))
+        throw new DeliveryError('计划模式已变化，请通过会话控制面板调整', true);
       const [provider, model] = JSON.parse(value.model);
       await this.connection.call(
         'session/selectModel',
@@ -1027,6 +1248,9 @@ export class DshBackend extends EventEmitter implements AgentBackend {
               id: q.id,
               header: q.header ?? '',
               question: q.question,
+              detail: q.detail,
+              multiSelect: q.multiSelect,
+              intent: q.intent?.kind,
               options: (q.options ?? []).map((o: any) => ({
                 label: o.label,
                 description: o.description ?? '',

@@ -33,6 +33,9 @@ export interface ConversationRequest {
     id: string;
     header: string;
     question: string;
+    detail?: string;
+    multiSelect?: boolean;
+    intent?: string;
     secret?: boolean;
     options: { label: string; description: string }[];
   }[];
@@ -89,6 +92,7 @@ export interface PluginChoice {
   description: string;
 }
 export interface ThreadView extends ThreadSummary {
+  controls?: import('./controls.js').ControlState;
   messages: Message[];
   revision: number;
   owner: boolean;
@@ -134,7 +138,16 @@ export interface Operation {
   id: string;
   threadId: string;
   kind:
-    'send' | 'steer' | 'interrupt' | 'settings' | 'respond' | 'queue' | 'queue-remove' | 'open' | 'create';
+    | 'send'
+    | 'steer'
+    | 'interrupt'
+    | 'settings'
+    | 'respond'
+    | 'queue'
+    | 'queue-remove'
+    | 'open'
+    | 'create'
+    | 'control';
   state: OperationState;
   resultThreadId?: string;
   turnId: string | null;

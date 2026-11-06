@@ -1,3 +1,5 @@
+import { ConversationControls } from './ConversationControls';
+import type { ControlAction } from '../shared/controls';
 import { DEFAULT_BACKEND } from '../shared/backends';
 import { uploadFile } from './file-client';
 import { deviceSession } from './device-session';
@@ -85,6 +87,7 @@ export default function AgentWorkspace({
   const [newOpen, setNewOpen] = useState(false);
   const [newProject, setNewProject] = useState<string>();
   const [newDirty, setNewDirty] = useState(false);
+  const [controlsOpen, setControlsOpen] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
 
   const [projects, setProjects] = useState<{ projects: ProjectSummary[]; total: number; ungrouped: number }>({
@@ -222,6 +225,11 @@ export default function AgentWorkspace({
       !openedCreations.current.has(operation.id)
     ) {
       openedCreations.current.add(operation.id);
+      try {
+        localStorage.removeItem(deviceSession.contentKey(`new-conversation:${operation.threadId}`));
+      } catch {
+        /* Keep live confirmation usable when storage is unavailable. */
+      }
       void api<{ thread: ThreadSummary }>(`/threads/${encodeURIComponent(operation.resultThreadId)}`)
         .then((result) => {
           if (selectedId.current === operation.threadId) {
@@ -360,7 +368,12 @@ export default function AgentWorkspace({
   }
   async function act(
     kind: Operation['kind'],
-    settings?: ModelUpdate | RequestResponse | NewConversationInput | { messageId: string },
+    settings?:
+      | ModelUpdate
+      | RequestResponse
+      | NewConversationInput
+      | { messageId: string }
+      | { control: ControlAction },
   ) {
     if (!selected || (!view && kind !== 'create')) return;
     setBusy(true);
@@ -373,7 +386,7 @@ export default function AgentWorkspace({
           ? { requestId, text: draft, expectedQueueFingerprint: view?.queueFingerprint }
           : kind === 'queue-remove'
             ? { requestId, ...settings, expectedQueueFingerprint: view?.queueFingerprint }
-            : kind === 'settings' || kind === 'respond' || kind === 'create'
+            : kind === 'control' || kind === 'settings' || kind === 'respond' || kind === 'create'
               ? { requestId, ...settings }
               : kind === 'send'
                 ? {
@@ -794,6 +807,16 @@ export default function AgentWorkspace({
                 }
                 onSubmit={() => {
                   if (view?.activeTurnId && (selectedSkills.length || selectedPlugins.length)) return;
+                  if (
+                    isDsh &&
+                    /^\/(permission|goal|plan|compact|feedback|export|model|file)(?:\s|$)/.test(
+                      draft.trim(),
+                    ) &&
+                    !selectedSkills.length
+                  ) {
+                    setControlsOpen(true);
+                    return;
+                  }
                   void act(view?.activeTurnId ? 'steer' : 'send');
                 }}
                 onInterrupt={() => void act('interrupt')}
@@ -802,6 +825,14 @@ export default function AgentWorkspace({
                   <>
                     {view && (
                       <>
+                        <button
+                          type="button"
+                          className="composer-model"
+                          onClick={() => setControlsOpen(true)}
+                          aria-label="会话控制"
+                        >
+                          {view.controls?.permission === ':danger-full-access' ? '完全访问' : '权限与工具'}
+                        </button>
                         <ComposerTools
                           product={isDsh ? 'dsh' : 'codex'}
                           plan={view.mode === 'plan'}
@@ -811,11 +842,14 @@ export default function AgentWorkspace({
                             pending ||
                             !stream ||
                             (!view.canSend && !view.canInterrupt) ||
-                            isDsh ||
                             !view.model ||
                             !view.reasoningEffort
                           }
-                          onMode={(mode) => void act('settings', settingsUpdate(view, mode))}
+                          onMode={(mode) =>
+                            void (isDsh
+                              ? act('control', { control: { action: 'plan', enabled: mode === 'plan' } })
+                              : act('settings', settingsUpdate(view, mode)))
+                          }
                           onSkills={() => setSkillsOpen(true)}
                           onPlugins={() => setPluginsOpen(true)}
                         />
@@ -825,7 +859,11 @@ export default function AgentWorkspace({
                             className="plan-chip"
                             aria-label="取消计划模式"
                             disabled={busy || pending || !stream || (!view.canSend && !view.canInterrupt)}
-                            onClick={() => void act('settings', settingsUpdate(view, 'default'))}
+                            onClick={() =>
+                              void (isDsh
+                                ? act('control', { control: { action: 'plan', enabled: false } })
+                                : act('settings', settingsUpdate(view, 'default')))
+                            }
                           >
                             计划
                             <Icon name="close" size={14} />
@@ -846,6 +884,25 @@ export default function AgentWorkspace({
                 }
               />
             </section>
+            {controlsOpen && view && (
+              <ThreadTools open onClose={() => setControlsOpen(false)} title={view.cwd} heading="会话控制">
+                <ConversationControls
+                  id={view.id}
+                  state={view.controls}
+                  disabled={busy || pending || !stream}
+                  refresh={operations[0]?.updatedAt ?? 0}
+                  onAction={(control) => void act('control', { control })}
+                  onModel={() => {
+                    setControlsOpen(false);
+                    setConfigOpen(true);
+                  }}
+                  onFile={(path) => {
+                    drafts.update(view.id, (old) => ({ ...old, text: old.text + ` @${path} ` }));
+                    setControlsOpen(false);
+                  }}
+                />
+              </ThreadTools>
+            )}
             {configOpen && view && (
               <ThreadTools
                 open
@@ -922,6 +979,27 @@ export default function AgentWorkspace({
                 }
                 onCreate={(input) => void act('create', input)}
               />
+              {operations.find((o) => o.kind === 'create' && o.state === 'uncertain' && o.resultThreadId) && (
+                <button
+                  className="secondary"
+                  onClick={async () => {
+                    const op = operations.find(
+                      (o) => o.kind === 'create' && o.state === 'uncertain' && o.resultThreadId,
+                    )!;
+                    try {
+                      const result = await api<{ thread: ThreadSummary }>(
+                        `/threads/${encodeURIComponent(op.resultThreadId!)}`,
+                      );
+                      setSelected(result.thread);
+                      setNewOpen(false);
+                    } catch (e) {
+                      setError((e as Error).message);
+                    }
+                  }}
+                >
+                  查看已创建会话；结果待确认，请勿重复发送
+                </button>
+              )}
             </ThreadTools>
             <ThreadTools
               key={`tools:${selected.id}`}

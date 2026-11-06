@@ -43,15 +43,21 @@
     "test:public-browser": "node --import ./scripts/env.mjs --import tsx scripts/v2-public-browser-smoke.ts",
     "test:frontend": "node --import tsx scripts/v3-smoke.ts",
     "test:layout": "node --import tsx scripts/layout-recovery-smoke.ts",
-    "test:composer": "node --import tsx scripts/adaptive-composer-smoke.ts"
+    "test:composer": "node --import tsx scripts/adaptive-composer-smoke.ts",
+    "test:controls": "node --import tsx scripts/conversation-controls-smoke.ts"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.2.1-rc.5",
     "@deepseek-ai/dsh-api-gateway": "0.2.1-rc.5",
     "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.5",
     "@deepseek-ai/dsh-api-workspace-controller": "0.2.1-rc.5",
     "@deepseek-ai/dsh-client-connection": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-command-feedback": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-commands": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-goal": "0.2.1-rc.5",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-permission-presets": "0.2.1-rc.5",
     "@deepseek-ai/dsh-typert-registry": "0.2.1-rc.5",
     "@deepseek-ai/dsh-user-questions": "0.2.1-rc.5",
     "@fastify/cookie": "^11.1.5",

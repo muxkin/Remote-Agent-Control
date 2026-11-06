@@ -62,6 +62,9 @@ export const creationBody = z
     projectId: z.string().min(1).max(200).optional(),
     model: z.string().min(1).max(500).optional(),
     thinking: z.string().min(1).max(40).optional(),
+    permission: z.string().min(1).max(200).optional(),
+    agentPreset: z.string().min(1).max(200).optional(),
+    plan: z.boolean().optional(),
   })
   .strict();
 

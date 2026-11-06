@@ -1,3 +1,4 @@
+import { codexPermissions, codexPermissionState, permissionFingerprint } from './codex-permissions.js';
 import { connectorFor, codexProfile } from './connectors/codex-local.js';
 import { codexObservations } from './backends/codex-observations.js';
 import { nativeUserInput } from './user-content.js';
@@ -434,6 +435,59 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
       }
       sub.queue = await readNativeQueue(this.config.codexHome, id);
       this.emitView(id);
+      return null;
+    }
+    if (kind === 'control') {
+      const { control } = JSON.parse(input);
+      if (control.action !== 'permission' || !codexPermissions.some((p) => p.id === control.value))
+        throw new DeliveryError('此权限选项不可用', true);
+      if (
+        codexPermissionState(sub.state?.latestThreadSettings).permission !== control.expected ||
+        permissionFingerprint(sub.state?.latestThreadSettings) !== control.expectedRevision
+      )
+        throw new DeliveryError('桌面权限已变化，请重新打开设置', true);
+      const response = await this.transport.request(
+        'thread-follower-update-thread-settings',
+        {
+          conversationId: id,
+          threadSettings: {
+            permissions: control.value,
+            approvalPolicy: control.value === ':danger-full-access' ? 'never' : 'on-request',
+            approvalsReviewer: 'user',
+          },
+        },
+        2,
+        sub.owner,
+        15000,
+      );
+      if (response.result?.applied !== true) throw new DeliveryError('权限修改尚未确认');
+      const matches = () =>
+        this.view(id)?.synchronized &&
+        this.view(id)?.controls?.permission === control.value &&
+        sub.state?.latestThreadSettings?.sandboxPolicy?.type ===
+          (
+            {
+              ':read-only': 'readOnly',
+              ':workspace': 'workspaceWrite',
+              ':danger-full-access': 'dangerFullAccess',
+            } as Record<string, string>
+          )[control.value] &&
+        sub.state?.latestThreadSettings?.approvalPolicy ===
+          (control.value === ':danger-full-access' ? 'never' : 'on-request');
+      if (!matches())
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            clearTimeout(timer);
+            this.off('thread', listener);
+            resolve();
+          };
+          const listener = () => {
+            if (matches()) finish();
+          };
+          const timer = setTimeout(finish, 5000);
+          this.on('thread', listener);
+        });
+      if (!matches()) throw new DeliveryError('原生权限尚未确认');
       return null;
     }
     if (kind === 'settings') {

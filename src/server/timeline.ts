@@ -1,3 +1,4 @@
+import { codexPermissionState } from './codex-permissions.js';
 import { userContent } from './user-content.js';
 import { asyncRequests, asyncQuestionRequest, userMessageText } from './async-questions.js';
 import type { Message, ThreadView, ConversationRequest } from '../shared/types.js';
@@ -213,6 +214,7 @@ export function normalizedView(state: Json, revision: number, writable: boolean)
     model: state.latestModel ?? null,
     reasoningEffort: state.latestReasoningEffort ?? null,
     serviceTier: state.latestThreadSettings?.serviceTier ?? null,
+    controls: codexPermissionState(state.latestThreadSettings),
     pendingRequests,
     requests: requestsOf(state),
     mode: state.latestCollaborationMode?.mode ?? 'default',

@@ -107,8 +107,8 @@ Python 只做校验和字节转发：Linux `SO_PEERCRED` + `/proc/PID/exe`；mac
 | Linux Codex follower `26.1029.61003` | 沿用已验证协议档案                    | Linux 自动回归、真实 Unix Socket 测试进程                    |
 | macOS Codex Socket                   | 原生身份校验及路径实现，实验性        | 本机无法实测；三系统 CI 已配置，未在本次本地运行 macOS job   |
 | Windows Codex Named Pipe             | PID、SID、exe 校验及 ACL 实现，实验性 | 本机无法实测；三系统 CI 已配置，未在本次本地运行 Windows job |
-| DSH Web `0.2.1-rc.5`                 | HTTP/WS、会话、交互和文件契约，实验性 | 真实 Web 聊天、控制与文件往返；交互保留契约验证边界         |
-| 其他 Codex / DSH 产品版本            | 沿用适配器，按实际协议检查            | 不因产品版本变化关闭控制或提示验证状态                      |
+| DSH Web `0.2.1-rc.5`                 | HTTP/WS、会话、交互和文件契约，实验性 | 真实 Web 聊天、控制与文件往返；交互保留契约验证边界          |
+| 其他 Codex / DSH 产品版本            | 沿用适配器，按实际协议检查            | 不因产品版本变化关闭控制或提示验证状态                       |
 
 macOS / Windows 的未加载 Codex 聊天不会通过未经验证的深链接启动应用；在原桌面打开后可使用已同步的 follower 能力。连接器基础、协议契约通过和真实桌面验收是三种不同结论。
 
@@ -141,3 +141,15 @@ TEST_BIND=<本机Tailscale地址> TEST_WEB_ROOT=.implementation/web node --impor
 该 UI 脚本输出临时目录中的截图与检查结果，退出后关闭模拟服务。它使用现有 Playwright；本会话未提供 Browser 插件。
 
 参考：[OpenCode client-only SDK](https://opencode.ai/docs/sdk/#client-only)、[VS Code remote architecture](https://code.visualstudio.com/api/advanced-topics/remote-extensions#architecture-and-extension-kinds)、[ACP 能力协商](https://agentclientprotocol.com/protocol/v1/initialization)、[DSH Connection](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/connection/README.md)、[DSH Session Controller](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/api/session-controller/README.md)。实现契约以固定 npm 版本为准，不以持续变化的 master 代替测试。
+
+## 会话控制入口（2026-11-06）
+
+输入区的“权限与工具”打开共享会话控制面板。Codex 支持只读、工作区内修改、完全访问；自定义权限只展示，不改写全局配置。权限操作检查原生设置指纹，并等待权限档案、沙箱和审批策略全部确认。正在执行的回合遵守原生生效时机。新建 Codex 首轮沿用原生创建权限，不提供无效的首轮权限选择器。
+
+DSH 新建可选择工作区、Agent 预设、权限和计划模式；首条消息在设置完成后提交。已有会话的 Agent 预设在首轮开始后锁定。会话控制面板提供计划、目标创建/修改/暂停/继续/完成/清除、压缩、反馈、工作区文件查询和 ZIP 日志导出；模型仍使用独立模型面板，手机附件沿用加密上传通道。输入内置斜杠命令会进入会话控制入口，不把该命令交给模型；已选技能保持原语义。
+
+所有控制使用固定加密 RPC 路由和适配器内部的生成协议类型。反馈必须显式提交，可能按 DSH 配置附带会话日志；自动测试仅使用模拟接收端。ZIP 由网关携带 API 身份取得，限制 256 MiB，并通过既有分块加密通道传输。浏览器不能访问上游 Cookie 或任意上游 RPC。
+
+请求 UUID 沿用网关持久去重。原生命令返回的 commandId 与结果存入实例私有 commands 目录；结果未知时不自动重放。创建中途失败保留原生会话 ID，新会话草稿按主机/实例/锚点保存，并提供进入已创建会话的入口。
+
+本次本机实测包括 DSH 权限/计划切换、首轮权限设置先于发送、目标创建/暂停/清除、预设锁定和原生 ZIP；Codex 独立测试会话验证了权限档案、沙箱及审批策略同步。反馈只做模拟测试。Android/iOS 物理设备、macOS/Windows 原生桌面，以及所有原生交互的双端竞态仍需独立实机验收，不能以桌面浏览器测试替代。

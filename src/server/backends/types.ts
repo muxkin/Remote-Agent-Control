@@ -58,6 +58,9 @@ export interface AgentBackend extends EventEmitter {
   execute(id: string, command: BackendCommand, requestId: string): Promise<string | null>;
   inlineMedia(id: string, reference: string): string | null;
   fullMessage(id: string, messageId: string): Message | null;
+  controls?(id: string): Promise<import('../../shared/controls.js').ControlCatalog>;
+  exportLog?(id: string): Promise<string>;
+  fileReferences?(id: string, query: string): Promise<{ path: string; name: string }[]>;
   models(): Promise<ModelCatalog>;
   skills(id: string): Promise<SkillChoice[]>;
   plugins(id: string): Promise<PluginChoice[]>;

@@ -68,11 +68,13 @@ export class Operations extends EventEmitter {
       if (!['completed', 'interrupted', 'failed'].includes(current.state))
         this.update(
           id,
-          error instanceof DeliveryError && error.notSent && !current.resultThreadId
-            ? 'rejected'
-            : 'uncertain',
+          error instanceof DeliveryError && error.outcome === 'failed'
+            ? 'failed'
+            : error instanceof DeliveryError && error.notSent && !current.resultThreadId
+              ? 'rejected'
+              : 'uncertain',
           null,
-          error instanceof DeliveryError && error.notSent
+          error instanceof DeliveryError && (error.notSent || error.outcome === 'failed')
             ? error.message
             : '结果待确认，请勿重复发送；恢复连接后核对原实例会话',
         );

@@ -243,6 +243,15 @@ export async function mediaContent(threadId: string, path: string, backendId = s
     );
     session.cache.put(cacheKey, manifest);
   }
+  return manifestContent(threadId, manifest, backendId);
+}
+export async function exportSessionLog(threadId: string) {
+  const manifest = await session.api<FileManifest>(`/threads/${encodeURIComponent(threadId)}/export`, {
+    method: 'POST',
+  });
+  return manifestContent(threadId, manifest, session.backendId);
+}
+async function manifestContent(threadId: string, manifest: FileManifest, backendId: string) {
   owners.set(manifest.id, backendId);
   const key = session.contentKey(`url:${manifest.sha256}`, backendId),
     old = urls.get(key);

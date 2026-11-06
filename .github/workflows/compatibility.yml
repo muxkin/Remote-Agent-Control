@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
-      - run: npx vitest run test/platform-connectors.test.ts test/dsh.test.ts test/dsh-connection.test.ts test/store.test.ts
+      - run: npx vitest run test/platform-connectors.test.ts test/dsh.test.ts test/dsh-connection.test.ts test/conversation-controls.test.ts test/store.test.ts
       - run: npm test
         if: runner.os == 'Linux'
       - run: npm run build

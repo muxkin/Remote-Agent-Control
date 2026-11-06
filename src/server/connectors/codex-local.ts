@@ -24,6 +24,26 @@ export interface CodexConnector {
   appTools(config: Config): Promise<string[]>;
   openThread(id: string): Promise<void>;
 }
+/** Candidate discovery only; every connection still passes native peer validation. */
+export async function discoverAppTools(root: string, uid?: number): Promise<string[]> {
+  const directories = [
+    ...(uid === undefined ? [] : [join(root, `codex-app-tools-${uid}`)]),
+    join(root, 'codex-app-tools'),
+  ];
+  const entries = await Promise.all(
+    directories.map(async (directory) =>
+      (
+        await readdir(directory, { withFileTypes: true }).catch((error) => {
+          if (error.code === 'ENOENT') return [];
+          throw error;
+        })
+      )
+        .filter((entry) => entry.isSocket() && /^[a-f0-9-]{36}\.sock$/i.test(entry.name))
+        .map((entry) => join(directory, entry.name)),
+    ),
+  );
+  return [...new Set(entries.flat())].sort();
+}
 export function codexPaths(platform: string, home: string) {
   const candidates =
     platform === 'darwin'
@@ -125,10 +145,7 @@ export class LocalCodexConnector implements CodexConnector {
   async appTools(_config: Config) {
     if (process.env.POCKET_CODEX_APP_TOOLS) return [process.env.POCKET_CODEX_APP_TOOLS];
     if (this.platform === 'win32') return [];
-    const directory = join(this.platform === 'linux' ? '/tmp' : tmpdir(), 'codex-app-tools');
-    return (await readdir(directory).catch(() => []))
-      .filter((name) => /^[a-f0-9-]{36}\.sock$/i.test(name))
-      .map((name) => join(directory, name));
+    return discoverAppTools(this.platform === 'linux' ? '/tmp' : tmpdir(), process.getuid?.());
   }
   async openThread(id: string) {
     if (!/^[a-f0-9-]{36}$/i.test(id)) throw Error('Invalid Codex thread');
