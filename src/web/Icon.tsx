@@ -1,5 +1,8 @@
 import type { CSSProperties } from 'react';
 const paths = {
+  shield: 'M12 3 3 6v5c0 5 4 8 9 10 5-2 9-5 9-10V6l-9-3Zm-4 9 3 3 5-6',
+  target: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 4h.01',
+  download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
   chat: 'M21 11a8 8 0 0 1-8 8H7l-4 3V11a9 9 0 0 1 18 0Z',
   user: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21v-2a8 8 0 0 1 16 0v2',
   trash: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7',

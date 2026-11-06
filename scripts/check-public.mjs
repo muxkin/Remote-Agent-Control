@@ -46,7 +46,7 @@ for (const file of files) {
     findings.push([file, 'private or generated path']);
   if (file.endsWith('/.gitignore')) findings.push([file, 'local ignore file must remain local']);
   const bytes = git(['show', `:${file}`]);
-  if (/\.(png|webp|jpg|jpeg|ico|woff2?)$/i.test(file)) continue;
+  if (/\.(png|webp|jpg|jpeg|ico|icns|woff2?)$/i.test(file)) continue;
   const content = bytes.toString('utf8');
   if (
     /-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{40,}|\bAKIA[0-9A-Z]{16}\b|\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}/.test(

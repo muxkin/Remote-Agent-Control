@@ -1,4 +1,4 @@
-import { ConversationControls } from './ConversationControls';
+import { ConversationControls, type ControlSection } from './ConversationControls';
 import type { ControlAction } from '../shared/controls';
 import { DEFAULT_BACKEND } from '../shared/backends';
 import { uploadFile } from './file-client';
@@ -27,7 +27,6 @@ import { TranscriptMessages } from './TranscriptMessages';
 import { ThreadTools } from './ThreadTools';
 import { SkillPicker } from './SkillPicker';
 import { Icon } from './Icon';
-import { ComposerTools } from './ComposerTools';
 import { ChatComposer } from './ChatComposer';
 import { ThreadNavigation } from './ThreadNavigation';
 import { useChatDrafts } from './chat-drafts';
@@ -88,7 +87,11 @@ export default function AgentWorkspace({
   const [newOpen, setNewOpen] = useState(false);
   const [newProject, setNewProject] = useState<string>();
   const [newDirty, setNewDirty] = useState(false);
-  const [controlsOpen, setControlsOpen] = useState(false);
+  const [controlRequest, setControlRequest] = useState<{
+    target: ControlSection;
+    sequence: number;
+    threadId: string;
+  }>();
   const [settingsDirty, setSettingsDirty] = useState(false);
 
   const [projects, setProjects] = useState<{ projects: ProjectSummary[]; total: number; ungrouped: number }>({
@@ -102,6 +105,7 @@ export default function AgentWorkspace({
   const listRequest = useRef(0);
   const [listLoading, setListLoading] = useState(false);
   const [selected, updateSelected] = useState<ThreadSummary | null>(null);
+  useEffect(() => setControlRequest(undefined), [selected?.id]);
   function setSelected(thread: ThreadSummary | null) {
     updateSelected(thread);
     navigate({ page: 'workbench', backend: backendId, ...(thread ? { thread: thread.id } : {}) });
@@ -798,7 +802,16 @@ export default function AgentWorkspace({
                     ) &&
                     !selectedSkills.length
                   ) {
-                    setControlsOpen(true);
+                    const command = draft.trim().split(/\s/)[0].slice(1);
+                    if (command === 'model') setConfigOpen(true);
+                    else
+                      setControlRequest((previous) => ({
+                        threadId: view!.id,
+                        target: ['permission', 'goal', 'feedback', 'file'].includes(command)
+                          ? (command as ControlSection)
+                          : 'tools',
+                        sequence: (previous?.sequence ?? 0) + 1,
+                      }));
                     return;
                   }
                   void act(view?.activeTurnId ? 'steer' : 'send');
@@ -809,26 +822,21 @@ export default function AgentWorkspace({
                   <>
                     {view && (
                       <>
-                        <button
-                          type="button"
-                          className="composer-model"
-                          onClick={() => setControlsOpen(true)}
-                          aria-label="会话控制"
-                        >
-                          {view.controls?.permission === ':danger-full-access' ? '完全访问' : '权限与工具'}
-                        </button>
-                        <ComposerTools
+                        <ConversationControls
+                          key={view.id}
+                          id={view.id}
+                          state={view.controls}
                           product={isDsh ? 'dsh' : 'codex'}
-                          plan={view.mode === 'plan'}
-                          running={!!view?.activeTurnId}
-                          disabled={
-                            busy ||
-                            pending ||
-                            !stream ||
-                            (!view.canSend && !view.canInterrupt) ||
-                            !view.model ||
-                            !view.reasoningEffort
+                          plan={isDsh ? !!view.controls?.plan : view.mode === 'plan'}
+                          running={!!view.activeTurnId}
+                          disabled={busy || pending || !stream}
+                          modeDisabled={
+                            !isDsh &&
+                            ((!view.canSend && !view.canInterrupt) || !view.model || !view.reasoningEffort)
                           }
+                          refresh={operations[0]?.updatedAt ?? 0}
+                          request={controlRequest?.threadId === view.id ? controlRequest : undefined}
+                          onAction={(control) => void act('control', { control })}
                           onMode={(mode) =>
                             void (isDsh
                               ? act('control', { control: { action: 'plan', enabled: mode === 'plan' } })
@@ -836,6 +844,9 @@ export default function AgentWorkspace({
                           }
                           onSkills={() => setSkillsOpen(true)}
                           onPlugins={() => setPluginsOpen(true)}
+                          onFile={(path) =>
+                            drafts.update(view.id, (old) => ({ ...old, text: old.text + ' @' + path + ' ' }))
+                          }
                         />
                         {view.mode === 'plan' && (
                           <button
@@ -868,25 +879,6 @@ export default function AgentWorkspace({
                 }
               />
             </section>
-            {controlsOpen && view && (
-              <ThreadTools open onClose={() => setControlsOpen(false)} title={view.cwd} heading="会话控制">
-                <ConversationControls
-                  id={view.id}
-                  state={view.controls}
-                  disabled={busy || pending || !stream}
-                  refresh={operations[0]?.updatedAt ?? 0}
-                  onAction={(control) => void act('control', { control })}
-                  onModel={() => {
-                    setControlsOpen(false);
-                    setConfigOpen(true);
-                  }}
-                  onFile={(path) => {
-                    drafts.update(view.id, (old) => ({ ...old, text: old.text + ` @${path} ` }));
-                    setControlsOpen(false);
-                  }}
-                />
-              </ThreadTools>
-            )}
             {configOpen && view && (
               <ThreadTools
                 open

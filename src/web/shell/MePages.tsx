@@ -258,9 +258,13 @@ export default function MePages({
       )}
       {route.page === 'about' && (
         <section className="about-content">
-          <span className="empty-symbol">
-            <Icon name="grid" size={38} />
-          </span>
+          <img
+            className="about-app-icon"
+            src="/app-icon-192.png"
+            alt="Agent 空间图标"
+            width="96"
+            height="96"
+          />
           <h2>Agent 空间</h2>
           <p>即时聊天与 Agent 工作台</p>
           <p>连接电脑后，可继续已有会话、发送任务、处理审批。消息模块的 Agent 接入将陆续开放。</p>

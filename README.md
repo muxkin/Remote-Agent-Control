@@ -1,5 +1,7 @@
 # Codex Pocket Remote
 
+<img src="src/web/public/app-icon-192.png" alt="Agent 空间原创图标" width="96" height="96">
+
 **离开电脑，也能在手机上继续使用已有的 Codex 与 DSH 会话。**
 
 Codex Pocket Remote 是一个可自行部署的移动端网页客户端，连接电脑上正在运行的 Codex 桌面会话。你可以查看执行进度、发送指令、回答问题、处理审批，以及接收代码、图片和文件。手机与电脑使用同一条会话，可以随时切换。
