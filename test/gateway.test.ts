@@ -6,10 +6,10 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { fixtureConfig, historyFixture, FakeTransport, THREAD } from './helpers.js';
 import { Store } from '../src/server/store.js';
-import { HistoryIndex } from '../src/server/history.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
-import { DesktopAppTools } from '../src/server/app-tools.js';
-import { buildGateway } from '../test/legacy/gateway.js';
+import { HistoryIndex } from '../packages/adapter-codex/src/history.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
+import { DesktopAppTools } from '../packages/adapter-codex/src/app-tools.js';
+import { buildGateway } from './legacy/gateway.js';
 const callbacks: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const f of callbacks.splice(0)) await f();

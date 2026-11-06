@@ -1,4 +1,4 @@
-import { CodexBackend } from '../../src/server/backends/codex.js';
+import { CodexBackend } from '../../packages/adapter-codex/src/backend.js';
 // V1 regression fixture only. Not included in any production entrypoint.
 import { loadStorage } from '../../src/server/object-storage.js';
 import Fastify from 'fastify';
@@ -10,22 +10,22 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type { Config } from '../../src/server/config.js';
 import { Store, ConflictError } from '../../src/server/store.js';
-import { DesktopAdapter } from '../../src/server/desktop.js';
-import { HistoryIndex } from '../../src/server/history.js';
+import { DesktopAdapter } from '../../packages/adapter-codex/src/desktop.js';
+import { HistoryIndex } from '../../packages/adapter-codex/src/history.js';
 import { Operations } from '../../src/server/operations.js';
 import type { ServerEvent, ThreadView } from '../../src/shared/types.js';
 import { diffViews } from '../../src/shared/delta.js';
-import { modelCatalog, validateModelSettings } from '../../src/server/models.js';
-import { SkillCatalog } from '../../src/server/skills.js';
-import { PluginCatalog } from '../../src/server/plugins.js';
+import { modelCatalog, validateModelSettings } from '../../packages/adapter-codex/src/models.js';
+import { SkillCatalog } from '../../packages/adapter-codex/src/skills.js';
+import { PluginCatalog } from '../../packages/adapter-codex/src/plugins.js';
 import { SelectionError } from '../../src/server/selection-error.js';
 import { MediaService, authorizeFile, mediaTypes } from '../../src/server/media.js';
 import { createReadStream } from 'node:fs';
 import { basename, extname } from 'node:path';
 import { PeerEvents } from './peer-events.js';
 import { Uploads, uploadSpec } from '../../src/server/uploads.js';
-import { creationBody } from '../../src/server/app-tools.js';
-import { responseBody } from '../../src/server/approvals.js';
+import { creationBody } from '../../packages/adapter-codex/src/app-tools.js';
+import { responseBody } from '../../packages/adapter-codex/src/approvals.js';
 import { WebSocketOutput } from '../../src/server/websocket-output.js';
 
 const uuid = z.string().uuid();
@@ -83,7 +83,7 @@ const settingsBody = z
   .strict();
 const COOKIE = 'pocket_session';
 export async function buildGateway(
-  config: Config,
+  config: Config & import('../../packages/adapter-codex/src/config.js').CodexConfig,
   deps: { store: Store; desktop: DesktopAdapter; history: HistoryIndex },
 ) {
   const { store, desktop, history } = deps;

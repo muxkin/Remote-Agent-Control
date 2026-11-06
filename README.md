@@ -6,7 +6,7 @@
 
 Codex Pocket Remote 是一个可自行部署的移动端网页客户端，连接电脑上正在运行的 Codex 桌面会话。你可以查看执行进度、发送指令、回答问题、处理审批，以及接收代码、图片和文件。手机与电脑使用同一条会话，可以随时切换。
 
-已抽取通用后端，新增已有 DSH Web 实例接入和多实例工作台；macOS / Windows 连接基础及 DSH 适配标为实验性，手机采用浏览器/PWA。配置、能力限制和实际验证边界见 [通用后端与兼容矩阵](docs/BACKENDS.md)。v2 已通过 Linux Chrome 移动视口测试；Android/iOS 真机验收进度见 [验证记录](docs/VALIDATION_V2.md)。本项目为非官方项目，仍处于早期开发阶段。
+Codex 与 DSH 已拆为独立插件包，每个实例由独立宿主连接，支持按实例升级和回滚，见 [插件安装与架构](docs/ADAPTER_PLUGINS.md)。已有 DSH Web 实例接入和多实例工作台继续保留；macOS / Windows 连接基础及 DSH 适配标为实验性，手机采用浏览器/PWA。配置、能力限制和实际验证边界见 [通用后端与兼容矩阵](docs/BACKENDS.md)。v2 已通过 Linux Chrome 移动视口测试；Android/iOS 真机验收进度见 [验证记录](docs/VALIDATION_V2.md)。本项目为非官方项目，仍处于早期开发阶段。
 
 ## 界面预览
 

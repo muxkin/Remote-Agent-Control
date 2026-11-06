@@ -1,7 +1,7 @@
 /** Matched synthetic views: application JSON sizes, not WAN latency or billing estimates. */
 import assert from 'node:assert/strict';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { DesktopAdapter } from '../src/server/desktop.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
 import { SyncJournal } from '../src/server/sync-journal.js';
 import { applySync, checkpoint, type CachedThread } from '../src/shared/sync.js';
 import { FakeTransport, fixtureConfig, THREAD } from '../test/helpers.js';

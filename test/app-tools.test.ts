@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DesktopAppTools } from '../src/server/app-tools.js';
+import { DesktopAppTools } from '../packages/adapter-codex/src/app-tools.js';
 import { fixtureConfig, THREAD } from './helpers.js';
 const cleanup: (() => void)[] = [];
 afterEach(() => {

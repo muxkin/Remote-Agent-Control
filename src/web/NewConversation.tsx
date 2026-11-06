@@ -1,3 +1,4 @@
+import type { BackendPresentation } from '../shared/backends';
 import type { ControlCatalog } from '../shared/controls';
 import { remoteFetch, deviceSession } from './device-session';
 import { useEffect, useState } from 'react';
@@ -20,6 +21,7 @@ export interface NewConversationInput {
 }
 export function NewConversation({
   anchor,
+  creation,
   disabled,
   active,
   onCreate,
@@ -29,6 +31,7 @@ export function NewConversation({
   feedback,
 }: {
   anchor: string;
+  creation?: BackendPresentation['creation'];
   disabled: boolean;
   active: boolean;
   onCreate: (input: NewConversationInput) => void;
@@ -176,52 +179,59 @@ export function NewConversation({
             ))}
           </select>
         </label>
-        {catalog?.product === 'dsh' ? (
+        {catalog && creation ? (
           <>
-            <label>
-              Agent 预设
-              <select
-                aria-label="新会话 Agent 预设"
-                value={preset}
-                disabled={disabled}
-                onChange={(e) => setPreset(e.target.value)}
-              >
-                <option value="">原生默认</option>
-                {catalog.presets.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              权限
-              <select
-                aria-label="新会话权限"
-                value={permission}
-                disabled={disabled}
-                onChange={(e) => setPermission(e.target.value)}
-              >
-                <option value="">原生默认</option>
-                {catalog.permissions.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={plan}
-                disabled={disabled}
-                onChange={(e) => setPlan(e.target.checked)}
-              />
-              计划模式
-            </label>
+            {creation.preset && (
+              <label>
+                Agent 预设
+                <select
+                  aria-label="新会话 Agent 预设"
+                  value={preset}
+                  disabled={disabled}
+                  onChange={(e) => setPreset(e.target.value)}
+                >
+                  <option value="">原生默认</option>
+                  {catalog.presets.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {creation.permission === 'select' && (
+              <label>
+                权限
+                <select
+                  aria-label="新会话权限"
+                  value={permission}
+                  disabled={disabled}
+                  onChange={(e) => setPermission(e.target.value)}
+                >
+                  <option value="">原生默认</option>
+                  {catalog.permissions.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {creation.plan && (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={plan}
+                  disabled={disabled}
+                  onChange={(e) => setPlan(e.target.checked)}
+                />
+                计划模式
+              </label>
+            )}
+            {creation.notice && <p className="hint">{creation.notice}</p>}
           </>
         ) : (
-          <p className="hint">沿用 Codex 创建权限；创建后可在会话中调整。</p>
+          <p className="hint">{creation?.notice ?? '沿用原生创建设置'}</p>
         )}
         <details className="optional-title">
           <summary>自定义标题（可选）</summary>
@@ -262,9 +272,9 @@ export function NewConversation({
           onSubmit={() =>
             onCreate({
               prompt: draft.text,
-              ...(catalog?.product === 'dsh'
-                ? { permission: permission || undefined, agentPreset: preset || undefined, plan }
-                : {}),
+              ...(creation?.permission === 'select' ? { permission: permission || undefined } : {}),
+              ...(creation?.preset ? { agentPreset: preset || undefined } : {}),
+              ...(creation?.plan ? { plan } : {}),
               ...(title.trim() ? { title: title.trim() } : {}),
               ...(projectId ? { projectId } : {}),
               ...(settings ? { model: settings.model, thinking: settings.effort } : {}),

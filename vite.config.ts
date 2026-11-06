@@ -19,6 +19,7 @@ export default defineConfig(() => {
   };
   addFiles('src/web');
   addFiles('src/shared');
+  addFiles('packages/adapter-sdk/src');
   hash.update(readFileSync('package-lock.json')).update(readFileSync('vite.config.ts'));
   const buildId = hash.digest('hex').slice(0, 16);
   return {

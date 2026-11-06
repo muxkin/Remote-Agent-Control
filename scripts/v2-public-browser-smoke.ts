@@ -1,10 +1,10 @@
 /** Public release, real desktop, read-only browser verification. Never submits a prompt. */
 import { chromium, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
-import { readConfig } from '../src/server/config.js';
+import { readConfig } from './legacy-config.js';
 import { hostIdentity } from '../src/server/device-identity.js';
 import { Store } from '../src/server/store.js';
-import { HistoryIndex } from '../src/server/history.js';
+import { HistoryIndex } from '../packages/adapter-codex/src/history.js';
 const config = readConfig(),
   store = new Store(config.stateDir),
   history = new HistoryIndex(config.codexHome),

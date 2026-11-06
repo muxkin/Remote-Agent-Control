@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encodeFrame, FrameReader, MAX_FRAME } from '../src/server/framing.js';
+import { encodeFrame, FrameReader, MAX_FRAME } from '../packages/adapter-codex/src/framing.js';
 describe('IPC framing', () => {
   it('preserves UTF-8 across every byte boundary and coalesced frames', () => {
     const messages = [{ text: '中文🙂', n: 1 }, { text: 'next' }];

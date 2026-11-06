@@ -1,6 +1,6 @@
 import { ConversationControls, type ControlSection } from './ConversationControls';
 import type { ControlAction } from '../shared/controls';
-import { DEFAULT_BACKEND } from '../shared/backends';
+import { DEFAULT_BACKEND, type BackendInfo } from '../shared/backends';
 import { uploadFile } from './file-client';
 import { deviceSession } from './device-session';
 import { RpcError as ApiError } from '../shared/rpc';
@@ -22,7 +22,6 @@ import { mergeOperation, readPending, rememberOperation } from './operation-stat
 import { ModelSettings, modelLabel, settingsUpdate, type ModelUpdate } from './ModelSettings';
 import { RequestCards, type RequestResponse } from './RequestCards';
 import { NewConversation, type NewConversationInput } from './NewConversation';
-import codexAvatar from './assets/codex-avatar.webp';
 import { TranscriptMessages } from './TranscriptMessages';
 import { ThreadTools } from './ThreadTools';
 import { SkillPicker } from './SkillPicker';
@@ -67,10 +66,30 @@ export default function AgentWorkspace({
   onBusy: (busy: boolean) => void;
 }) {
   const backendId = route.backend ?? DEFAULT_BACKEND;
-  const isDsh = backendId !== DEFAULT_BACKEND;
-  const agentName = isDsh ? 'DSH' : 'Codex';
+  const [backend, setBackend] = useState<BackendInfo>();
+  const presentation = backend?.presentation;
+  const emptyCreation = presentation?.creation.empty ?? false;
+  const controlPlan = presentation?.plan === 'control';
+  const agentName = backend?.name ?? 'Agent';
   const api = <T,>(path: string, init?: RequestInit) => deviceSession.api<T>(path, init, backendId);
   const [paired, setPaired] = useState(false);
+  useEffect(() => {
+    if (!paired) return;
+    let alive = true;
+    const refresh = () =>
+      void deviceSession
+        .api<{ backends: BackendInfo[] }>('/backends', undefined, backendId)
+        .then((result) => {
+          if (alive) setBackend(result.backends.find((b) => b.id === backendId));
+        })
+        .catch(() => {});
+    refresh();
+    const timer = setInterval(refresh, 15000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [paired, backendId]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('我的手机');
   const [deviceId, setDeviceId] = useState('');
@@ -116,8 +135,8 @@ export default function AgentWorkspace({
       updateSelected(null);
       return;
     }
-    if (route.thread === 'new' && isDsh) {
-      updateSelected({ id: 'new', title: '新建 DSH 会话', cwd: '', updatedAt: Date.now() });
+    if (route.thread === 'new' && emptyCreation) {
+      updateSelected({ id: 'new', title: `新建 ${agentName} 会话`, cwd: '', updatedAt: Date.now() });
       return;
     }
     if (!route.thread) {
@@ -147,7 +166,7 @@ export default function AgentWorkspace({
     return () => {
       alive = false;
     };
-  }, [route.page, route.thread, route.host, paired]);
+  }, [route.page, route.thread, route.host, paired, emptyCreation]);
   const selectedId = useRef<string | null>(null);
   const openedCreations = useRef(new Set<string>());
   selectedId.current = selected?.id ?? null;
@@ -249,8 +268,9 @@ export default function AgentWorkspace({
   }
   useEffect(() => {
     if (location.hash) history.replaceState(null, '', location.pathname + location.search);
-    void api<{ device: { id: string }; status: GatewayStatus }>('/session')
+    void api<{ device: { id: string }; status: GatewayStatus; backend?: BackendInfo }>('/session')
       .then((r) => {
+        setBackend(r.backend);
         setDeviceId(backendId === DEFAULT_BACKEND ? r.device.id : `${r.device.id}:${backendId}`);
         setPaired(true);
         setStatus(r.status);
@@ -630,8 +650,8 @@ export default function AgentWorkspace({
         onCreate={(projectId) => {
           setNewProject(projectId);
           if (!selected && threads[0]) setSelected(threads[0]);
-          else if (!selected && isDsh) {
-            updateSelected({ id: 'new', title: '新建 DSH 会话', cwd: '', updatedAt: Date.now() });
+          else if (!selected && emptyCreation) {
+            updateSelected({ id: 'new', title: `新建 ${agentName} 会话`, cwd: '', updatedAt: Date.now() });
             navigate({ page: 'workbench', backend: backendId, thread: 'new' });
           }
           setNewOpen(true);
@@ -691,7 +711,7 @@ export default function AgentWorkspace({
               )}
               {!view && <p className="muted center">正在读取会话…</p>}
               <TranscriptMessages
-                agent={{ name: agentName, ...(isDsh ? {} : { avatar: codexAvatar }) }}
+                agent={{ name: agentName }}
                 messages={messages}
                 threadId={selected.id}
                 activeTurnId={view?.activeTurnId}
@@ -796,7 +816,7 @@ export default function AgentWorkspace({
                 onSubmit={() => {
                   if (view?.activeTurnId && (selectedSkills.length || selectedPlugins.length)) return;
                   if (
-                    isDsh &&
+                    presentation?.nativeCommands &&
                     /^\/(permission|goal|plan|compact|feedback|export|model|file)(?:\s|$)/.test(
                       draft.trim(),
                     ) &&
@@ -826,19 +846,19 @@ export default function AgentWorkspace({
                           key={view.id}
                           id={view.id}
                           state={view.controls}
-                          product={isDsh ? 'dsh' : 'codex'}
-                          plan={isDsh ? !!view.controls?.plan : view.mode === 'plan'}
+                          backend={backend}
+                          plan={controlPlan ? !!view.controls?.plan : view.mode === 'plan'}
                           running={!!view.activeTurnId}
                           disabled={busy || pending || !stream}
                           modeDisabled={
-                            !isDsh &&
+                            presentation?.plan === 'settings' &&
                             ((!view.canSend && !view.canInterrupt) || !view.model || !view.reasoningEffort)
                           }
                           refresh={operations[0]?.updatedAt ?? 0}
                           request={controlRequest?.threadId === view.id ? controlRequest : undefined}
                           onAction={(control) => void act('control', { control })}
                           onMode={(mode) =>
-                            void (isDsh
+                            void (controlPlan
                               ? act('control', { control: { action: 'plan', enabled: mode === 'plan' } })
                               : act('settings', settingsUpdate(view, mode)))
                           }
@@ -855,7 +875,7 @@ export default function AgentWorkspace({
                             aria-label="取消计划模式"
                             disabled={busy || pending || !stream || (!view.canSend && !view.canInterrupt)}
                             onClick={() =>
-                              void (isDsh
+                              void (controlPlan
                                 ? act('control', { control: { action: 'plan', enabled: false } })
                                 : act('settings', settingsUpdate(view, 'default')))
                             }
@@ -934,6 +954,7 @@ export default function AgentWorkspace({
               <NewConversation
                 key={`new:${selected.id}`}
                 anchor={selected.id}
+                creation={presentation?.creation}
                 active={newOpen}
                 defaultProject={newProject}
                 knownProjects={projects.projects}
@@ -941,7 +962,7 @@ export default function AgentWorkspace({
                 disabled={
                   busy ||
                   pending ||
-                  (!stream && !isDsh) ||
+                  (!stream && !emptyCreation) ||
                   !status?.writesEnabled ||
                   !status.capabilities.newThread
                 }

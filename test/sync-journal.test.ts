@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { SyncJournal } from '../src/server/sync-journal.js';
 import { applySync, checkpoint } from '../src/shared/sync.js';
-import { normalizedView } from '../src/server/timeline.js';
+import { normalizedView } from '../packages/adapter-codex/src/timeline.js';
 import { state } from './helpers.js';
 
 const view = (revision: number, text = '世界') => ({

@@ -1,7 +1,7 @@
 import { BackendRegistry } from '../src/server/backends/registry.js';
-import { CodexBackend } from '../src/server/backends/codex.js';
-import { DshBackend } from '../src/server/backends/dsh.js';
-import { DshFixtureConnection } from './dsh-fixture.js';
+import { CodexBackend } from '../packages/adapter-codex/src/backend.js';
+import { DshBackend } from '../packages/adapter-dsh/src/backend.js';
+import { DshFixtureConnection } from '../packages/adapter-dsh/test/fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
@@ -13,8 +13,8 @@ import { RTCPeerConnection } from 'werift';
 import { buildRelay } from '../src/server/relay.js';
 import { HostService } from '../src/server/host-service.js';
 import { Store } from '../src/server/store.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
-import { HistoryIndex } from '../src/server/history.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
+import { HistoryIndex } from '../packages/adapter-codex/src/history.js';
 import {
   CipherWire,
   SecureChannel,

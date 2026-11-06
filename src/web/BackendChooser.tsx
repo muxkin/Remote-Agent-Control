@@ -43,7 +43,7 @@ export function BackendChooser({ navigate }: { navigate: (route: AppRoute) => vo
             onClick={() => navigate({ page: 'workbench', backend: backend.id })}
           >
             <strong>{backend.name}</strong>
-            <span>{backend.product === 'dsh' ? 'DSH Web' : 'Codex 桌面'}</span>
+            <span>{backend.presentation?.description ?? backend.product}</span>
             <small>{backend.connected ? '已连接' : '未连接'}</small>
             {backend.capabilities?.send.reason && backend.capabilities.send.state === 'unavailable' && (
               <small>{backend.capabilities.send.reason}</small>
@@ -51,9 +51,7 @@ export function BackendChooser({ navigate }: { navigate: (route: AppRoute) => vo
           </button>
         ))}
       </div>
-      {!entries.some((b) => b.product === 'dsh') && (
-        <p className="hint">尚未配置 DSH 实例。可在主机端配置已有 DSH Web 的连接地址。</p>
-      )}
+      <p className="hint">可在主机端安装接入插件并配置更多实例。</p>
       {error && <p role="status">{error}</p>}
     </main>
   );

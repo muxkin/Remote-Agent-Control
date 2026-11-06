@@ -1,4 +1,4 @@
-import { codexObservations } from '../src/server/backends/codex-observations.js';
+import { codexObservations } from '../packages/adapter-codex/src/observations.js';
 import { EventEmitter } from 'node:events';
 import { rmSync } from 'node:fs';
 import { afterEach, expect, it } from 'vitest';

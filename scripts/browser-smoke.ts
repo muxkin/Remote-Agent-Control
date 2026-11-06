@@ -5,9 +5,9 @@ import { chromium, expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { readConfig } from '../src/server/config.js';
+import { readConfig } from './legacy-config.js';
 import { Store } from '../src/server/store.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
 
 const threadId = process.argv[2];
 if (!threadId || !process.argv.includes('--allow-control')) {

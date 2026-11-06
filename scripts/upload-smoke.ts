@@ -4,10 +4,10 @@ await privateOutput('.test-output');
 import { chromium, expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { readConfig } from '../src/server/config.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
+import { readConfig } from './legacy-config.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
 import { Store } from '../src/server/store.js';
-import { turnsOf } from '../src/server/timeline.js';
+import { turnsOf } from '../packages/adapter-codex/src/timeline.js';
 const id = process.argv[2];
 if (!id || !process.argv.includes('--allow-control'))
   throw Error('Dedicated test thread and --allow-control required');

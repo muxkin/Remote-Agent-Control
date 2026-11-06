@@ -5,9 +5,14 @@
     "moduleResolution": "NodeNext",
     "noEmit": false,
     "outDir": "dist",
-    "rootDir": "src",
-    "types": ["node"],
+    "rootDir": ".",
+    "types": [
+      "node"
+    ],
     "sourceMap": true
   },
-  "include": ["src/server/**/*.ts", "src/shared/**/*.ts"]
+  "include": [
+    "src/server/**/*.ts",
+    "src/shared/**/*.ts"
+  ]
 }

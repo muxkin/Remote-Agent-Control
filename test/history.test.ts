@@ -2,7 +2,7 @@ import { it, expect, afterEach } from 'vitest';
 import { rmSync, writeFileSync, appendFileSync, renameSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { HistoryIndex, JsonlTail, rolloutMessage } from '../src/server/history.js';
+import { HistoryIndex, JsonlTail, rolloutMessage } from '../packages/adapter-codex/src/history.js';
 import { fixtureConfig, historyFixture, THREAD } from './helpers.js';
 const callbacks: (() => void)[] = [];
 afterEach(() => callbacks.splice(0).forEach((x) => x()));

@@ -1,3 +1,4 @@
+import type { BackendInfo } from '../shared/backends';
 import { useEffect, useState } from 'react';
 import type { ControlAction, ControlCatalog, ControlState } from '../shared/controls';
 import { remoteFetch } from './device-session';
@@ -33,7 +34,7 @@ const headings = {
 export function ConversationControls({
   id,
   state,
-  product,
+  backend,
   disabled,
   modeDisabled,
   running,
@@ -48,7 +49,7 @@ export function ConversationControls({
 }: {
   id: string;
   state?: ControlState;
-  product: 'codex' | 'dsh';
+  backend?: BackendInfo;
   disabled: boolean;
   modeDisabled?: boolean;
   running: boolean;
@@ -227,7 +228,7 @@ export function ConversationControls({
             )}
             {section === 'tools' && (
               <>
-                {(product === 'codex' || has('plan')) && (
+                {(backend?.presentation?.plan === 'settings' || has('plan')) && (
                   <button
                     type="button"
                     className="control-row"
@@ -241,7 +242,9 @@ export function ConversationControls({
                     <span>
                       <strong>计划模式</strong>
                       <small>
-                        {running && product === 'codex' ? '应用到下一轮' : '先讨论方案，再开始实施'}
+                        {running && backend?.presentation?.plan === 'settings'
+                          ? '应用到下一轮'
+                          : '先讨论方案，再开始实施'}
                       </small>
                     </span>
                     <span className={`mode-switch ${plan ? 'on' : ''}`} />
@@ -274,7 +277,7 @@ export function ConversationControls({
                   <span>技能</span>
                   <Icon name="chevron" size={16} />
                 </button>
-                {product === 'codex' && (
+                {['supported', 'experimental'].includes(backend?.capabilities.plugins.state ?? '') && (
                   <button
                     type="button"
                     className="control-row compact"
@@ -295,7 +298,7 @@ export function ConversationControls({
                     <Icon name="chevron" size={16} />
                   </button>
                 )}
-                {product === 'dsh' && (
+                {backend?.presentation?.fileReferences && (
                   <button type="button" className="control-row compact" onClick={() => openSection('file')}>
                     <Icon name="folder" size={19} />
                     <span>工作区文件</span>
@@ -327,7 +330,7 @@ export function ConversationControls({
                     <Icon name="chevron" size={16} />
                   </button>
                 )}
-                {product === 'dsh' && (
+                {backend?.presentation?.exportLog && (
                   <button
                     type="button"
                     className="control-row compact"

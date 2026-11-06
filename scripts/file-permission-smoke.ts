@@ -4,9 +4,9 @@ await privateOutput('.test-output');
 import { chromium, expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { readConfig } from '../src/server/config.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
-import { DesktopTransport } from '../src/server/transport.js';
+import { readConfig } from './legacy-config.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
+import { DesktopTransport } from '../packages/adapter-codex/src/transport.js';
 import { Store } from '../src/server/store.js';
 const id = process.argv[2];
 if (

@@ -1,6 +1,6 @@
 {
   "name": "codex-pocket-remote",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "node --import ./scripts/env.mjs --import tsx src/server/main.ts",
-    "build": "tsc -p tsconfig.server.json && vite build",
+    "build": "npm run build:adapters && node scripts/build-server.mjs && vite build",
     "start": "node --import ./scripts/env.mjs dist/server/main.js",
     "pair": "node --import ./scripts/env.mjs --import tsx src/server/cli.ts pair",
     "devices": "node --import ./scripts/env.mjs --import tsx src/server/cli.ts devices",
@@ -44,22 +44,16 @@
     "test:frontend": "node --import tsx scripts/v3-smoke.ts",
     "test:layout": "node --import tsx scripts/layout-recovery-smoke.ts",
     "test:composer": "node --import tsx scripts/adaptive-composer-smoke.ts",
-    "test:controls": "node --import tsx scripts/conversation-controls-smoke.ts"
+    "test:controls": "node --import tsx scripts/conversation-controls-smoke.ts",
+    "build:adapters": "node scripts/build-adapters.mjs",
+    "adapter": "node --import ./scripts/env.mjs --import tsx src/server/adapters/cli.ts",
+    "pretest": "npm run build:adapters",
+    "predev": "npm run build:adapters",
+    "test:adapters": "npm run build:adapters && vitest run test/adapter-host.test.ts test/adapter-packages.test.ts test/adapter-manager.test.ts",
+    "test:adapter-ui": "node --import tsx scripts/adapter-ui-smoke.ts",
+    "package:adapters": "npm run build:adapters && node scripts/package-adapters.mjs"
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "4.0.5",
-    "@deepseek-ai/dsh-agent-preset-registry": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-api-gateway": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-api-workspace-controller": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-command-feedback": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-commands": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-goal": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-permission-presets": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-typert-registry": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-user-questions": "0.2.1-rc.5",
     "@fastify/cookie": "^11.1.5",
     "@fastify/static": "^8.3.0",
     "@libp2p/crypto": "5.2.0",
@@ -108,8 +102,12 @@
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vite": "^7.3.7",
-    "vitest": "^4.1.12"
+    "vitest": "^4.1.12",
+    "esbuild": "^0.25.0"
   },
   "license": "MIT",
-  "description": "Encrypted mobile remote for existing Codex desktop and DSH Web conversations"
+  "description": "Encrypted mobile remote for existing Codex desktop and DSH Web conversations",
+  "workspaces": [
+    "packages/*"
+  ]
 }

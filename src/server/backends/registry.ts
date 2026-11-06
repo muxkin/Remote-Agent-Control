@@ -31,6 +31,6 @@ export class BackendRegistry extends EventEmitter {
 }
 export function requireCapability(backend: AgentBackend, name: CapabilityName) {
   const capability = backend.info().capabilities[name];
-  if (!['supported', 'experimental'].includes(capability.state))
-    throw new RpcError(capability.reason ?? '此实例暂不支持该操作', 409);
+  if (!['supported', 'experimental'].includes(capability?.state ?? ''))
+    throw new RpcError(capability?.reason ?? '此实例暂不支持该操作', 409);
 }

@@ -3,11 +3,12 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import type { CodexConfig } from '../packages/adapter-codex/src/config.js';
 import type { Config } from '../src/server/config.js';
-import type { RpcTransport } from '../src/server/transport.js';
+import type { RpcTransport } from '../packages/adapter-codex/src/transport.js';
 export const THREAD = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 export const TURN = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-export function fixtureConfig(): Config {
+export function fixtureConfig(): Config & CodexConfig {
   const dir = mkdtempSync(join(tmpdir(), 'pocket-test-'));
   mkdirSync(join(dir, 'resources'));
   writeFileSync(
@@ -109,7 +110,7 @@ export class FakeTransport extends EventEmitter implements RpcTransport {
     this.emit('disconnect', 'closed');
   }
 }
-export function historyFixture(config: Config) {
+export function historyFixture(config: Config & CodexConfig) {
   mkdirSync(join(config.codexHome, 'sessions'), { recursive: true });
   mkdirSync(join(config.codexHome, 'archived_sessions'));
   const file = join(config.codexHome, 'sessions', `rollout-${THREAD}.jsonl`);

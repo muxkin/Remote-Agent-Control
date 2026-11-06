@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest';
 import { diffViews, applyViewDelta } from '../src/shared/delta.js';
-import { normalizedView } from '../src/server/timeline.js';
+import { normalizedView } from '../packages/adapter-codex/src/timeline.js';
 import { state } from './helpers.js';
 it('sends only appended text and changed metadata for streaming messages', () => {
   const before = normalizedView(state(), 1, true);

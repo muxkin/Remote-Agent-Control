@@ -60,6 +60,7 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
   }
   app.get('/api/session', async (req) => ({
     device: req.device,
+    backend: desktop.info(),
     status: desktop.status(),
   }));
   app.post('/api/logout', async (req, reply) => {
@@ -75,7 +76,7 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
       .strict()
       .parse(req.query);
     if (!(await history.get(id))) return reply.code(404).send({ error: '找不到此会话' });
-    const message = desktop.fullMessage(id, messageId);
+    const message = await desktop.fullMessage(id, messageId);
     if (!message) return reply.code(404).send({ error: '该内容不在当前会话快照中，请重新打开会话' });
     return { message };
   });
@@ -89,7 +90,7 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
     if (!thread) return reply.code(404).send({ error: '找不到此会话' });
     try {
       if (path.startsWith('pocket-inline:')) {
-        const source = desktop.inlineMedia(id, path);
+        const source = await desktop.inlineMedia(id, path);
         if (!source) throw Error();
         const link = await media.inline(source, req.device.id);
         const grant = await media.grant(link.url.split('/').at(-1)!, req.device.id);
@@ -233,6 +234,14 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
     const { id } = params.parse(req.params);
     const { requestId, ...value } = creationBody.parse(req.body);
     if (id !== 'new' && !(await history.get(id))) return reply.code(404).send({ error: '找不到此会话' });
+    const rules = desktop.info().presentation?.creation;
+    if (
+      rules &&
+      ((value.permission !== undefined && rules.permission !== 'select') ||
+        (value.agentPreset !== undefined && !rules.preset) ||
+        (value.plan !== undefined && !rules.plan))
+    )
+      return reply.code(409).send({ error: '此实例的原生创建接口不支持这些设置' });
     await desktop.validateCreation(value);
     return reply
       .code(202)

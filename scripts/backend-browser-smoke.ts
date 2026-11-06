@@ -1,5 +1,5 @@
-import { DshBackend } from '../src/server/backends/dsh.js';
-import { DshFixtureConnection } from '../test/dsh-fixture.js';
+import { DshBackend } from '../packages/adapter-dsh/src/backend.js';
+import { DshFixtureConnection } from '../packages/adapter-dsh/test/fixture.js';
 /** Isolated UI contract: Browser plugin not available; use the repository's Playwright runner. */
 import { chromium, expect } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';

@@ -1,0 +1,58 @@
+{
+  "name": "@agent-remote/adapter-dsh",
+  "version": "1.0.0",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-api-gateway": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-command-feedback": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-commands": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-goal": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-permission-presets": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-typert-registry": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-user-questions": "0.2.1-rc.5",
+    "ws": "^8.22.1",
+    "unified": "^11.0.5",
+    "remark-parse": "^11.0.0",
+    "zod": "^4.6.7"
+  },
+  "agentAdapter": {
+    "sdk": 1,
+    "entry": "dist/index.js",
+    "stateVersion": 1,
+    "product": "dsh",
+    "name": "DSH",
+    "presentation": {
+      "description": "DSH Web",
+      "creation": {
+        "empty": true,
+        "permission": "select",
+        "preset": true,
+        "plan": true
+      },
+      "plan": "control",
+      "fileReferences": true,
+      "exportLog": true,
+      "nativeCommands": true
+    }
+  }
+}

@@ -1,15 +1,18 @@
+import { AdapterProxy } from '../src/server/adapters/proxy.js';
+import { readAdapterPackage } from '../src/server/adapters/package.js';
+import { mkdir } from 'node:fs/promises';
 import { BackendRegistry } from '../src/server/backends/registry.js';
-import { CodexBackend } from '../src/server/backends/codex.js';
-import { DshBackend } from '../src/server/backends/dsh.js';
-import { DshFixtureConnection } from '../test/dsh-fixture.js';
+import { CodexBackend } from '../packages/adapter-codex/src/backend.js';
+import { DshBackend } from '../packages/adapter-dsh/src/backend.js';
+import { DshFixtureConnection } from '../packages/adapter-dsh/test/fixture.js';
 /** Isolated automated test fixture; never uses the user's real desktop/state. */
 import { resolve, join } from 'node:path';
 import { writeFile, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { fixtureConfig, historyFixture, FakeTransport, THREAD, state } from '../test/helpers.js';
 import { Store } from '../src/server/store.js';
-import { HistoryIndex } from '../src/server/history.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
+import { HistoryIndex } from '../packages/adapter-codex/src/history.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
 import { HostService } from '../src/server/host-service.js';
 import { buildRelay } from '../src/server/relay.js';
 import { createIdentity } from '../src/shared/secure-channel.js';
@@ -68,6 +71,19 @@ if (process.env.TEST_DSH === '1')
         new DshFixtureConnection(THREAD, id),
       ),
     );
+if (process.env.TEST_ADAPTER_PACKAGE) {
+  const stateDirectory = join(config.stateDir, 'third-agent');
+  await mkdir(stateDirectory, { recursive: true });
+  registry.register(
+    new AdapterProxy(readAdapterPackage(process.env.TEST_ADAPTER_PACKAGE), {
+      id: 'third-agent',
+      name: '第三方测试 Agent',
+      stateDirectory,
+      readOnly: false,
+      config: {},
+    }),
+  );
+}
 const identity = await createIdentity(),
   host = new HostService(config, identity, { store, registry });
 const relay = await buildRelay({
@@ -107,4 +123,4 @@ async function close() {
 process.on('SIGTERM', () => void close());
 process.on('SIGINT', () => void close());
 
-export { config, host, relay, store, native, close, file, registry };
+export { registry, config, host, relay, store, native, close, file };

@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DshFixtureConnection, snapshot } from './dsh-fixture.js';
-import { DshBackend } from '../src/server/backends/dsh.js';
+import { DshFixtureConnection, snapshot } from '../packages/adapter-dsh/test/fixture.js';
+import { DshBackend } from '../packages/adapter-dsh/src/backend.js';
 import { Store } from '../src/server/store.js';
 import { Operations } from '../src/server/operations.js';
 import { controlAction } from '../src/shared/controls.js';
-import { codexPermissionState } from '../src/server/codex-permissions.js';
+import { codexPermissionState } from '../packages/adapter-codex/src/codex-permissions.js';
 import { apiCall } from '../src/shared/rpc.js';
 class ControlConnection extends DshFixtureConnection {
   permission = 'workspace-write';

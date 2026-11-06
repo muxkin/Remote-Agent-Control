@@ -1,0 +1,48 @@
+{
+  "name": "@agent-remote/adapter-codex",
+  "version": "1.0.0",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "immer": "^11.2.9",
+    "smol-toml": "^1.9.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1"
+  },
+  "agentAdapter": {
+    "sdk": 1,
+    "entry": "dist/index.js",
+    "stateVersion": 1,
+    "product": "codex",
+    "name": "Codex",
+    "presentation": {
+      "description": "Codex 桌面",
+      "creation": {
+        "empty": false,
+        "permission": "native",
+        "preset": false,
+        "plan": false,
+        "notice": "沿用 Codex 创建权限"
+      },
+      "plan": "settings",
+      "fileReferences": false,
+      "exportLog": false,
+      "nativeCommands": false
+    }
+  }
+}

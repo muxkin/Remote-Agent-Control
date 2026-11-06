@@ -4,8 +4,8 @@ await privateOutput('.test-output');
 import { chromium, expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
-import { readConfig } from '../src/server/config.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
+import { readConfig } from './legacy-config.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
 import { Store } from '../src/server/store.js';
 const anchor = process.argv[2];
 if (

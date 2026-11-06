@@ -3,8 +3,8 @@ await privateOutput('.test-output');
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { expect } from '@playwright/test';
-import { readConfig } from '../src/server/config.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
+import { readConfig } from './legacy-config.js';
+import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
 const id = process.argv[2];
 if (
   !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id ?? '') ||

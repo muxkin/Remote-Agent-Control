@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
 import { platformRuntime, powershell } from '../src/server/platform.js';
-import { codexPaths, codexProfile, discoverAppTools } from '../src/server/connectors/codex-local.js';
+import { codexPaths, codexProfile, discoverAppTools } from '../packages/adapter-codex/src/connector.js';
 import { authorizeFile } from '../src/server/media.js';
 import { readStorageSettings } from '../src/server/config.js';
 const cleanup: (() => void)[] = [];
@@ -55,7 +55,7 @@ async function fixture(executable: string) {
   const child = spawn(process.platform === 'win32' ? 'python' : 'python3', [
     '-I',
     '-B',
-    resolve('src/server/peer-bridge.py'),
+    resolve('packages/adapter-codex/src/peer-bridge.py'),
     path,
     executable,
   ]);

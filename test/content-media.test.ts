@@ -3,7 +3,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { itemMedia } from '../src/server/content-media.js';
-import { messagesOf } from '../src/server/timeline.js';
+import { messagesOf } from '../packages/adapter-codex/src/timeline.js';
 import { authorizeFile } from '../src/server/media.js';
 import { state } from './helpers.js';
 

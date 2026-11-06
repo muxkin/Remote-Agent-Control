@@ -17,8 +17,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci --ignore-scripts
+      - run: npm run build:adapters
       - run: npm run typecheck
-      - run: npx vitest run test/platform-connectors.test.ts test/dsh.test.ts test/dsh-connection.test.ts test/conversation-controls.test.ts test/store.test.ts
+      - run: npx vitest run test/platform-connectors.test.ts packages/adapter-dsh/test/backend.test.ts packages/adapter-dsh/test/connection.test.ts test/adapter-host.test.ts test/adapter-packages.test.ts test/adapter-manager.test.ts test/conversation-controls.test.ts test/store.test.ts
       - run: npm test
         if: runner.os == 'Linux'
       - run: npm run build
