@@ -63,7 +63,7 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 `,
-  'relay.env.example': `POCKET_PUBLIC_ORIGIN=https://${domain}\nPOCKET_RELAY_PORT=${port}\nPOCKET_RELAY_ENROLLMENT=REPLACE_WITH_RANDOM_32_BYTES\nPOCKET_WEB_ROOT=${values['relay-root']}/dist/web\n# POCKET_ASSET_BASE=https://static.example.com/pocket/v1/\n# POCKET_UPLOAD_ORIGINS=https://upload.example.com,https://objects.example.com\n`,
+  'relay.env.example': `POCKET_PUBLIC_ORIGIN=https://${domain}\nPOCKET_RELAY_BIND=127.0.0.1\nPOCKET_RELAY_PORT=${port}\n# Trust only the local reverse proxy; omit for a direct deployment.\nPOCKET_RELAY_TRUSTED_PROXIES=127.0.0.1,::1\nPOCKET_RELAY_ENROLLMENT=REPLACE_WITH_RANDOM_32_BYTES\nPOCKET_WEB_ROOT=${values['relay-root']}/dist/web\n# POCKET_ASSET_BASE=https://static.example.com/pocket/v1/\n# POCKET_UPLOAD_ORIGINS=https://upload.example.com,https://objects.example.com\n`,
 };
 for (const [name, data] of Object.entries(files)) await writeFile(resolve(out, name), data, { mode: 0o600 });
 console.log(`Rendered ${Object.keys(files).length} v2 deployment files; no SSH business tunnel.`);

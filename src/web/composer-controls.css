@@ -15,10 +15,10 @@
 }
 .composer-control-trigger:hover,
 .composer-control-trigger[aria-expanded='true'] {
-  background: #edf4f0;
+  background: var(--soft);
 }
 .permission-trigger {
-  color: #446858;
+  color: var(--muted);
 }
 .permission-trigger > span {
   max-width: 110px;
@@ -31,13 +31,13 @@
   margin: 0;
   max-width: calc(100vw - 24px);
   padding: 7px;
-  border: 1px solid #e1e7e3;
+  border: 1px solid var(--line);
   border-radius: 15px;
-  color: #263c33;
-  background: #fff;
+  color: var(--ink);
+  background: var(--surface);
   box-shadow:
-    0 8px 32px #182c2124,
-    0 2px 6px #182c2108;
+    0 8px 32px var(--shadow),
+    0 2px 6px var(--shadow);
   overflow: auto;
   overscroll-behavior: contain;
   text-align: left;
@@ -55,14 +55,14 @@
   font: inherit;
 }
 .composer-popover button:focus-visible {
-  outline: 2px solid #43846c;
+  outline: 2px solid var(--line);
   outline-offset: -2px;
 }
 .composer-popover .popover-eyebrow {
   margin: 6px 10px 8px;
   font-size: 12px;
   font-weight: 500;
-  color: #77857d;
+  color: var(--muted);
 }
 .permission-option {
   display: flex;
@@ -77,7 +77,7 @@
 }
 .permission-option:hover:not(:disabled),
 .permission-option[aria-checked='true'] {
-  background: #edf5f0;
+  background: var(--soft);
 }
 .permission-option > span {
   display: grid;
@@ -91,13 +91,13 @@
 }
 .permission-option > svg {
   flex: 0 0 auto;
-  color: #30745b;
+  color: var(--accent);
 }
 .composer-popover .permission-option small,
 .composer-popover .control-row small {
   font-size: 12px;
   line-height: 1.5;
-  color: #7a877f;
+  color: var(--muted);
 }
 .permission-custom {
   display: grid;
@@ -107,17 +107,17 @@
 }
 .permission-custom span {
   font-size: 12px;
-  color: #77857d;
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 .composer-popover .popover-note {
   margin: 8px 10px;
-  color: #7a877f;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.6;
 }
 .composer-popover .permission-timing {
-  border-top: 1px solid #edf0ed;
+  border-top: 1px solid var(--line);
   padding-top: 9px;
 }
 .popover-heading {
@@ -149,11 +149,11 @@
   border-radius: 9px;
 }
 .control-row:hover:not(:disabled) {
-  background: #f1f6f2;
+  background: var(--soft);
 }
 .control-row > svg {
   flex: 0 0 auto;
-  color: #688073;
+  color: var(--muted);
 }
 .control-row > span:not(.mode-switch) {
   flex: 1;
@@ -172,7 +172,7 @@
 .control-divider {
   height: 1px;
   margin: 6px 10px;
-  background: #eaf0ec;
+  background: var(--surface-subtle);
 }
 .control-form {
   display: grid;
@@ -187,11 +187,11 @@
 .control-form textarea {
   width: 100%;
   min-width: 0;
-  border: 1px solid #dce5df;
+  border: 1px solid var(--line);
   border-radius: 9px;
   padding: 10px;
   color: inherit;
-  background: #fff;
+  background: var(--surface);
   font: inherit;
   font-size: 14px;
 }
@@ -222,7 +222,7 @@
   min-height: 40px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: #f0f5f2;
+  background: var(--soft);
   white-space: nowrap;
   font-size: 13px;
 }
@@ -240,7 +240,7 @@
 .popover-error {
   margin: 8px 10px;
   font-size: 13px;
-  color: #a14735;
+  color: var(--danger);
   overflow-wrap: anywhere;
 }
 .popover-error button {

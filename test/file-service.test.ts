@@ -68,3 +68,25 @@ it('rejects ciphertext substitution, mutation, and truncation and detects origin
   expect(fileRoute(8 * BLOCK_SIZE, false, true)).toBe('relay');
   expect(fileRoute(9 * BLOCK_SIZE, false, false)).toBe('relay');
 });
+it.each([
+  [
+    '化学势参考修正.docx',
+    Buffer.from('PK\x03\x04word-bytes'),
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ],
+  ['热修复包.tar.gz', Buffer.from([0x1f, 0x8b, 0, 255, 128, 32]), 'application/gzip'],
+  ['中文说明.txt', Buffer.from('中文说明，保持 UTF-8。'), 'text/plain; charset=utf-8'],
+])('keeps %s filename, MIME and exact bytes through the transfer manifest', async (name, bytes, mime) => {
+  const config = fixtureConfig(),
+    files = new FileService(config, new Uploads(config));
+  cleanups.push(async () => {
+    files.close();
+    await rm(config.desktopRoot, { recursive: true, force: true });
+  });
+  const path = join(config.desktopRoot, name);
+  await writeFile(path, bytes);
+  const manifest = await files.describe(path, 'phone', THREAD);
+  expect(manifest).toMatchObject({ name, mime, size: bytes.length, sha256: hashBytes(bytes) });
+  const result = await files.handle('read', { threadId: THREAD, fileId: manifest.id, index: 0 }, 'phone');
+  expect(result.bytes).toEqual(bytes);
+});

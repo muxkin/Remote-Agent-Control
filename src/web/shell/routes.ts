@@ -1,5 +1,14 @@
 export type AppPage =
-  'messages' | 'workbench' | 'me' | 'settings' | 'devices' | 'integrations' | 'profile' | 'about' | 'pair';
+  | 'messages'
+  | 'workbench'
+  | 'me'
+  | 'settings'
+  | 'appearance'
+  | 'devices'
+  | 'integrations'
+  | 'profile'
+  | 'about'
+  | 'pair';
 export interface AppRoute {
   page: AppPage;
   backend?: string;
@@ -11,6 +20,7 @@ const pages: AppPage[] = [
   'workbench',
   'me',
   'settings',
+  'appearance',
   'devices',
   'integrations',
   'profile',
@@ -45,6 +55,6 @@ export function parentRoute(route: AppRoute): AppRoute {
   if (route.page === 'workbench')
     return { page: 'workbench', ...(route.backend && route.thread ? { backend: route.backend } : {}) };
   if (route.page === 'pair') return { page: 'devices' };
-  if (route.page === 'about') return { page: 'settings' };
+  if (route.page === 'about' || route.page === 'appearance') return { page: 'settings' };
   return { page: 'me' };
 }

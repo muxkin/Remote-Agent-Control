@@ -12,6 +12,10 @@ const app = await buildRelay({
   enrollmentSecret: process.env.POCKET_RELAY_ENROLLMENT ?? '',
   assetOrigin: assetSettings(process.env.POCKET_ASSET_BASE).origin,
   uploadOrigins: (process.env.POCKET_UPLOAD_ORIGINS ?? '').split(',').filter(Boolean),
+  trustedProxies: (process.env.POCKET_RELAY_TRUSTED_PROXIES ?? '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean),
 });
 await app.app.listen({
   host: process.env.POCKET_RELAY_BIND ?? '127.0.0.1',

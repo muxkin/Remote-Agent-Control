@@ -17,6 +17,7 @@ import {
   type RelayRoute,
 } from '../shared/relay-protocol.js';
 import { base64, unbase64, type Lane } from '../shared/secure-channel.js';
+import { RelayAdmission, relayClientAddress } from './relay-admission.js';
 
 export interface RelayConfig {
   origin: string;
@@ -25,6 +26,7 @@ export interface RelayConfig {
   enrollmentSecret: string;
   assetOrigin: string | null;
   uploadOrigins: string[];
+  trustedProxies?: string[];
 }
 const safeEqual = (a: string, b: string) =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -37,13 +39,15 @@ interface Client {
   socket: WebSocket;
   hostId: string;
   lane: Lane;
-  ticket: string;
+  identity: string;
 }
 
 /** Public edge: authenticates routing only. Never imports Gateway, Desktop or file keys. */
 export async function buildRelay(config: RelayConfig) {
   if (config.enrollmentSecret.length < 32)
     throw Error('Relay enrollment secret must contain at least 32 characters');
+  const clientAddress = relayClientAddress(config.trustedProxies);
+  const admission = new RelayAdmission();
   const app = Fastify({ logger: false, bodyLimit: 1024 });
   const db = new DatabaseSync(config.database ?? ':memory:');
   db.exec('CREATE TABLE IF NOT EXISTS hosts (id TEXT PRIMARY KEY, created INTEGER NOT NULL)');
@@ -87,7 +91,6 @@ export async function buildRelay(config: RelayConfig) {
     });
   app.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: 'Not found' }));
   const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024, perMessageDeflate: false });
-  const socketCounts = new Map<string, number>();
   app.server.on('upgrade', (request, socket, head) => {
     if (
       request.url !== '/connect' ||
@@ -95,17 +98,34 @@ export async function buildRelay(config: RelayConfig) {
       request.headers.origin !== config.origin
     )
       return socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
-    const ip = request.socket.remoteAddress ?? 'unknown';
-    if ((socketCounts.get(ip) ?? 0) >= 64 || wss.clients.size >= 1024)
+    let ip: string;
+    try {
+      ip = clientAddress(request);
+    } catch {
+      return socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    }
+    const lease = admission.acquire(ip);
+    if (!lease) {
+      counters.rejected++;
       return socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
+    }
+    // Reserve before upgrade and release even for malformed/aborted handshakes.
+    socket.once('close', lease.release);
     wss.handleUpgrade(request, socket, head, (ws) => {
-      socketCounts.set(ip, (socketCounts.get(ip) ?? 0) + 1);
       const challenge = base64(randomBytes(32));
       let hostId: string | undefined, lane: Lane | undefined, clientId: string | undefined;
       let authenticated = false,
         authenticating = false,
+        rejected = false,
         alive = true;
-      const timer = setTimeout(() => ws.close(1008, 'Authentication timeout'), 10000);
+      const reject = (reason = 'Connection rejected') => {
+        if (rejected || ws.readyState !== WebSocket.OPEN) return;
+        rejected = true;
+        counters.rejected++;
+        if (!authenticated) lease.failed();
+        ws.close(1008, reason);
+      };
+      const timer = setTimeout(() => reject('Authentication timeout'), 10000);
       const ping = setInterval(() => {
         if (!alive) {
           ws.terminate();
@@ -130,6 +150,7 @@ export async function buildRelay(config: RelayConfig) {
       send(ws, JSON.stringify({ type: 'challenge', challenge, protocol: 2 }));
       ws.on('message', (raw, binary) => {
         void (async () => {
+          if (rejected || ws.readyState !== WebSocket.OPEN) return;
           if (!authenticated) {
             if (authenticating || binary) throw Error();
             authenticating = true;
@@ -154,6 +175,7 @@ export async function buildRelay(config: RelayConfig) {
                 ))
               )
                 throw Error();
+              if (rejected || ws.readyState !== WebSocket.OPEN) return;
               if (!db.prepare('SELECT id FROM hosts WHERE id=?').get(parsed.hostId)) {
                 if (!safeEqual(parsed.enrollment ?? '', config.enrollmentSecret)) throw Error();
                 db.prepare('INSERT OR IGNORE INTO hosts VALUES (?,?)').run(parsed.hostId, Date.now());
@@ -185,6 +207,7 @@ export async function buildRelay(config: RelayConfig) {
                 ws.readyState === WebSocket.OPEN
               )
                 await new Promise((resolve) => setTimeout(resolve, 100));
+              if (rejected || ws.readyState !== WebSocket.OPEN) return;
               const host = hosts.get(parsed.hostId),
                 route = host?.routes.get(parsed.ticket);
               if (
@@ -194,14 +217,17 @@ export async function buildRelay(config: RelayConfig) {
                 host[parsed.lane]?.readyState !== WebSocket.OPEN
               )
                 throw Error('Host offline or expired route');
+              // The authenticated host advertises device identity. Pairing routes
+              // lack it, so their one-use ticket is the temporary quota identity.
+              const identity = route.peerId ?? `pair:${parsed.ticket}`;
               if (
-                [...clients.values()].filter((c) => c.hostId === parsed.hostId && c.ticket === parsed.ticket)
+                [...clients.values()].filter((c) => c.hostId === parsed.hostId && c.identity === identity)
                   .length >= 8
               )
                 throw Error();
               clientId = randomUUID();
               lane = parsed.lane;
-              clients.set(clientId, { socket: ws, hostId: parsed.hostId, lane, ticket: parsed.ticket });
+              clients.set(clientId, { socket: ws, hostId: parsed.hostId, lane, identity });
               send(
                 host[lane],
                 JSON.stringify({
@@ -215,6 +241,7 @@ export async function buildRelay(config: RelayConfig) {
               send(ws, JSON.stringify({ type: 'joined', id: clientId, protocol: 2 }));
             }
             authenticated = true;
+            lease.authenticated();
             clearTimeout(timer);
             return;
           }
@@ -248,18 +275,13 @@ export async function buildRelay(config: RelayConfig) {
                 client.socket.close(1000, 'Host closed channel');
             } else throw Error();
           } else throw Error();
-        })().catch(() => {
-          counters.rejected++;
-          ws.close(1008, 'Connection rejected');
-        });
+        })().catch(() => reject());
       });
       ws.on('error', () => {});
       ws.on('close', () => {
         clearTimeout(timer);
         clearInterval(ping);
-        const n = (socketCounts.get(ip) ?? 1) - 1;
-        if (n) socketCounts.set(ip, n);
-        else socketCounts.delete(ip);
+        lease.release();
         if (clientId) {
           const client = clients.get(clientId);
           clients.delete(clientId);
@@ -282,5 +304,5 @@ export async function buildRelay(config: RelayConfig) {
     wss.close();
     db.close();
   });
-  return { app, counters };
+  return { app, counters, connections: () => admission.snapshot() };
 }

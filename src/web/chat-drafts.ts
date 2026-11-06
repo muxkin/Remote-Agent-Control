@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { SkillChoice, PluginChoice } from '../shared/types';
 export type ChatDraft = {
   text: string;
-  uploads: { id: string; name: string }[];
+  uploads: { id: string; name: string; path?: string }[];
   skills: SkillChoice[];
   plugins: PluginChoice[];
 };

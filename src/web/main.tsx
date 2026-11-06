@@ -6,6 +6,11 @@ import './mobile-design.css';
 import './mobile-v2.css';
 import './shell/shell.css';
 import './composer-controls.css';
+import './attachments.css';
+import './theme/theme.css';
+import { initializeAppearance } from './theme/store';
+
+initializeAppearance();
 
 // Public metadata stays on the release origin, even when bundles use a CDN.
 for (const [rel, href, type, sizes] of [

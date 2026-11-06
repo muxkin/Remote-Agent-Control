@@ -1,9 +1,10 @@
-import { useEffect, useState, type ComponentProps, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useState, type ComponentProps, type ReactNode } from 'react';
 import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
 import { PageHeader } from './AppShell';
 import type { AppRoute } from './routes';
+const AppearanceSettings = lazy(() => import('../theme/AppearanceSettings'));
 
 function readName() {
   try {
@@ -90,6 +91,7 @@ export default function MePages({
   const titles: Partial<Record<AppRoute['page'], string>> = {
     me: '我的',
     settings: '设置',
+    appearance: '外观',
     devices: '我的设备',
     integrations: 'Agent 接入',
     profile: '个人资料',
@@ -121,6 +123,12 @@ export default function MePages({
         <>
           <section className="settings-group">
             <Row
+              icon="palette"
+              title="外观"
+              detail="主题与亮暗模式"
+              onClick={() => navigate({ page: 'appearance' })}
+            />
+            <Row
               icon="trash"
               title={working ? '正在清理…' : '清理缓存'}
               detail={usage}
@@ -136,6 +144,11 @@ export default function MePages({
             <Row icon="info" title="关于" onClick={() => navigate({ page: 'about' })} />
           </section>
         </>
+      )}
+      {route.page === 'appearance' && (
+        <Suspense fallback={<div className="page-loading">正在打开外观设置…</div>}>
+          <AppearanceSettings />
+        </Suspense>
       )}
       {route.page === 'profile' && (
         <form

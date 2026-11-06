@@ -1,12 +1,12 @@
 import { conversationId } from './control-schemas.js';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, writeFile, stat, readdir, rm, rename } from 'node:fs/promises';
-import { join, basename, extname } from 'node:path';
+import { join, basename } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { Uploads, uploadSpec } from './uploads.js';
-import { mediaTypes } from './media.js';
+import { fileContentType } from './media.js';
 import { loadStorage, signedDownload, validateUpload } from './object-storage.js';
 import {
   BLOCK_SIZE,
@@ -98,7 +98,7 @@ export class FileService {
         ...fileSecret(),
         name: basename(file),
         size: info.size,
-        mime: mime ?? mediaTypes[extname(file).toLowerCase()] ?? 'application/octet-stream',
+        mime: mime ?? (await fileContentType(file)),
         sha256: whole.digest('hex'),
         hashes,
         storage: !!this.config.media,

@@ -201,8 +201,15 @@ export class HostService {
         const key = `${channel.remotePeer}:${parsed.sessionId}`;
         session = this.sessions.get(key);
         if (!session) {
-          if ([...this.sessions.values()].filter((s) => s.peerId === channel.remotePeer).length >= 4)
-            throw Error('Device session limit');
+          const previousSessions = [...this.sessions.values()].filter((s) => s.peerId === channel.remotePeer);
+          if (previousSessions.length >= 4) {
+            // Keep the reconnect grace period while there is room. A page reload creates
+            // a new session ID, so disconnected pages must not consume all live-tab slots.
+            // Reclaim only this authenticated device's inactive sessions; live tabs stay intact.
+            for (const previous of previousSessions) if (!previous.channels.size) this.drop(previous);
+            if (previousSessions.filter((s) => s.channels.size > 0).length >= 4)
+              throw Error('Device session limit');
+          }
           session = {
             id: parsed.sessionId,
             peerId: channel.remotePeer,
@@ -380,7 +387,7 @@ export class HostService {
           pendingRequests: 0,
           canSend: false,
           canInterrupt: false,
-          reason: '正在与实例同步',
+          reason: '已加载历史记录；在电脑打开此会话后可继续对话',
         },
         backendId,
       );
@@ -400,9 +407,23 @@ export class HostService {
       else await preview();
       for (const operation of this.deps.store.recent(session.device.id, threadId, backendId))
         this.send(session, { type: 'event', backendId, event: { type: 'operation', operation } });
-    })().catch(() =>
-      this.send(session, { type: 'event', backendId, event: { type: 'error', message: '无法同步此会话' } }),
-    );
+    })().catch(async () => {
+      // Native ownership may be unavailable for old chats; history remains independently readable.
+      try {
+        await preview();
+      } catch (error) {
+        if (sub.cancelled || backend.view(threadId)?.synchronized) return;
+        this.send(session, {
+          type: 'event',
+          backendId,
+          threadId,
+          event: {
+            type: 'error',
+            message: `无法读取此会话：${error instanceof Error ? error.message : '请重试'}`,
+          },
+        });
+      }
+    });
   }
   private unwatch(session: Session, threadId: string) {
     const sub = session.subscriptions.get(threadId);

@@ -198,14 +198,24 @@ export function ThreadNavigation({
           onChange={(e) => setQuery(e.target.value)}
         />
       </label>
-      <div className="nav-tabs" role="tablist" aria-label="会话视图">
-        <button role="tab" aria-selected={tab === 'recent'} onClick={() => setTab('recent')}>
-          最近
-        </button>
-        <button role="tab" aria-selected={tab === 'projects'} onClick={() => setTab('projects')}>
-          项目
-        </button>
-        <button className="icon-button refresh-list" aria-label="刷新会话" onClick={onRefresh}>
+      <div className="nav-tabs">
+        <div role="tablist" aria-label="会话视图">
+          <button role="tab" aria-selected={tab === 'recent'} onClick={() => setTab('recent')}>
+            最近
+          </button>
+          <button role="tab" aria-selected={tab === 'projects'} onClick={() => setTab('projects')}>
+            项目
+          </button>
+        </div>
+        <button
+          type="button"
+          className="icon-button refresh-list"
+          aria-label="刷新会话列表"
+          aria-busy={loading}
+          title="刷新会话列表"
+          disabled={loading}
+          onClick={onRefresh}
+        >
           <Icon name="refresh" size={18} />
         </button>
       </div>

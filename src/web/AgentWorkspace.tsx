@@ -5,7 +5,14 @@ import { uploadFile } from './file-client';
 import { deviceSession } from './device-session';
 import { RpcError as ApiError } from '../shared/rpc';
 import { WebUpdateNotice } from './WebUpdateNotice';
-import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type {
   GatewayStatus,
   ThreadSummary,
@@ -211,6 +218,7 @@ export default function AgentWorkspace({
     });
   }, []);
   const [error, setError] = useState('');
+  const [threadError, setThreadError] = useState('');
   const [toast, setToast] = useState('');
   useEffect(() => {
     if (!toast) return;
@@ -220,6 +228,10 @@ export default function AgentWorkspace({
   const [busy, setBusy] = useState(false);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [subscriptionAttempt, setSubscriptionAttempt] = useState(0);
+  const historyGeneration = useRef(0);
+  const historyScroll = useRef<{ top: number; height: number } | null>(null);
   const [older, setOlder] = useState<Message[]>([]);
   const transcriptRef = useRef<HTMLElement>(null);
   const followBottom = useRef(true);
@@ -342,9 +354,13 @@ export default function AgentWorkspace({
     setView(null);
     viewRef.current = null;
     setOlder([]);
+    historyGeneration.current++;
+    historyScroll.current = null;
+    setHistoryLoading(false);
     setHistoryCursor('latest');
     setOperations(readPending(deviceId, id));
     setError('');
+    setThreadError('');
     followBottom.current = true;
     for (const operation of readPending(deviceId, id))
       void api<Operation>(`/operations/${operation.id}`)
@@ -360,16 +376,25 @@ export default function AgentWorkspace({
         else if (data.type === 'thread') {
           viewRef.current = data.thread;
           setView(data.thread);
-        } else if (data.type === 'error') setError(data.message);
+          setThreadError('');
+        } else if (data.type === 'error') setThreadError(data.message);
         else if (data.type === 'operation') receiveOperation(data.operation);
       },
       backendId,
     );
     return () => {
       disposed = true;
+      historyGeneration.current++;
       unsubscribe();
     };
-  }, [selected?.id, deviceId]);
+  }, [selected?.id, deviceId, backendId, subscriptionAttempt]);
+  useLayoutEffect(() => {
+    const previous = historyScroll.current;
+    const transcript = transcriptRef.current;
+    if (previous && transcript)
+      transcript.scrollTop = previous.top + transcript.scrollHeight - previous.height;
+    historyScroll.current = null;
+  }, [older]);
   useEffect(() => {
     const transcript = transcriptRef.current;
     if (followBottom.current && transcript) transcript.scrollTop = transcript.scrollHeight;
@@ -497,20 +522,27 @@ export default function AgentWorkspace({
     }
   }
   async function loadOlder() {
-    if (!selected || !historyCursor) return;
+    if (!selected || !historyCursor || historyLoading) return;
     const id = selected.id;
-    setBusy(true);
+    const generation = ++historyGeneration.current;
+    setHistoryLoading(true);
     try {
       const page = await api<{ messages: Message[]; nextCursor: string | null }>(
         `/threads/${encodeURIComponent(id)}/history${historyCursor === 'latest' ? '' : `?cursor=${encodeURIComponent(historyCursor)}`}`,
       );
-      if (selectedId.current !== id) return;
-      setOlder((old) => [...page.messages, ...old]);
+      if (selectedId.current !== id || generation !== historyGeneration.current) return;
+      const transcript = transcriptRef.current;
+      if (transcript) historyScroll.current = { top: transcript.scrollTop, height: transcript.scrollHeight };
+      followBottom.current = false;
+      setOlder((old) => [
+        ...new Map([...page.messages, ...old].map((message) => [message.id, message])).values(),
+      ]);
       setHistoryCursor(page.nextCursor);
+      setError('');
     } catch (e) {
-      setError((e as Error).message);
+      if (generation === historyGeneration.current) setError((e as Error).message);
     } finally {
-      setBusy(false);
+      if (generation === historyGeneration.current) setHistoryLoading(false);
     }
   }
   const pending = operations.some((x) => ['received', 'dispatching', 'uncertain'].includes(x.state));
@@ -705,11 +737,28 @@ export default function AgentWorkspace({
               }}
             >
               {historyCursor && (
-                <button className="secondary older" disabled={busy} onClick={() => void loadOlder()}>
-                  加载更早的记录
+                <button
+                  className="secondary older"
+                  disabled={historyLoading}
+                  onClick={() => void loadOlder()}
+                >
+                  {historyLoading ? '正在加载历史记录…' : '加载更早的记录'}
                 </button>
               )}
-              {!view && <p className="muted center">正在读取会话…</p>}
+              {!view &&
+                (threadError ? (
+                  <div className="center">
+                    <p>会话暂时无法读取</p>
+                    <button
+                      className="secondary"
+                      onClick={() => setSubscriptionAttempt((value) => value + 1)}
+                    >
+                      重新加载会话
+                    </button>
+                  </div>
+                ) : (
+                  <p className="muted center">正在读取会话…</p>
+                ))}
               <TranscriptMessages
                 agent={{ name: agentName }}
                 messages={messages}
@@ -752,9 +801,9 @@ export default function AgentWorkspace({
                   {view.owner ? '恢复桌面会话' : '在电脑打开此会话'}
                 </button>
               )}
-              {error && (
+              {(error || threadError) && (
                 <p className="error" role="alert">
-                  {error}
+                  {error || threadError}
                 </p>
               )}
               {operations.slice(0, 2).map((op) => (
@@ -772,6 +821,7 @@ export default function AgentWorkspace({
                 <p className="hint">已选插件和技能将在下一轮使用，请等当前任务结束后发送。</p>
               )}
               <ChatComposer
+                threadId={selected.id}
                 value={drafts.draft}
                 onChange={(change) => drafts.update(selected.id, change)}
                 disabled={!stream || !canCompose || pending || busy}

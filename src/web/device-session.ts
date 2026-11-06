@@ -283,8 +283,11 @@ export class DeviceSession {
         if (backendId === this.backendId) this.status = event.event.status;
         this.changed();
       }
-      for (const [key, listeners] of this.watchers)
-        if (JSON.parse(key)[0] === backendId) for (const fn of listeners) fn(event.event);
+      for (const [key, listeners] of this.watchers) {
+        const [watchedBackend, watchedThread] = JSON.parse(key);
+        if (watchedBackend === backendId && (!event.threadId || event.threadId === watchedThread))
+          for (const fn of listeners) fn(event.event);
+      }
     }
   }
   subscribe(threadId: string, fn: (event: ServerEvent) => void, backendId = this.backendId) {
@@ -339,6 +342,8 @@ export class DeviceSession {
       });
     } catch (error) {
       if (generation !== this.generation || !this.watchers.has(key)) return;
+      for (const fn of this.watchers.get(key) ?? [])
+        fn({ type: 'error', message: error instanceof Error ? error.message : '会话加载失败，请重试' });
       if (error instanceof RpcError && error.status >= 400 && error.status < 500 && error.status !== 429)
         return;
       // Retry subscription confirmation even when the transport itself stays connected.

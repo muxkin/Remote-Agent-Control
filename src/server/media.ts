@@ -5,11 +5,12 @@ import { realpath, stat, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, basename, extname } from 'node:path';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
-import type { Nodes } from 'mdast';
+import type { Nodes, Root } from 'mdast';
 import type { Config } from './config.js';
 import type { Message } from '../shared/types.js';
 import { inlineExtensions } from './content-media.js';
 import { loadStorage, signedDownload } from './object-storage.js';
+import { remarkFileCitations } from '../shared/attachments.js';
 
 export const mediaTypes: Record<string, string> = {
   '.png': 'image/png',
@@ -29,6 +30,16 @@ export const mediaTypes: Record<string, string> = {
   '.ogg': 'audio/ogg',
   '.flac': 'audio/flac',
   '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.tgz': 'application/gzip',
+  '.tar': 'application/x-tar',
 };
 const textTypes: Record<string, string> = {
   '.txt': 'text/plain',
@@ -73,6 +84,11 @@ async function textContentType(file: string): Promise<string | undefined> {
     return 'application/octet-stream';
   }
 }
+export async function fileContentType(file: string): Promise<string> {
+  return (
+    (await textContentType(file)) ?? mediaTypes[extname(file).toLowerCase()] ?? 'application/octet-stream'
+  );
+}
 function referencePath(reference: string): string {
   let raw = reference.replace(/^sandbox:/, '').replace(/:\d+(?::\d+)?$/, '');
   if (raw.startsWith('file:')) {
@@ -84,9 +100,9 @@ function referencePath(reference: string): string {
   return decodeURIComponent(raw);
 }
 /** The conversation's exact attachment links are the capability, not its working directory. */
-const markdown = unified().use(remarkParse);
+const markdown = unified().use(remarkParse).use(remarkFileCitations);
 export function attachmentLinks(text: string): string[] {
-  const tree = markdown.parse(text);
+  const tree = markdown.runSync(markdown.parse(text)) as Root;
   const definitions = new Map<string, string>();
   const links: string[] = [],
     references: string[] = [];

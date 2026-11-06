@@ -121,6 +121,20 @@ it('supports generated, downloaded, spaced and file-URL image references only wh
   expect(await authorizeFile(`file://${encodeURI(file)}`, config.desktopRoot, messages)).toBe(file);
   expect(
     await authorizeFile(file, config.desktopRoot, [
+      { id: 'citation', role: 'assistant', text: `:codex-file-citation{path="${file}" purpose="output"}` },
+    ]),
+  ).toBe(file);
+  await expect(
+    authorizeFile(file, config.desktopRoot, [
+      {
+        id: 'citation-example',
+        role: 'assistant',
+        text: `\`:codex-file-citation{path="${file}" purpose="output"}\``,
+      },
+    ]),
+  ).rejects.toThrow();
+  expect(
+    await authorizeFile(file, config.desktopRoot, [
       { ...messages[0], text: `![图片][photo]\n\n[photo]: <${file}>` },
     ]),
   ).toBe(file);

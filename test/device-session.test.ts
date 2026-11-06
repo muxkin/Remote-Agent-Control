@@ -21,3 +21,19 @@ it('notifies connection subscribers when the session is explicitly disconnected'
   session.disconnect();
   expect(online).toEqual([false]);
 });
+
+it('scopes history errors to the requested chat instead of every chat on the backend', async () => {
+  const session = new DeviceSession();
+  const current = vi.fn(),
+    other = vi.fn();
+  (session as any).watchers.set(JSON.stringify(['codex', 'current']), new Set([current]));
+  (session as any).watchers.set(JSON.stringify(['codex', 'other']), new Set([other]));
+  await (session as any).receive({
+    type: 'event',
+    backendId: 'codex',
+    threadId: 'other',
+    event: { type: 'error', message: 'Unavailable' },
+  });
+  expect(current).not.toHaveBeenCalled();
+  expect(other).toHaveBeenCalledWith({ type: 'error', message: 'Unavailable' });
+});

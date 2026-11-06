@@ -6,11 +6,13 @@ import { join, sep } from 'node:path';
 import { textOf, skillsOf, pluginsOf } from './timeline.js';
 import type { Message, ThreadSummary } from '../../../src/shared/types.js';
 import { ProjectIndex } from './projects.js';
+import { RolloutFiles } from './rollout-files.js';
 
 const PAGE_BYTES = 512 * 1024;
 const MAX_LINE = 4 * 1024 * 1024;
 type HistoryPage = { messages: Message[]; nextCursor: string | null };
 export class HistoryIndex {
+  private files = new RolloutFiles();
   private db: DatabaseSync | null = null;
   private pendingLatest = new Map<string, Promise<HistoryPage>>();
   private latest = new Map<
@@ -117,13 +119,20 @@ export class HistoryIndex {
   async path(id: string): Promise<string> {
     const row = this.get(id);
     if (!row) throw new Error('Thread not found');
-    const file = await realpath(row.rolloutPath);
+    const file = await realpath(row.rolloutPath).catch(async (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT' || !row.rolloutPath.endsWith('.jsonl')) throw error;
+      return realpath(`${row.rolloutPath}.zst`).catch((compressedError: NodeJS.ErrnoException) => {
+        if (compressedError.code === 'ENOENT')
+          throw new Error('找不到此会话的历史记录，请在电脑端确认记录是否仍存在');
+        throw compressedError;
+      });
+    });
     const roots = await Promise.all(
       ['sessions', 'archived_sessions'].map((p) =>
         realpath(join(this.codexHome, p)).catch(() => join(this.codexHome, p)),
       ),
     );
-    if (!roots.some((root) => file.startsWith(root + sep)) || !file.endsWith('.jsonl'))
+    if (!roots.some((root) => file.startsWith(root + sep)) || !/\.jsonl(?:\.zst)?$/.test(file))
       throw new Error('Invalid rollout location');
     return file;
   }
@@ -137,12 +146,14 @@ export class HistoryIndex {
   }
   private async readPage(id: string, cursor?: string): Promise<HistoryPage> {
     const file = await this.path(id);
-    const handle = await open(file, 'r');
+    const reader = await this.files.open(file);
+    const { handle, identity } = reader;
     try {
       const info = await handle.stat();
-      const identity = `${info.dev}:${info.ino}`;
       const cached = !cursor ? this.latest.get(id) : undefined;
+      if (file.endsWith('.zst') && cached?.file === file && cached.identity === identity) return cached.page;
       if (
+        !file.endsWith('.zst') &&
         cached &&
         cached.file === file &&
         cached.identity === identity &&
@@ -218,12 +229,13 @@ export class HistoryIndex {
       }
       return page;
     } finally {
-      await handle.close();
+      await reader.close();
     }
   }
   close(): void {
     this.db?.close();
     this.latest.clear();
+    this.files.close();
   }
 }
 

@@ -1,30 +1,19 @@
-import { remoteFetch } from './device-session';
 import { Icon } from './Icon';
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import Markdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import DOMPurify from 'dompurify';
+import { localReference, remarkFileCitations } from '../shared/attachments';
+import { FileAttachment as LocalLink } from './FileAttachment';
+import { Media } from './MediaAttachment';
+import { useVisible } from './useVisible';
+import { useAppearance } from './theme/store';
+import { selectedTheme, themeTokens } from './theme/palette';
 
-function useVisible() {
-  const ref = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(false);
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          setVisible(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: '200px' },
-    );
-    if (ref.current) observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, []);
-  return { ref, visible };
-}
 const htmlCache = new Map<string, string>();
 function CodeBlock({ text, language, streaming }: { text: string; language: string; streaming: boolean }) {
+  const { settings, resolved } = useAppearance();
+  const diagramPalette = language === 'mermaid' ? themeTokens(selectedTheme(settings, resolved)) : null;
   const { ref, visible } = useVisible();
   const [html, setHtml] = useState('');
   const [error, setError] = useState('');
@@ -33,7 +22,7 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
     setHtml('');
     setError('');
     if (!visible || streaming || !language) return;
-    const key = language + '\n' + text;
+    const key = language + (diagramPalette ? JSON.stringify(diagramPalette) : '') + '\n' + text;
     const cached = htmlCache.get(key);
     if (cached) {
       setHtml(cached);
@@ -50,7 +39,18 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
             maxTextSize: 100000,
             htmlLabels: false,
             flowchart: { htmlLabels: false },
-            theme: 'neutral',
+            theme: 'base',
+            themeVariables: {
+              darkMode: resolved === 'dark',
+              background: diagramPalette!['--surface'],
+              primaryColor: diagramPalette!['--soft'],
+              primaryTextColor: diagramPalette!['--on-soft'],
+              primaryBorderColor: diagramPalette!['--outline'],
+              lineColor: diagramPalette!['--muted'],
+              textColor: diagramPalette!['--ink'],
+              secondaryColor: diagramPalette!['--surface-hover'],
+              tertiaryColor: diagramPalette!['--surface-active'],
+            },
           });
           result = DOMPurify.sanitize((await mermaid.render(`diagram-${crypto.randomUUID()}`, text)).svg, {
             USE_PROFILES: { svg: true, svgFilters: true },
@@ -61,12 +61,15 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
           const { createJavaScriptRegexEngine } = await import('shiki/engine/javascript');
           const highlighter = await shiki.createHighlighter({
             langs: [language as any],
-            themes: ['github-light'],
+            themes: ['github-light', 'github-dark'],
             engine: createJavaScriptRegexEngine(),
           });
           try {
             result = DOMPurify.sanitize(
-              highlighter.codeToHtml(text, { lang: language, theme: 'github-light' }),
+              highlighter.codeToHtml(text, {
+                lang: language,
+                themes: { light: 'github-light', dark: 'github-dark' },
+              }),
             );
           } finally {
             highlighter.dispose();
@@ -84,7 +87,7 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
     return () => {
       disposed = true;
     };
-  }, [text, language, streaming, visible]);
+  }, [text, language, streaming, visible, diagramPalette]);
   return (
     <div ref={ref} className={`code-block ${language === 'mermaid' ? 'diagram' : ''}`}>
       <div className="code-toolbar">
@@ -102,181 +105,8 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
     </div>
   );
 }
-const localReference = (url: string) =>
-  (url.startsWith('/') && !url.startsWith('//')) ||
-  /^[a-z]:[\\/]/i.test(url) ||
-  url.startsWith('dsh-image:') ||
-  url.startsWith('dsh-file:') ||
-  url.startsWith('file:') ||
-  url.startsWith('sandbox:') ||
-  url.startsWith('./') ||
-  url.startsWith('../') ||
-  url.startsWith('pocket-inline:');
-export function Media({ src, label, threadId }: { src: string; label: string; threadId: string }) {
-  const { ref, visible } = useVisible();
-  // Start external media only after visibility initialization, too. Otherwise a
-  // fast failed load can be cleared by the first visibility effect.
-  const [url, setUrl] = useState('');
-  const [error, setError] = useState('');
-  const [refresh, setRefresh] = useState(0);
-  const expiresAt = useRef(0);
-  const refreshing = useRef(false);
-  const recovery = useRef<{ time: number; playing: boolean } | null>(null);
-  function renew(element?: HTMLMediaElement) {
-    if (refreshing.current) return;
-    refreshing.current = true;
-    recovery.current = element ? { time: element.currentTime, playing: !element.paused } : null;
-    setError('');
-    setRefresh((value) => value + 1);
-  }
-  function checkExpiry(element: HTMLMediaElement) {
-    if (expiresAt.current && Date.now() + 10000 >= expiresAt.current) renew(element);
-  }
-  function failed(element?: HTMLMediaElement) {
-    if (expiresAt.current && Date.now() + 10000 >= expiresAt.current) renew(element);
-    else setError('附件加载失败，可重新获取访问链接');
-  }
-  function restore(element: HTMLMediaElement) {
-    const previous = recovery.current;
-    recovery.current = null;
-    if (!previous) return;
-    if (Number.isFinite(previous.time)) element.currentTime = previous.time;
-    if (previous.playing) void element.play().catch(() => {});
-  }
-  useEffect(() => {
-    if (!visible) return;
-    if (!localReference(src)) {
-      expiresAt.current = 0;
-      setUrl(src);
-      setError('');
-      refreshing.current = false;
-      return;
-    }
-    const controller = new AbortController();
-    void remoteFetch(`/api/threads/${encodeURIComponent(threadId)}/media`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: src }),
-      signal: controller.signal,
-    })
-      .then(async (r) => {
-        const body = await r.json();
-        if (!r.ok) throw new Error(body.error ?? '附件不可用');
-        expiresAt.current = body.expiresAt;
-        setUrl(body.url);
-        setError('');
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) setError(e.message);
-      })
-      .finally(() => {
-        refreshing.current = false;
-      });
-    return () => controller.abort();
-  }, [src, threadId, visible, refresh]);
-  const extension = src.split(/[?#]/)[0].split('.').at(-1)?.toLowerCase();
-  return (
-    <div className="media" ref={ref}>
-      {url ? (
-        ['mp4', 'webm', 'mov', 'm4v'].includes(extension ?? '') ? (
-          <video
-            key={`${url}:${localReference(src) ? '' : refresh}`}
-            controls
-            preload="metadata"
-            src={url}
-            aria-label={label}
-            onPlay={(e) => checkExpiry(e.currentTarget)}
-            onSeeking={(e) => checkExpiry(e.currentTarget)}
-            onError={(e) => failed(e.currentTarget)}
-            onLoadedMetadata={(e) => restore(e.currentTarget)}
-          />
-        ) : ['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(extension ?? '') ? (
-          <audio
-            key={`${url}:${localReference(src) ? '' : refresh}`}
-            controls
-            preload="none"
-            src={url}
-            aria-label={label}
-            onPlay={(e) => checkExpiry(e.currentTarget)}
-            onSeeking={(e) => checkExpiry(e.currentTarget)}
-            onError={(e) => failed(e.currentTarget)}
-            onLoadedMetadata={(e) => restore(e.currentTarget)}
-          />
-        ) : localReference(src) ? (
-          <LocalLink href={src} threadId={threadId}>
-            <img
-              key={`${url}:${localReference(src) ? '' : refresh}`}
-              loading="lazy"
-              src={url}
-              alt={label}
-              referrerPolicy="no-referrer"
-              onError={() => failed()}
-            />
-          </LocalLink>
-        ) : (
-          <a href={url} target="_blank" rel="noreferrer">
-            <img
-              key={`${url}:${localReference(src) ? '' : refresh}`}
-              loading="lazy"
-              src={url}
-              alt={label}
-              referrerPolicy="no-referrer"
-              onError={() => failed()}
-            />
-          </a>
-        )
-      ) : (
-        <span className="muted">{error ? '' : '正在加载附件…'}</span>
-      )}
-      {error && (
-        <div role="alert">
-          <small>{error}</small>
-          <button type="button" className="secondary" onClick={() => renew()}>
-            重新加载附件
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-export function LocalLink({
-  href,
-  children,
-  threadId,
-}: {
-  href: string;
-  children: React.ReactNode;
-  threadId: string;
-}) {
-  const [error, setError] = useState('');
-  async function open() {
-    const tab = window.open('about:blank', '_blank');
-    try {
-      const response = await remoteFetch(`/api/threads/${encodeURIComponent(threadId)}/media`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: href }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? '文件不可用');
-      if (tab) {
-        tab.opener = null;
-        tab.location.href = data.url;
-      }
-    } catch (e) {
-      tab?.close();
-      setError((e as Error).message);
-    }
-  }
-  return (
-    <>
-      <button className="file-link" onClick={() => void open()}>
-        {children}
-      </button>
-      {error && <small role="alert">{error}</small>}
-    </>
-  );
-}
+export { Media } from './MediaAttachment';
+export { FileAttachment as LocalLink } from './FileAttachment';
 export default memo(function RichMessage({
   text,
   threadId,
@@ -310,12 +140,15 @@ export default memo(function RichMessage({
       img: ({ src, alt }) => (
         <Media src={typeof src === 'string' ? src : ''} label={alt ?? '图片'} threadId={threadId} />
       ),
-      a: ({ href, children }) => {
+      a: ({ href, children, node }) => {
+        // Linked Markdown images still open the preview, without nested interactive controls.
+        if (node?.children.some((child) => child.type === 'element' && child.tagName === 'img'))
+          return <>{children}</>;
         if (!href) return <span>{children}</span>;
         if (/\.(mp4|webm|mov|m4v|mp3|wav|m4a|ogg|flac)(?:[?#]|$)/i.test(href))
           return <Media src={href} label={String(children)} threadId={threadId} />;
         return localReference(href) ? (
-          <LocalLink href={href} threadId={threadId}>
+          <LocalLink href={href} threadId={threadId} card={!!node?.properties['data-file-citation']}>
             {children}
           </LocalLink>
         ) : (
@@ -330,6 +163,7 @@ export default memo(function RichMessage({
   );
   // Codex also emits LaTeX's \(...\) and \[...\] delimiters.
   const source = text
+    .replace(/^\s*<proposed_plan>\s*\n([\s\S]*?)\n\s*<\/proposed_plan>\s*$/, '$1')
     .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
     .map((part, index) =>
       index % 2
@@ -342,7 +176,9 @@ export default memo(function RichMessage({
   return (
     <div className="markdown">
       <Markdown
-        remarkPlugins={math ? [remarkGfm, math.remarkMath] : [remarkGfm]}
+        remarkPlugins={
+          math ? [remarkFileCitations, remarkGfm, math.remarkMath] : [remarkFileCitations, remarkGfm]
+        }
         rehypePlugins={
           math ? [[math.rehypeKatex, { throwOnError: false, strict: 'ignore', trust: false }]] : []
         }

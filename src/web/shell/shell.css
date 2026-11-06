@@ -1,11 +1,6 @@
-/* App shell: white surfaces, jade accents, quiet management pages. */
+/* Shared app shell and management pages; colors come from the active theme. */
 :root {
-  --ink: #202a27;
-  --accent: #197b66;
-  --muted: #7a8580;
-  --line: #e7ece9;
-  --soft: #edf5f1;
-  background: #f4f7f6;
+  background: var(--surface-subtle);
 }
 html,
 body,
@@ -22,7 +17,7 @@ body,
   height: var(--app-visible-height, 100dvh);
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
 }
 .app-shell.has-navigation {
@@ -67,7 +62,7 @@ body,
   max-height: min(140px, calc(var(--app-visible-height, 100dvh) * 0.2));
 }
 .app-shell .sidebar {
-  background: white;
+  background: var(--surface);
   overflow: hidden;
 }
 .app-shell .sidebar > :not(nav) {
@@ -130,7 +125,7 @@ body,
   min-height: 68px;
   padding: 6px 12px max(7px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
-  background: #fff;
+  background: var(--surface);
 }
 .bottom-navigation button {
   display: flex;
@@ -139,7 +134,7 @@ body,
   align-items: center;
   flex-direction: column;
   gap: 5px;
-  color: #828b87;
+  color: var(--muted);
   font-size: 11px;
   min-height: 52px;
   border-radius: 10px;
@@ -157,7 +152,7 @@ body,
   height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-  background: white;
+  background: var(--surface);
   padding-bottom: max(24px, env(safe-area-inset-bottom));
 }
 .page-header {
@@ -166,7 +161,7 @@ body,
   gap: 10px;
   min-height: 80px;
   padding: 18px 20px 12px;
-  background: white;
+  background: var(--surface);
 }
 .page-header h1 {
   flex: 1;
@@ -238,7 +233,7 @@ body,
   display: inline-grid;
   place-items: center;
   border-radius: 22px;
-  background: #e9f1ee;
+  background: var(--soft);
   color: var(--accent);
   font-size: 26px;
   font-weight: 600;
@@ -260,10 +255,10 @@ body,
   font-size: 13px;
 }
 .profile-card > svg {
-  color: #a2aca7;
+  color: var(--muted);
 }
 .settings-group {
-  border-top: 8px solid #f4f7f6;
+  border-top: 8px solid var(--line);
   padding: 2px 20px;
 }
 .settings-row {
@@ -290,7 +285,7 @@ body,
   color: var(--muted);
 }
 .settings-row > svg:last-child {
-  color: #9da7a2;
+  color: var(--muted);
 }
 .profile-form {
   padding: 28px 24px;
@@ -350,7 +345,7 @@ body,
   min-height: 44px;
 }
 .danger {
-  color: #b54343;
+  color: var(--danger);
 }
 .about-content {
   display: flex;
@@ -375,7 +370,7 @@ body,
   position: absolute;
   bottom: 0;
   padding: 12px 20px;
-  background: #fff4ef;
+  background: var(--danger-soft);
   width: 100%;
 }
 .pair-back {
@@ -389,9 +384,9 @@ body,
   overflow: auto;
 }
 .plan-request {
-  border: 1px solid #cddfd7;
+  border: 1px solid var(--line);
   border-radius: 16px;
-  background: #f8fbf9;
+  background: var(--surface-subtle);
   padding: 18px;
 }
 .plan-request h3 {
@@ -462,7 +457,7 @@ body,
     padding: 16px 8px;
     border-top: 0;
     border-right: 1px solid var(--line);
-    background: #f5f8f6;
+    background: var(--surface-subtle);
   }
   .bottom-navigation button {
     flex: 0 0 64px;
@@ -547,9 +542,9 @@ dialog.question-dialog[open] {
   flex-direction: column;
   gap: 10px;
   text-align: left;
-  border: 1px solid var(--border, #ddd);
+  border: 1px solid var(--border, var(--line));
   border-radius: 16px;
-  background: var(--surface, #fff);
+  background: var(--surface);
   padding: 24px;
   color: inherit;
 }

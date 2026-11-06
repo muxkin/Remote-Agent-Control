@@ -125,7 +125,11 @@ export async function uploadFile(threadId: string, file: File, progress: (text: 
     missing.splice(0, group.length);
   }
   progress(`校验 ${file.name}`);
-  return (await fileCall('finish', threadId, manifest.id)).value as { id: string; name: string };
+  return (await fileCall('finish', threadId, manifest.id)).value as {
+    id: string;
+    name: string;
+    path?: string;
+  };
 }
 async function downloadBlock(threadId: string, manifest: FileManifest, index: number): Promise<Uint8Array> {
   const key = session.contentKey(`block:${manifest.sha256}:${index}`, owners.get(manifest.id));
@@ -253,9 +257,10 @@ export async function exportSessionLog(threadId: string) {
 }
 async function manifestContent(threadId: string, manifest: FileManifest, backendId: string) {
   owners.set(manifest.id, backendId);
-  const key = session.contentKey(`url:${manifest.sha256}`, backendId),
+  const metadata = { name: manifest.name, mime: manifest.mime, size: manifest.size, expiresAt: 0 };
+  const key = session.contentKey(`url:${manifest.sha256}:${manifest.mime}`, backendId),
     old = urls.get(key);
-  if (old) return { url: old, name: manifest.name, expiresAt: 0 };
+  if (old) return { url: old, ...metadata };
   if (manifest.size > 8 * BLOCK_SIZE && !navigator.serviceWorker?.controller) {
     if ('serviceWorker' in navigator)
       await new Promise<void>((resolve) => {
@@ -279,7 +284,7 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
     providers.set(id, { manifest, threadId });
     const url = `/local-files/${id}`;
     urls.set(key, url);
-    return { url, name: manifest.name, expiresAt: 0 };
+    return { url, ...metadata };
   }
   const parts: BlobPart[] = [],
     hash = sha256.create();
@@ -296,5 +301,20 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
     if (entry[1].startsWith('blob:')) URL.revokeObjectURL(entry[1]);
     urls.delete(entry[0]);
   }
-  return { url, name: manifest.name, expiresAt: 0 };
+  return { url, ...metadata };
+}
+
+/** Both Blob and streaming downloads keep the original Unicode filename and extension. */
+export function downloadFile(file: { url: string; name: string }) {
+  const anchor = document.createElement('a');
+  anchor.href = file.url.startsWith('/local-files/') ? `${file.url}?download=1` : file.url;
+  if (file.url.startsWith('/local-files/')) {
+    // Navigate through the service worker and use its Content-Disposition filename.
+    // A download-attribute request can bypass the worker and cancel the stream.
+    anchor.target = '_blank';
+    anchor.rel = 'noopener';
+  } else anchor.download = file.name;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
 }

@@ -70,7 +70,7 @@ export function MessageContent({
         </div>
       )}
       <div className="message-text">
-        {displayed.role === 'assistant' || displayed.id.includes(':media:') ? (
+        {displayed.role !== 'tool' || displayed.id.includes(':media:') ? (
           <Suspense fallback={displayed.text}>
             <RichMessage text={displayed.text} threadId={threadId} streaming={streaming} />
           </Suspense>

@@ -1,0 +1,439 @@
+/* Shared attachment system: inline references, message cards, media and compact drafts. */
+.attachment-actions,
+.attachment-menu {
+  --attachment-ink: var(--ink);
+  --attachment-muted: var(--muted);
+  --attachment-border: var(--line);
+  --attachment-surface: var(--surface-subtle);
+  --attachment-accent: var(--accent);
+  color: var(--attachment-ink);
+}
+.attachment-actions {
+  position: relative;
+  max-width: 100%;
+  min-width: 0;
+}
+.attachment-actions button:focus-visible,
+.attachment-menu button:focus-visible,
+.attachment-path:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.attachment-inline {
+  display: inline;
+}
+.attachment-inline .file-link {
+  display: inline;
+  padding: 0;
+  text-align: inherit;
+  color: var(--attachment-accent);
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+  line-height: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+.attachment-inline .file-link > svg {
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+.attachment-inline .file-link:hover {
+  text-decoration-color: currentColor;
+}
+.file-attachment-card {
+  display: inline-flex;
+  flex-direction: column;
+  width: 380px;
+  max-width: 100%;
+  margin: 8px 0;
+  vertical-align: middle;
+}
+.attachment-card,
+.attachment-compact,
+.attachment-draft-placeholder {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border: 1px solid var(--attachment-border, var(--line));
+  border-radius: 12px;
+  background: var(--surface);
+}
+.attachment-card:hover,
+.attachment-compact:hover {
+  border-color: var(--line);
+}
+.file-card-link {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 12px;
+  min-width: 0;
+  min-height: 78px;
+  padding: 12px;
+  text-align: left;
+  color: inherit;
+  line-height: 1.5;
+}
+.attachment-file-icon {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 52px;
+  gap: 3px;
+  border-radius: 9px;
+  background: var(--attachment-surface, var(--surface-subtle));
+  color: var(--attachment-ink, var(--ink));
+}
+.attachment-file-icon > span {
+  max-width: 40px;
+  font:
+    500 9px/1.1 system-ui,
+    sans-serif;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attachment-identity {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.attachment-filename {
+  display: block;
+  font-size: 15px;
+  font-weight: 550;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.attachment-card .attachment-filename {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.attachment-meta {
+  display: block;
+  margin-top: 4px;
+  color: var(--attachment-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.attachment-primary-hint,
+.attachment-preview-action {
+  color: var(--attachment-accent);
+}
+.attachment-preview-action {
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.attachment-more,
+.attachment-remove,
+.attachment-dismiss {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 7px;
+  color: var(--attachment-muted, var(--muted));
+}
+.attachment-more:hover,
+.attachment-remove:hover,
+.attachment-dismiss:hover {
+  color: var(--attachment-ink, var(--ink));
+  background: var(--attachment-surface, var(--surface-subtle));
+}
+.attachment-card > .attachment-more {
+  margin-right: 8px;
+}
+.attachment-media {
+  display: inline-flex;
+  vertical-align: top;
+  margin: 8px 0;
+}
+.attachment-media > .media {
+  min-width: 0;
+  margin: 0;
+}
+.attachment-media-loading {
+  display: grid;
+  place-items: center;
+  width: 224px;
+  max-width: 100%;
+  height: 140px;
+  border-radius: 10px;
+  background: var(--attachment-surface);
+  color: var(--attachment-muted);
+  font-size: 13px;
+}
+.attachment-media .image-thumbnail {
+  max-width: min(224px, 100%);
+  border-radius: 10px;
+}
+.attachment-media > .attachment-more {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 28px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 4px var(--shadow);
+}
+/* Audio has no image area for an overlay; keep its transport controls unobstructed. */
+.attachment-media:has(audio) {
+  align-items: center;
+  gap: 8px;
+}
+.attachment-media:has(audio) > .attachment-more {
+  position: static;
+  opacity: 1;
+  flex-shrink: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.attachment-caption {
+  display: block;
+  max-width: 224px;
+  margin-top: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--attachment-muted);
+}
+.user-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 152px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 3px 3px 8px;
+}
+.upload-chip {
+  width: 244px;
+  max-width: 100%;
+  min-width: 0;
+}
+.upload-chip .file-attachment-card {
+  width: 100%;
+  margin: 0;
+}
+.attachment-compact .file-card-link {
+  gap: 10px;
+  min-height: 60px;
+  padding: 8px;
+  border: 0;
+  border-radius: 12px;
+  max-width: 100%;
+  background: transparent;
+}
+.attachment-compact .media {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.attachment-compact .image-thumbnail {
+  width: 100%;
+  cursor: zoom-in;
+  overflow: visible;
+}
+.attachment-compact .image-thumbnail > img,
+.attachment-compact .attachment-file-icon {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 7px;
+}
+.attachment-compact .attachment-file-icon > svg {
+  width: 20px;
+  height: 20px;
+}
+.attachment-compact .attachment-filename {
+  font-size: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.attachment-compact .attachment-meta {
+  margin-top: 2px;
+}
+.attachment-compact .attachment-remove {
+  align-self: flex-start;
+  margin: 4px 4px 0 0;
+}
+.attachment-draft-placeholder {
+  gap: 10px;
+  padding: 8px;
+  min-height: 62px;
+  font-size: 13px;
+}
+.attachment-draft-placeholder > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.attachment-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 0;
+  max-width: none;
+  border: 1px solid var(--attachment-border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow:
+    0 8px 36px var(--shadow),
+    0 2px 6px var(--shadow);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.attachment-menu::backdrop {
+  background: transparent;
+}
+.attachment-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 20px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--attachment-border);
+}
+.attachment-menu-header .attachment-filename {
+  font-size: 15px;
+  font-weight: 600;
+}
+.attachment-menu-header .attachment-dismiss {
+  align-self: flex-start;
+  margin: -6px -8px 0 0;
+}
+.attachment-menu-body {
+  padding: 16px 20px 20px;
+}
+.attachment-path-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--attachment-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.attachment-path {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--attachment-surface);
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  font:
+    12px/1.65 ui-monospace,
+    'SFMono-Regular',
+    Consolas,
+    'Noto Sans CJK SC',
+    monospace;
+}
+.attachment-menu-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 24px;
+}
+.attachment-menu-buttons > button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 8px;
+  border: 1px solid var(--attachment-accent);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.attachment-copy {
+  color: var(--attachment-accent);
+  background: var(--surface);
+}
+.attachment-copy:hover {
+  background: var(--soft);
+}
+.attachment-download {
+  color: var(--on-accent);
+  background: var(--attachment-accent);
+}
+.attachment-download:hover {
+  background: var(--accent-hover);
+}
+.attachment-error {
+  display: block;
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+@media (hover: hover) and (pointer: fine) {
+  .attachment-media > .attachment-more {
+    opacity: 0;
+  }
+  .attachment-media:hover > .attachment-more,
+  .attachment-media:focus-within > .attachment-more {
+    opacity: 1;
+  }
+}
+@media (max-width: 600px) {
+  .upload-chip {
+    width: 100%;
+  }
+  .attachment-menu {
+    border: 0;
+    border-radius: 22px 22px 0 0;
+    padding-top: 10px;
+  }
+  .attachment-menu::backdrop {
+    background: var(--scrim);
+  }
+  .attachment-menu-header {
+    padding-top: 16px;
+  }
+  .attachment-menu-header .attachment-filename {
+    font-size: 16px;
+  }
+  .attachment-path {
+    font-size: 13px;
+  }
+  .attachment-menu-body {
+    padding-bottom: max(24px, env(safe-area-inset-bottom));
+  }
+  .attachment-menu-buttons > button {
+    min-height: 46px;
+    font-size: 14px;
+  }
+  .attachment-more,
+  .attachment-remove,
+  .attachment-dismiss {
+    min-width: 36px;
+    min-height: 36px;
+  }
+}

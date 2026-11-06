@@ -2,7 +2,7 @@ import type { BackendInfo } from '../shared/backends';
 import { useEffect, useState } from 'react';
 import type { ControlAction, ControlCatalog, ControlState } from '../shared/controls';
 import { remoteFetch } from './device-session';
-import { exportSessionLog } from './file-client';
+import { exportSessionLog, downloadFile } from './file-client';
 import { ComposerPopover } from './ComposerPopover';
 import { Icon } from './Icon';
 
@@ -339,11 +339,7 @@ export function ConversationControls({
                       setWorking('export');
                       setError('');
                       try {
-                        const file = await exportSessionLog(id);
-                        const a = document.createElement('a');
-                        a.href = file.url;
-                        a.download = file.name;
-                        a.click();
+                        downloadFile(await exportSessionLog(id));
                       } catch (e) {
                         setError((e as Error).message);
                       } finally {

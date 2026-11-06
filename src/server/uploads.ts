@@ -107,7 +107,7 @@ export class Uploads {
     this.locks.add(id);
     try {
       const u = await this.get(id, device, thread);
-      if (u.complete) return { id: u.id, name: u.name };
+      if (u.complete) return { id: u.id, name: u.name, path: u.file };
       if (this.config.media) {
         const storage = await loadStorage(this.config.media, 'media', this.config.origin);
         const url = await signedDownload(storage, u.key, Date.now() + 300000);
@@ -133,7 +133,7 @@ export class Uploads {
       await rename(u.file + '.part', u.file);
       u.complete = true;
       await this.save(u);
-      return { id: u.id, name: u.name };
+      return { id: u.id, name: u.name, path: u.file };
     } finally {
       this.locks.delete(id);
     }

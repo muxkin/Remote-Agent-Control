@@ -1,5 +1,6 @@
 import { it, expect, afterEach } from 'vitest';
-import { rmSync, writeFileSync, appendFileSync, renameSync } from 'node:fs';
+import { rmSync, writeFileSync, appendFileSync, renameSync, readFileSync, symlinkSync } from 'node:fs';
+import { zstdCompressSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { HistoryIndex, JsonlTail, rolloutMessage } from '../packages/adapter-codex/src/history.js';
@@ -20,6 +21,62 @@ it('reads indexed history without executing or modifying it', async () => {
   const { h } = setup();
   expect(h.list().threads[0].id).toBe(THREAD);
   expect((await h.page(THREAD)).messages[0].text).toBe('历史消息');
+});
+it('reads compressed desktop rollouts using the existing JSONL index path without changing the source', async () => {
+  const { h, file } = setup();
+  const compressed = zstdCompressSync(readFileSync(file));
+  writeFileSync(`${file}.zst`, compressed);
+  rmSync(file);
+  expect((await h.page(THREAD)).messages[0].text).toBe('历史消息');
+  expect((await h.page(THREAD)).messages[0].text).toBe('历史消息');
+  expect(readFileSync(`${file}.zst`)).toEqual(compressed);
+});
+it('paginates compressed rollouts with stable message IDs and rejects stale cursors', async () => {
+  const { h, c, file } = setup();
+  const rows =
+    Array.from({ length: 1500 }, (_, i) =>
+      JSON.stringify({
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: `${i}:` + '字'.repeat(200) }],
+        },
+      }),
+    ).join('\n') + '\n';
+  writeFileSync(`${file}.zst`, zstdCompressSync(rows));
+  rmSync(file);
+  const db = new DatabaseSync(join(c.codexHome, 'state_5.sqlite'));
+  db.prepare('UPDATE threads SET rollout_path=?').run(`${file}.zst`);
+  db.close();
+  const first = await h.page(THREAD);
+  expect(first.nextCursor).toBeTruthy();
+  const second = await h.page(THREAD, first.nextCursor!);
+  let page = second;
+  let messages = [...second.messages, ...first.messages];
+  while (page.nextCursor) {
+    page = await h.page(THREAD, page.nextCursor);
+    messages = [...page.messages, ...messages];
+  }
+  expect(messages).toHaveLength(1500);
+  expect(new Set(messages.map((m) => m.id)).size).toBe(1500);
+  expect(messages[0].text).toMatch(/^0:/);
+  expect(messages.at(-1)?.text).toMatch(/^1499:/);
+  expect((await h.page(THREAD, first.nextCursor!)).messages).toEqual(second.messages);
+  writeFileSync(`${file}.zst`, zstdCompressSync(rows + rows));
+  await expect(h.page(THREAD, first.nextCursor!)).rejects.toThrow('History changed');
+});
+it('reports missing/corrupt compressed records and keeps the rollout directory boundary', async () => {
+  const { h, c, file } = setup();
+  rmSync(file);
+  await expect(h.page(THREAD)).rejects.toThrow('找不到此会话的历史记录');
+  writeFileSync(`${file}.zst`, 'not zstd');
+  await expect(h.page(THREAD)).rejects.toThrow();
+  rmSync(`${file}.zst`);
+  const outside = join(c.desktopRoot, 'outside.jsonl.zst');
+  writeFileSync(outside, zstdCompressSync('{}\n'));
+  symlinkSync(outside, `${file}.zst`);
+  await expect(h.page(THREAD)).rejects.toThrow('Invalid rollout location');
 });
 it('includes user-visible native chats created through desktop tools', () => {
   const { h, c } = setup();

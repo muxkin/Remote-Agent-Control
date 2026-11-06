@@ -1,12 +1,7 @@
 /* Implemented from docs/design/mobile-2026-11-05 imagegen concepts. */
 :root {
-  --ink: #202725;
-  --muted: #78817e;
-  --line: #e1e7e4;
-  --accent: #087f6b;
-  --soft: #eaf4f0;
   color: var(--ink);
-  background: #f4f6f5;
+  background: var(--surface-subtle);
 }
 button,
 input,
@@ -61,10 +56,10 @@ textarea:focus {
   border: 0 !important;
 }
 .dot.online {
-  background: #15916e;
+  background: var(--success);
 }
 .sidebar {
-  background: #fff;
+  background: var(--surface);
   border-color: var(--line);
 }
 .sidebar-head {
@@ -97,12 +92,12 @@ textarea:focus {
   padding: 16px 8px;
   margin: 0;
   border: 0;
-  border-bottom: 1px solid #eef1ef;
+  border-bottom: 1px solid var(--line);
   border-radius: 0;
 }
 .thread-button > svg {
   flex-shrink: 0;
-  color: #596662;
+  color: var(--muted);
 }
 .thread-label {
   display: grid;
@@ -125,7 +120,7 @@ textarea:focus {
   box-shadow: none;
 }
 .thread-button:hover {
-  background: #f4f6f5;
+  background: var(--surface-subtle);
 }
 .sidebar footer {
   color: var(--muted);
@@ -192,7 +187,7 @@ textarea:focus {
   max-width: 92%;
   margin-left: auto;
   padding: 12px 16px;
-  background: #f4f6f5;
+  background: var(--surface-subtle);
   border: 0;
   border-radius: 16px;
 }
@@ -207,8 +202,8 @@ textarea:focus {
 }
 .message.tool {
   font-size: 12px;
-  background: #f7f9f8;
-  color: #596662;
+  background: var(--surface-subtle);
+  color: var(--muted);
   border-color: var(--line);
   padding: 10px;
 }
@@ -248,7 +243,7 @@ textarea:focus {
   margin-bottom: 0;
 }
 .request-card {
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: 16px;
@@ -262,7 +257,7 @@ textarea:focus {
   border-radius: 8px;
   padding: 5px 9px;
   background: var(--soft);
-  color: #36695c;
+  color: var(--accent);
   margin: 0;
   font-size: 12px;
   font-weight: 550;
@@ -297,16 +292,16 @@ textarea:focus {
   flex-shrink: 0;
   padding: 10px max(20px, calc((100% - 780px) / 2)) max(10px, env(safe-area-inset-bottom));
   border: 0;
-  background: #fff;
+  background: var(--surface);
 }
 .composer-box {
   border: 1px solid var(--line);
   border-radius: 18px;
   padding: 8px 10px;
-  background: #fff;
+  background: var(--surface);
 }
 .composer-box:focus-within {
-  border-color: #81b2a7;
+  border-color: var(--line);
 }
 .composer textarea {
   min-height: 42px;
@@ -381,15 +376,15 @@ textarea:focus {
   padding: 8px 10px;
 }
 .running-actions .stop {
-  background: #f8eeea;
-  color: #925344;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 .composer .operation:not(.sr-only) {
   font-size: 12px;
   padding: 7px 10px;
   margin: 0 0 7px;
   border-radius: 8px;
-  background: #f5f7f6;
+  background: var(--surface-subtle);
 }
 .connection-note {
   font-size: 12px;
@@ -401,7 +396,7 @@ textarea:focus {
   border: 0;
   border-radius: 20px;
   color: var(--ink);
-  background: #fff;
+  background: var(--surface);
   width: min(560px, calc(100% - 32px));
   max-height: 88dvh;
 }
@@ -411,7 +406,7 @@ textarea:focus {
 }
 .thread-tools::backdrop,
 .question-dialog::backdrop {
-  background: #172a2566;
+  background: var(--scrim);
 }
 .thread-tools .question-dialog-head {
   align-items: center;
@@ -459,10 +454,10 @@ textarea:focus {
 }
 .question-dialog {
   border-radius: 20px;
-  box-shadow: 0 18px 70px #14271d30;
+  box-shadow: 0 18px 70px var(--shadow);
 }
 .question-dialog-head {
-  border-color: #edf0ee;
+  border-color: var(--line);
   padding: 18px 20px 14px;
 }
 .question-dialog-head p,
@@ -475,7 +470,7 @@ textarea:focus {
   gap: 10px;
 }
 .question-progress button {
-  background: #fff;
+  background: var(--surface);
   border-color: var(--line);
   border-radius: 10px;
   color: var(--muted);
@@ -519,13 +514,13 @@ textarea:focus {
 }
 .question-freeform textarea,
 .question-freeform input {
-  background: #f8faf9;
+  background: var(--surface-subtle);
   border-color: var(--line);
   border-radius: 12px;
 }
 .web-update-notice {
-  border-color: #b8d7ce;
-  background: #eaf4f0;
+  border-color: var(--line);
+  background: var(--soft);
 }
 .media [role='alert'] {
   display: grid;
@@ -639,7 +634,7 @@ textarea:focus {
   flex-shrink: 0;
   width: 17px;
   height: 17px;
-  border: 1px solid #b5c4bf;
+  border: 1px solid var(--line);
   border-radius: 50%;
   vertical-align: middle;
   transform: translateY(2px);
@@ -647,7 +642,7 @@ textarea:focus {
 .task-check[aria-checked='true'] {
   border-color: var(--accent);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .tools-feedback {
   font-size: 12px;
@@ -667,7 +662,7 @@ textarea:focus {
 .project-filter select {
   width: 100%;
   min-height: 44px;
-  background: #f6f8f7;
+  background: var(--surface-subtle);
   color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -694,7 +689,7 @@ textarea:focus {
   border-radius: 10px;
   font-size: 12px;
   padding: 6px 8px;
-  color: #58665f;
+  color: var(--muted);
 }
 .composer-options button:first-child {
   max-width: 48%;
@@ -703,11 +698,11 @@ textarea:focus {
   text-overflow: ellipsis;
 }
 .composer-options button.active {
-  background: #e9f4ef;
+  background: var(--soft);
   color: var(--accent);
 }
 .composer-options button:hover {
-  background: #f0f5f2;
+  background: var(--soft);
 }
 .model-settings .settings-fields {
   display: grid;
@@ -750,7 +745,7 @@ textarea:focus {
 }
 .skill-options label.selected {
   border-color: var(--accent);
-  background: #f1f8f4;
+  background: var(--soft);
 }
 .skill-options input {
   width: 20px;
@@ -775,14 +770,14 @@ textarea:focus {
   font-size: 12px;
   line-height: 1.6;
   margin: 6px 0 0;
-  color: #59635d;
+  color: var(--muted);
 }
 .skill-done {
   position: sticky;
   bottom: 0;
   width: 100%;
   margin-top: 16px;
-  box-shadow: 0 -8px 16px white;
+  box-shadow: 0 -8px 16px var(--surface);
 }
 .selected-skills {
   display: flex;
@@ -798,8 +793,8 @@ textarea:focus {
   gap: 4px;
   font-size: 12px;
   padding: 2px 4px 2px 8px;
-  background: #e9f4ef;
-  color: #156449;
+  background: var(--soft);
+  color: var(--accent);
   border-radius: 10px;
   overflow-wrap: anywhere;
 }
@@ -822,7 +817,7 @@ textarea:focus {
 .model-settings .settings-fields > button {
   position: sticky;
   bottom: 0;
-  box-shadow: 0 -8px 16px white;
+  box-shadow: 0 -8px 16px var(--surface);
   min-height: 44px;
 }
 @media (max-width: 760px) {

@@ -6,7 +6,8 @@ import { DshFixtureConnection } from '../packages/adapter-dsh/test/fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
-import { rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { zstdCompressSync } from 'node:zlib';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import WebSocket from 'ws';
@@ -151,6 +152,122 @@ async function connect(
   return DeviceLink.authenticate(channel, auth);
 }
 describe('device relay and shared business dispatcher', () => {
+  it('allows rapid page reloads without waiting for disconnected sessions to expire', async () => {
+    const { config, pairing, identity, host } = await setup();
+    const phone = await createIdentity();
+    let link = await connect(
+      config.origin,
+      identity.peerId,
+      phone,
+      createHash('sha256').update(pairing.code).digest('hex'),
+      {
+        type: 'pair',
+        protocol: 2,
+        sessionId: crypto.randomUUID(),
+        code: pairing.code,
+        name: 'reload-test',
+      },
+    );
+    const ticket = (await link.ready).ticket;
+    const pinned = await connect(config.origin, identity.peerId, phone, ticket, {
+      type: 'authenticate',
+      protocol: 2,
+      sessionId: crypto.randomUUID(),
+    });
+    for (let reload = 0; reload < 8; reload++) {
+      await expect(link.request('ping')).resolves.toMatchObject({ value: expect.anything() });
+      link.close();
+      await vi.waitFor(() => {
+        const sessions = [...(host as any).sessions.values()] as { channels: Map<string, unknown> }[];
+        expect(sessions.filter((s) => s.channels.size > 0)).toHaveLength(1);
+      });
+      link = await connect(config.origin, identity.peerId, phone, ticket, {
+        type: 'authenticate',
+        protocol: 2,
+        sessionId: crypto.randomUUID(),
+      });
+      expect((host as any).sessions.size).toBeLessThanOrEqual(4);
+      await expect(pinned.request('ping')).resolves.toMatchObject({ value: expect.anything() });
+    }
+    await expect(link.request('ping')).resolves.toMatchObject({ value: expect.anything() });
+  });
+
+  it('retains the live session limit without evicting other open tabs', async () => {
+    const { config, pairing, identity } = await setup();
+    const phone = await createIdentity();
+    const first = await connect(
+      config.origin,
+      identity.peerId,
+      phone,
+      createHash('sha256').update(pairing.code).digest('hex'),
+      {
+        type: 'pair',
+        protocol: 2,
+        sessionId: crypto.randomUUID(),
+        code: pairing.code,
+        name: 'tabs-test',
+      },
+    );
+    const ticket = (await first.ready).ticket;
+    const links = [first];
+    for (let i = 1; i < 4; i++)
+      links.push(
+        await connect(config.origin, identity.peerId, phone, ticket, {
+          type: 'authenticate',
+          protocol: 2,
+          sessionId: crypto.randomUUID(),
+        }),
+      );
+    await expect(
+      connect(config.origin, identity.peerId, phone, ticket, {
+        type: 'authenticate',
+        protocol: 2,
+        sessionId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    for (const link of links)
+      await expect(link.request('ping')).resolves.toMatchObject({ value: expect.anything() });
+  });
+
+  it.each(['compressed', 'no-owner', 'missing'])(
+    'settles old conversation loading when history is %s',
+    async (scenario) => {
+      const { config, pairing, identity, desktop, transport } = await setup();
+      transport.autoSnapshot = false;
+      vi.spyOn(desktop, 'waitForView').mockResolvedValue(null);
+      if (scenario === 'no-owner') vi.spyOn(desktop, 'acquire').mockRejectedValue(Error('No owner'));
+      const file = join(config.codexHome, 'sessions', `rollout-${THREAD}.jsonl`);
+      if (scenario === 'compressed') writeFileSync(`${file}.zst`, zstdCompressSync(readFileSync(file)));
+      if (scenario !== 'no-owner') rmSync(file);
+      const link = await connect(
+        config.origin,
+        identity.peerId,
+        await createIdentity(),
+        createHash('sha256').update(pairing.code).digest('hex'),
+        { type: 'pair', protocol: 2, sessionId: crypto.randomUUID(), code: pairing.code, name: 'history' },
+      );
+      const events: any[] = [];
+      link.onEvent((event) => events.push(event));
+      await link.request('watch', { threadId: THREAD });
+      if (scenario === 'missing') {
+        await expect.poll(() => events.find((e) => e.event?.type === 'error')).toBeTruthy();
+        expect(events.find((e) => e.event?.type === 'error')).toMatchObject({
+          threadId: THREAD,
+          event: { message: expect.stringContaining('找不到此会话的历史记录') },
+        });
+      } else {
+        await expect.poll(() => events.find((e) => e.type === 'sync')).toBeTruthy();
+        const view = events
+          .find((e) => e.type === 'sync')
+          .updates.reduce((old: any, update: any) => applySync(old, update), null).view;
+        expect(view.messages[0].text).toBe('历史消息');
+        expect(view.reason).toContain('已加载历史记录');
+        expect(view.canSend).toBe(false);
+        expect(events.some((e) => e.event?.type === 'error')).toBe(false);
+      }
+      link.close();
+    },
+  );
   it('notifies a late subscriber when a just-authenticated link has closed', async () => {
     const { config, pairing, identity } = await setup();
     const link = await connect(

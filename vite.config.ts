@@ -22,12 +22,29 @@ export default defineConfig(() => {
   addFiles('packages/adapter-sdk/src');
   hash.update(readFileSync('package-lock.json')).update(readFileSync('vite.config.ts'));
   const buildId = hash.digest('hex').slice(0, 16);
+  const themeBoot = readFileSync('src/web/theme/boot.js', 'utf8');
+  const themeBootFile = `assets/theme-boot-${createHash('sha256').update(themeBoot).digest('hex').slice(0, 12)}.js`;
   return {
     define: { __POCKET_WEB_BUILD_ID__: JSON.stringify(buildId) },
     root: 'src/web',
     base: assets.base,
     build: { outDir: '../../dist/web', emptyOutDir: true },
     plugins: [
+      {
+        name: 'theme-prepaint',
+        transformIndexHtml: {
+          order: 'post',
+          handler(html, context) {
+            // A classic, blocking script paints saved colors before the CSS/React bundles.
+            // Its content hash also makes it safe for the existing immutable asset CDN.
+            const src = context.server ? '/theme/boot.js' : `${assets.base}${themeBootFile}`;
+            return html.replace('</title>', `</title>\n    <script src="${src}"></script>`);
+          },
+        },
+        generateBundle() {
+          this.emitFile({ type: 'asset', fileName: themeBootFile, source: themeBoot });
+        },
+      },
       {
         name: 'asset-origin',
         generateBundle() {

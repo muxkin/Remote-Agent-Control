@@ -1,11 +1,64 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { ChatDraft } from './chat-drafts';
 import { Icon } from './Icon';
 import { SendButton } from './SendButton';
+import { deviceSession } from './device-session';
+import { useDesktopKeyboard } from './desktop-keyboard';
+const UserAttachments = lazy(() => import('./UserAttachments'));
+
+function DraftAttachment({
+  file,
+  threadId,
+  onRemove,
+}: {
+  file: ChatDraft['uploads'][number];
+  threadId?: string;
+  onRemove: () => void;
+}) {
+  const [path, setPath] = useState(file.path);
+  useEffect(() => {
+    if (file.path) {
+      setPath(file.path);
+      return;
+    }
+    if (!threadId) return;
+    let disposed = false;
+    // Older saved drafts contain only the completed upload ID and name.
+    void deviceSession
+      .api<{ path?: string }>(
+        `/threads/${encodeURIComponent(threadId)}/uploads/${encodeURIComponent(file.id)}/complete`,
+        { method: 'POST' },
+      )
+      .then((result) => {
+        if (!disposed) setPath(result.path);
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+    };
+  }, [file.id, file.path, threadId]);
+  const placeholder = (
+    <span className="attachment-draft-placeholder">
+      <Icon name="document" size={24} />
+      <span>{file.name}</span>
+      <button type="button" className="attachment-remove" aria-label={`移除 ${file.name}`} onClick={onRemove}>
+        <Icon name="close" size={16} />
+      </button>
+    </span>
+  );
+  return path && threadId ? (
+    <Suspense fallback={placeholder}>
+      <UserAttachments files={[{ name: file.name, path }]} threadId={threadId} compact onRemove={onRemove} />
+    </Suspense>
+  ) : (
+    placeholder
+  );
+}
 
 /** The existing chat input, shared by first messages and ongoing conversations. */
 export function ChatComposer({
   value,
+  threadId,
   onChange,
   disabled,
   placeholder = '给 Codex 发消息…',
@@ -22,6 +75,7 @@ export function ChatComposer({
   actions,
 }: {
   value: ChatDraft;
+  threadId?: string;
   onChange: (change: Partial<ChatDraft> | ((draft: ChatDraft) => ChatDraft)) => void;
   disabled: boolean;
   placeholder?: string;
@@ -38,8 +92,11 @@ export function ChatComposer({
   actions?: ReactNode;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const desktopKeyboard = useDesktopKeyboard();
+  const composing = useRef(false);
   const hintId = useId();
   const { text, uploads, skills, plugins } = value;
+  const hasDraft = !!text.trim() || !!uploads.length || !!skills.length || !!plugins.length;
   useEffect(() => {
     const el = textareaRef.current;
     if (el) {
@@ -52,23 +109,24 @@ export function ChatComposer({
       className="composer-box"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!sendDisabled) onSubmit();
+        if (!disabled && !sendDisabled && hasDraft) onSubmit();
       }}
     >
-      {uploads.map((file) => (
-        <div className="upload-chip" key={file.id}>
-          {file.name}
-          <button
-            type="button"
-            aria-label={`移除 ${file.name}`}
-            onClick={() =>
-              onChange((old) => ({ ...old, uploads: old.uploads.filter((u) => u.id !== file.id) }))
-            }
-          >
-            ×
-          </button>
+      {!!uploads.length && (
+        <div className="composer-attachments" aria-label="待发送的附件">
+          {uploads.map((file) => (
+            <div className="upload-chip" key={file.id}>
+              <DraftAttachment
+                file={file}
+                threadId={threadId}
+                onRemove={() =>
+                  onChange((old) => ({ ...old, uploads: old.uploads.filter((u) => u.id !== file.id) }))
+                }
+              />
+            </div>
+          ))}
         </div>
-      ))}
+      )}
       {uploadProgress && <p role="status">{uploadProgress}</p>}
       {!!skills.length && (
         <div className="selected-skills">
@@ -112,6 +170,37 @@ export function ChatComposer({
         rows={1}
         value={text}
         onChange={(e) => onChange({ text: e.target.value })}
+        onCompositionStart={() => {
+          composing.current = true;
+        }}
+        onCompositionEnd={() => {
+          composing.current = false;
+        }}
+        onKeyDown={(event) => {
+          // IME confirmation is text input, including Safari's legacy keyCode 229.
+          if (
+            !desktopKeyboard ||
+            event.key !== 'Enter' ||
+            composing.current ||
+            event.nativeEvent.isComposing ||
+            event.nativeEvent.keyCode === 229
+          )
+            return;
+          if (event.ctrlKey) {
+            event.preventDefault();
+            const input = event.currentTarget;
+            const { selectionStart, selectionEnd } = input;
+            if (input.value.length - (selectionEnd - selectionStart) + 1 > input.maxLength) return;
+            input.setRangeText('\n', selectionStart, selectionEnd, 'end');
+            onChange({ text: input.value });
+            return;
+          }
+          // Keep native modified-Enter behavior (such as Shift+Enter for a newline).
+          if (event.shiftKey || event.altKey || event.metaKey) return;
+          event.preventDefault();
+          if (!event.repeat && !disabled && !sendDisabled && hasDraft)
+            event.currentTarget.form?.requestSubmit();
+        }}
         onPaste={(event) => {
           const files = Array.from(event.clipboardData.files).filter((file) =>
             file.type.startsWith('image/'),
@@ -130,6 +219,8 @@ export function ChatComposer({
         }}
         placeholder={placeholder}
         aria-label="消息"
+        aria-description={desktopKeyboard ? 'Enter 发送，Ctrl+Enter 换行' : '回车换行，点击发送按钮发送'}
+        enterKeyHint={desktopKeyboard ? 'send' : 'enter'}
         maxLength={16000}
         disabled={disabled}
       />
@@ -154,7 +245,7 @@ export function ChatComposer({
         <div className="composer-send">
           <SendButton
             running={running}
-            hasDraft={!!text.trim() || !!uploads.length || !!skills.length || !!plugins.length}
+            hasDraft={hasDraft}
             disabled={sendDisabled}
             canQueue={canQueue}
             onInterrupt={onInterrupt}

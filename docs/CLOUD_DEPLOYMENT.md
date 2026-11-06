@@ -22,6 +22,8 @@ POCKET_PUBLIC_ORIGIN=https://codex.example.com
 POCKET_RELAY_ENROLLMENT=<相同的注册凭据>
 POCKET_RELAY_BIND=127.0.0.1
 POCKET_RELAY_PORT=4318
+# 仅信任实际代理的地址/CIDR；直连部署不设置此项：
+POCKET_RELAY_TRUSTED_PROXIES=127.0.0.1,::1
 POCKET_RELAY_STATE=/var/lib/codex-pocket-relay
 POCKET_WEB_ROOT=/opt/codex-pocket/current/dist/web
 # 与构建一致的公共资源源：
@@ -35,6 +37,29 @@ POCKET_WEB_ROOT=/opt/codex-pocket/current/dist/web
 部署静态应用后启动云端服务，再启动电脑 Gateway。运行 `npm run pair -- --open`，手机重新扫码一次。配对密钥只在二维码 fragment 和端点内出现；禁止把二维码、身份私钥或完整环境文件写入公开日志。
 
 开发预览绑定 Tailscale 地址；自动化隔离测试使用 loopback，不连接真实工作会话。公网服务必须使用 HTTPS。
+
+## 代理地址与连接配额
+
+中继默认不信任转发头。`POCKET_RELAY_TRUSTED_PROXIES` 只列出受控反向代理的 IP/CIDR，不要填整个客户端网段。程序使用 `@fastify/proxy-addr` 从 socket 地址向外检查 `X-Forwarded-For`，遇到第一个不可信地址即停止，并统一 IPv4、IPv6 和 IPv4-mapped 地址格式。只读最左侧头部或仅按代理跳数信任都不安全。
+
+生成的 Caddy 部署仅信任 loopback，后端也只监听 loopback。直接面向公网的 Nginx 可用 `proxy_set_header X-Forwarded-For $remote_addr;` 覆盖客户端传入的头。若有额外 CDN/代理，必须同时核对代理自身的可信上游配置，不能直接信任客户端提供的 IP。
+
+配额分开计算：
+
+| 范围                                   | 限制                                                         |
+| -------------------------------------- | ------------------------------------------------------------ |
+| 全局 WebSocket（包含未完成升级的预留） | 1,024                                                        |
+| 全局等待路由认证的连接                 | 256                                                          |
+| 同一真实来源 IP 等待路由认证的连接     | 64                                                           |
+| 同一来源 IP 的连接尝试                 | 每 60 秒窗口 240 次                                          |
+| 同一来源 IP 的路由认证失败             | 每 60 秒窗口 64 次                                           |
+| 单个电脑身份                           | control、bulk 各一条，新连接替换同通道旧连接                 |
+| 电脑身份 + 配对设备身份                | 合计 8 条客户端中继连接，含 control/bulk；切换票据不重置配额 |
+| 尚未完成配对的路由                     | 每个一次性票据 8 条                                          |
+
+路由认证成功即释放 IP 的等待名额，仍受全局和身份配额限制。中继只验证路由授权；业务身份仍由电脑端 Noise 和设备认证校验。电脑端每设备保留最多 4 个会话；达到上限时只回收已无通道的会话，仍在线的页面不被挤掉。后台断线会话仍可在有余量时保留 120 秒供恢复。
+
+连接频率、认证失败分别记账；认证有 10 秒超时。IP 计数表最多保留 8,192 项，并回收过期且无等待连接的条目。这些值是资源保护策略，不是经带宽、CPU 或真实移动网络负载验证的承载能力。
 
 ## 对象存储
 
