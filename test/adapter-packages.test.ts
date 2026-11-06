@@ -11,30 +11,44 @@ import { loadCatalog } from '../src/server/adapters/catalog.js';
 import { fixtureConfig } from './helpers.js';
 import { hostEnvironment } from '../src/server/adapters/package.js';
 
-it('installs self-contained release archives offline outside the repository', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'adapter-release-'));
+async function timed<T>(phase: string, action: () => Promise<T>): Promise<T> {
+  const started = performance.now();
   try {
-    for (const name of ['sdk', 'codex', 'dsh']) {
+    return await action();
+  } finally {
+    // Public phase names only; no paths, config, credentials or dependency output.
+    process.stderr.write(`[release-contract] ${phase}: ${Math.round(performance.now() - started)} ms\n`);
+  }
+}
+
+it.each(['sdk', 'codex', 'dsh'])(
+  'installs %s offline outside the repository with an empty cache',
+  async (name) => {
+    const directory = await mkdtemp(join(tmpdir(), 'adapter-release-'));
+    try {
       const manifest = JSON.parse(await readFile(`packages/adapter-${name}/package.json`, 'utf8'));
       const archive = resolve(`dist/adapters/agent-remote-adapter-${name}-${manifest.version}.tgz`);
       const destination = join(directory, name);
-      await new Arborist({
-        path: destination,
-        ignoreScripts: true,
-        omit: ['dev'],
-        audit: false,
-        offline: true,
-        cache: join(directory, 'empty-cache'),
-      }).reify({ add: [archive] });
+      await timed(`${name} offline install`, () =>
+        new Arborist({
+          path: destination,
+          ignoreScripts: true,
+          omit: ['dev'],
+          audit: false,
+          offline: true,
+          cache: join(directory, 'empty-cache'),
+        }).reify({ add: [archive] }),
+      );
       const root = join(destination, 'node_modules', manifest.name);
-      if (name !== 'sdk') await validatePackage(root);
+      if (name !== 'sdk') await timed(`${name} host validation`, () => validatePackage(root));
       else expect(await readFile(join(root, 'dist/index.d.ts'), 'utf8')).toContain('AdapterFactory');
       expect(await readFile(join(root, 'package.json'), 'utf8')).not.toContain('workspace:');
+    } finally {
+      await timed(`${name} offline installation cleanup`, () => remove(directory));
     }
-  } finally {
-    await remove(directory);
-  }
-}, 240000);
+  },
+  240000,
+);
 
 it('pins bundled runtime dependencies so a later gateway build cannot mutate installed plugins', async () => {
   const { mkdir, writeFile, cp, symlink } = await import('node:fs/promises');
