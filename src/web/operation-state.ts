@@ -18,7 +18,7 @@ export function readPending(deviceId: string, threadId: string): Operation[] {
     if (!Array.isArray(saved)) return [];
     return saved
       .filter((item) => item.threadId === threadId && unresolved.has(item.state))
-      .map((item) => ({ ...item, state: 'uncertain', error: '上次请求尚未确认，正在与桌面核对' }));
+      .map((item) => ({ ...item, state: 'uncertain', error: '上次请求尚未确认，正在与原实例核对' }));
   } catch {
     return [];
   }

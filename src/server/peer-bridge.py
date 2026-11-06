@@ -4,6 +4,9 @@
 Never starts Codex, creates a socket, or acquires thread ownership. stdout is
 the existing Desktop IPC byte stream; stderr contains sanitized lifecycle data.
 """
+import ctypes
+import hashlib
+import threading
 import json
 import os
 import selectors
@@ -13,22 +16,110 @@ import struct
 import sys
 
 
+def windows_pipe(path, expected_exe):
+    from ctypes import wintypes as w
+    import msvcrt
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    a = ctypes.WinDLL('advapi32', use_last_error=True)
+    def api(lib, name, restype, *argtypes):
+        fn = getattr(lib, name); fn.restype = restype; fn.argtypes = argtypes
+        return fn
+    create = api(k, 'CreateFileW', w.HANDLE, w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE)
+    close = api(k, 'CloseHandle', w.BOOL, w.HANDLE)
+    server_pid = api(k, 'GetNamedPipeServerProcessId', w.BOOL, w.HANDLE, ctypes.POINTER(w.ULONG))
+    open_process = api(k, 'OpenProcess', w.HANDLE, w.DWORD, w.BOOL, w.DWORD)
+    current = api(k, 'GetCurrentProcess', w.HANDLE)
+    executable = api(k, 'QueryFullProcessImageNameW', w.BOOL, w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD))
+    open_token = api(a, 'OpenProcessToken', w.BOOL, w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE))
+    token_info = api(a, 'GetTokenInformation', w.BOOL, w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD))
+    equal_sid = api(a, 'EqualSid', w.BOOL, ctypes.c_void_p, ctypes.c_void_p)
+    read = api(k, 'ReadFile', w.BOOL, w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p)
+    write = api(k, 'WriteFile', w.BOOL, w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p)
+    def user(process):
+        token = w.HANDLE()
+        if not open_token(process, 8, ctypes.byref(token)): raise RuntimeError('cannot-read-peer-token')
+        try:
+            size = w.DWORD(); token_info(token, 1, None, 0, ctypes.byref(size))
+            if not size.value: raise RuntimeError('invalid-peer-token')
+            buf = ctypes.create_string_buffer(size.value)
+            if not token_info(token, 1, buf, size, ctypes.byref(size)): raise RuntimeError('cannot-read-peer-token')
+            return buf
+        finally: close(token)
+    if not path.lower().startswith('\\\\.\\pipe\\'): raise RuntimeError('not-a-local-named-pipe')
+    # Identification-only security context prevents the server impersonating this client.
+    handle = create(path, 0xc0000000, 0, None, 3, 0x00110000, None)
+    if handle == ctypes.c_void_p(-1).value: raise RuntimeError('pipe-unavailable')
+    try:
+        pid = w.ULONG()
+        if not server_pid(handle, ctypes.byref(pid)): raise RuntimeError('cannot-identify-pipe-server')
+        process = open_process(0x1000, False, pid.value)
+        if not process: raise RuntimeError('cannot-inspect-pipe-server')
+        try:
+            size = w.DWORD(32768); name = ctypes.create_unicode_buffer(size.value)
+            if not executable(process, 0, name, ctypes.byref(size)): raise RuntimeError('cannot-inspect-peer-executable')
+            peer, own = user(process), user(current())
+            if not equal_sid(ctypes.cast(peer, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.cast(own, ctypes.POINTER(ctypes.c_void_p))[0]): raise RuntimeError('unexpected-pipe-user')
+            if os.path.normcase(os.path.realpath(name.value)) != os.path.normcase(os.path.realpath(expected_exe)): raise RuntimeError('unexpected-pipe-executable')
+        finally: close(process)
+        for fd in (0, 1): msvcrt.setmode(fd, os.O_BINARY)
+        print(json.dumps({'type': 'ready', 'pid': pid.value}), file=sys.stderr, flush=True)
+        def downlink():
+            buf = ctypes.create_string_buffer(65536); count = w.DWORD()
+            while read(handle, buf, len(buf), ctypes.byref(count), None) and count.value:
+                data = memoryview(buf.raw)[:count.value]
+                while data: data = data[os.write(1, data):]
+            os._exit(0)
+        threading.Thread(target=downlink, daemon=True).start()
+        while True:
+            data = os.read(0, 65536)
+            if not data: return
+            while data:
+                count = w.DWORD(); buf = ctypes.create_string_buffer(data)
+                if not write(handle, buf, len(data), ctypes.byref(count), None) or not count.value: return
+                data = data[count.value:]
+    finally: close(handle)
+
+
 def main():
     path, expected_exe = sys.argv[1:3]
+    if sys.platform == 'win32':
+        return windows_pipe(path, expected_exe)
     uid = os.getuid()
-    directory_modes = {0o700, 0o755} if sys.argv[3:] == ["--app-tools"] else {0o700}
-    for candidate, expected_modes in [(os.path.dirname(path), directory_modes), (path, {0o600})]:
+    directory_modes = {0o700, 0o755} if sys.argv[3:] == ['--app-tools'] else {0o700}
+    for candidate, modes in [(os.path.dirname(path), directory_modes), (path, {0o600})]:
         info = os.lstat(candidate)
-        if info.st_uid != uid or stat.S_IMODE(info.st_mode) not in expected_modes or stat.S_ISLNK(info.st_mode):
+        if info.st_uid != uid or stat.S_IMODE(info.st_mode) not in modes or stat.S_ISLNK(info.st_mode):
             raise RuntimeError('unsafe-socket-permissions')
-    if not stat.S_ISSOCK(os.lstat(path).st_mode):
-        raise RuntimeError('not-a-socket')
+    if not stat.S_ISSOCK(os.lstat(path).st_mode): raise RuntimeError('not-a-socket')
+    connect_path = path
+    limit = 103 if sys.platform == 'darwin' else 107
+    if len(path.encode()) > limit:
+        original = os.path.realpath(os.path.dirname(path))
+        base = '/tmp/codex-ipc-' + str(uid)
+        info = os.lstat(base)
+        if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700 or not stat.S_ISDIR(info.st_mode): raise RuntimeError('unsafe-short-socket-directory')
+        alias = os.path.join(base, hashlib.sha256(original.encode()).hexdigest())
+        if os.lstat(alias).st_uid != uid or os.path.realpath(alias) != original: raise RuntimeError('unsafe-short-socket-alias')
+        connect_path = os.path.join(alias, os.path.basename(path))
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(5)
-    sock.connect(path)
-    pid, peer_uid, _ = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-    if peer_uid != uid or os.readlink(f'/proc/{pid}/exe') != expected_exe:
-        raise RuntimeError('unexpected-socket-peer')
+    sock.settimeout(5); sock.connect(connect_path)
+    if sys.platform == 'darwin':
+        libc = ctypes.CDLL(None, use_errno=True)
+        getpeereid = libc.getpeereid
+        getpeereid.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+        peer_uid, peer_gid = ctypes.c_uint(), ctypes.c_uint()
+        if getpeereid(sock.fileno(), ctypes.byref(peer_uid), ctypes.byref(peer_gid)): raise RuntimeError('cannot-read-peer-identity')
+        peer_uid = peer_uid.value
+        pid = struct.unpack('i', sock.getsockopt(0, 2, 4))[0]  # SOL_LOCAL / LOCAL_PEERPID
+        proc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+        proc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        buf = ctypes.create_string_buffer(4096)
+        if proc.proc_pidpath(pid, buf, len(buf)) <= 0: raise RuntimeError('cannot-read-peer-executable')
+        peer_exe = buf.value.decode()
+    else:
+        pid, peer_uid, _ = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        peer_exe = os.readlink(f'/proc/{pid}/exe')
+    if peer_uid != uid or os.path.realpath(peer_exe) != os.path.realpath(expected_exe): raise RuntimeError('unexpected-socket-peer')
     print(json.dumps({'type': 'ready', 'pid': pid, 'uid': uid}), file=sys.stderr, flush=True)
     sock.setblocking(False)
     os.set_blocking(0, False)

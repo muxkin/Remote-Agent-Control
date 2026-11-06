@@ -13,6 +13,7 @@ import {
 import { deviceSession as session } from './device-session';
 import { uploadToStorage } from './storage-upload';
 
+const owners = new Map<string, string>();
 const inflight = new Map<string, Promise<Uint8Array>>();
 const providers = new Map<string, { threadId: string; manifest: FileManifest }>();
 const urls = new Map<string, string>();
@@ -29,7 +30,14 @@ const fileCall = (
   extra = {},
   bytes?: Uint8Array,
   bulk = false,
-) => session.request('file', { action, threadId, fileId: id, ...extra }, bytes, bulk);
+) =>
+  session.request(
+    'file',
+    { action, threadId, fileId: id, ...extra },
+    bytes,
+    bulk,
+    owners.get(id) ?? session.backendId,
+  );
 async function route(file: FileManifest) {
   if (session.establishingDirect && !waited.has(file.id)) {
     waited.add(file.id);
@@ -40,6 +48,7 @@ async function route(file: FileManifest) {
   return fileRoute(file.size, session.direct, file.storage);
 }
 export async function uploadFile(threadId: string, file: File, progress: (text: string) => void) {
+  const backendId = session.backendId;
   if (!file.size || file.size > MAX_FILE_SIZE) throw Error('附件大小需在 1 B 至 256 MiB 之间');
   const whole = sha256.create(),
     hashes: string[] = [];
@@ -49,11 +58,12 @@ export async function uploadFile(threadId: string, file: File, progress: (text: 
     hashes.push(hashBytes(bytes));
   }
   const digest = bytesToHex(whole.digest()),
-    resumeKey = session.contentKey(`upload:${threadId}:${digest}:${file.size}`);
+    resumeKey = session.contentKey(`upload:${threadId}:${digest}:${file.size}`, backendId);
   let manifest = await session.cache.get<FileManifest>(resumeKey),
     missing: number[] = [];
   if (manifest) {
     try {
+      owners.set(manifest.id, backendId);
       const result = await fileCall('missing', threadId, manifest.id);
       manifest = result.value.manifest;
       missing = result.value.missing;
@@ -62,10 +72,15 @@ export async function uploadFile(threadId: string, file: File, progress: (text: 
     }
   }
   if (!manifest) {
-    manifest = await session.api<FileManifest>(`/threads/${threadId}/uploads`, {
-      method: 'POST',
-      body: JSON.stringify({ name: file.name, size: file.size, sha256: digest, hashes }),
-    });
+    manifest = await session.api<FileManifest>(
+      `/threads/${encodeURIComponent(threadId)}/uploads`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ name: file.name, size: file.size, sha256: digest, hashes }),
+      },
+      backendId,
+    );
+    owners.set(manifest.id, backendId);
     session.cache.put(resumeKey, manifest);
     await session.cache.flush();
     missing = hashes.map((_, i) => i);
@@ -113,7 +128,7 @@ export async function uploadFile(threadId: string, file: File, progress: (text: 
   return (await fileCall('finish', threadId, manifest.id)).value as { id: string; name: string };
 }
 async function downloadBlock(threadId: string, manifest: FileManifest, index: number): Promise<Uint8Array> {
-  const key = session.contentKey(`block:${manifest.sha256}:${index}`);
+  const key = session.contentKey(`block:${manifest.sha256}:${index}`, owners.get(manifest.id));
   const cached = await session.cache.get<Uint8Array>(key);
   if (cached && hashBytes(cached) === manifest.hashes[index]) return cached;
   const old = inflight.get(key);
@@ -211,17 +226,25 @@ if ('serviceWorker' in navigator)
       .then((data) => port.postMessage({ data }, [data.buffer as ArrayBuffer]))
       .catch(() => port.postMessage({ error: '附件读取中断，请恢复电脑连接后重试' }));
   });
-export async function mediaContent(threadId: string, path: string) {
-  const cacheKey = session.contentKey(`file:${threadId}:${hashBytes(new TextEncoder().encode(path))}`);
+export async function mediaContent(threadId: string, path: string, backendId = session.backendId) {
+  const cacheKey = session.contentKey(
+    `file:${threadId}:${hashBytes(new TextEncoder().encode(path))}`,
+    backendId,
+  );
   let manifest = await session.cache.get<FileManifest>(cacheKey);
   if (session.online || !manifest) {
-    manifest = await session.api<FileManifest>(`/threads/${threadId}/media`, {
-      method: 'POST',
-      body: JSON.stringify({ path }),
-    });
+    manifest = await session.api<FileManifest>(
+      `/threads/${encodeURIComponent(threadId)}/media`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ path }),
+      },
+      backendId,
+    );
     session.cache.put(cacheKey, manifest);
   }
-  const key = session.contentKey(`url:${manifest.sha256}`),
+  owners.set(manifest.id, backendId);
+  const key = session.contentKey(`url:${manifest.sha256}`, backendId),
     old = urls.get(key);
   if (old) return { url: old, name: manifest.name, expiresAt: 0 };
   if (manifest.size > 8 * BLOCK_SIZE && !navigator.serviceWorker?.controller) {

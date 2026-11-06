@@ -1,3 +1,6 @@
+import { codexPaths, type CodexConnector } from './connectors/codex-local.js';
+import { readFileSync } from 'node:fs';
+import type { DshConnectionConfig } from './connectors/dsh-web.js';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +14,7 @@ export interface StorageSettings {
 }
 
 export interface Config {
+  backends?: DshConnectionConfig[];
   port: number;
   origin: string;
   stateDir: string;
@@ -24,6 +28,7 @@ export interface Config {
   p2p?: { enabled: boolean; stunUrls: string[] };
   media?: StorageSettings;
   platform?: PlatformRuntime;
+  codexConnector?: CodexConnector;
   relay?: { origin: string; enrollment: string };
 }
 export function readConfig(): Config {
@@ -48,13 +53,11 @@ export function readConfig(): Config {
   const platform = platformRuntime();
   return {
     port,
+    backends: readBackends(),
     origin: url.origin,
     codexHome,
-    stateDir: resolve(
-      process.env.POCKET_STATE_DIR ??
-        `${process.env.XDG_STATE_HOME ?? `${homedir()}/.local/state`}/codex-pocket-remote`,
-    ),
-    ...platform.desktopPaths(codexHome),
+    stateDir: resolve(process.env.POCKET_STATE_DIR ?? platform.stateDirectory()),
+    ...codexPaths(platform.id, codexHome),
     platform,
     readOnly: process.env.POCKET_READ_ONLY === '1',
     webRoot: resolve(projectRoot, 'dist/web'),
@@ -74,7 +77,7 @@ export function readConfig(): Config {
 export function readStorageSettings(purpose: 'media' | 'assets'): StorageSettings | undefined {
   const path = process.env[purpose === 'media' ? 'POCKET_MEDIA_ADAPTER' : 'POCKET_ASSET_ADAPTER'];
   if (!path) return undefined;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(path) || !/\.m?js$/.test(path))
+  if ((/^[a-z][a-z0-9+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) || !/\.m?js$/.test(path))
     throw Error('Storage adapter must be a local .js or .mjs file');
   return {
     adapterPath: resolve(path),
@@ -83,4 +86,33 @@ export function readStorageSettings(purpose: 'media' | 'assets'): StorageSetting
       .regex(/^[a-z0-9][a-z0-9_-]{0,62}$/)
       .parse(process.env.POCKET_MEDIA_PREFIX ?? 'codex-pocket'),
   };
+}
+
+/** Credentials stay on this host; the public descriptor never includes this configuration. */
+export function readBackends(): DshConnectionConfig[] {
+  const file = process.env.POCKET_BACKENDS_FILE;
+  if (!file) return [];
+  const schema = z
+    .array(
+      z
+        .object({
+          id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
+          name: z.string().min(1).max(80),
+          type: z.literal('dsh'),
+          url: z.string().url(),
+          tokenEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+          version: z.string().min(1).max(80),
+        })
+        .strict(),
+    )
+    .max(16);
+  const instances = schema.parse(JSON.parse(readFileSync(file, 'utf8')));
+  const ids = new Set(['codex-local']);
+  return instances.map((instance) => {
+    if (ids.has(instance.id)) throw Error('Backend IDs must be unique');
+    ids.add(instance.id);
+    // An unconfigured/offline instance must not prevent other instances from connecting.
+    const token = process.env[instance.tokenEnv] ?? '';
+    return { id: instance.id, name: instance.name, url: instance.url, version: instance.version, token };
+  });
 }

@@ -108,7 +108,6 @@ export interface ThreadView extends ThreadSummary {
   reason: string | null;
 }
 export interface GatewayStatus {
-  webBuildId?: string | null;
   connected: boolean;
   desktopVersion: string | null;
   supportedVersion: boolean;
@@ -131,6 +130,7 @@ export interface GatewayStatus {
 export type OperationState =
   'received' | 'dispatching' | 'accepted' | 'completed' | 'interrupted' | 'failed' | 'rejected' | 'uncertain';
 export interface Operation {
+  backendId?: string;
   id: string;
   threadId: string;
   kind:

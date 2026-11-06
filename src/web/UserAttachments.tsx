@@ -11,6 +11,7 @@ export default function UserAttachments({
   return (
     <div className="user-attachments">
       {files.map((file) =>
+        file.path.startsWith('dsh-image:') ||
         /\.(png|jpe?g|gif|webp|mp4|webm|mov|mp3|wav|ogg|m4a)$/i.test(file.path) ? (
           <Media key={file.path} src={file.path} label={file.name} threadId={threadId} />
         ) : (

@@ -1,9 +1,11 @@
+import { DEFAULT_BACKEND, conversationKey } from '../shared/backends.js';
+import { BackendRegistry } from './backends/registry.js';
+import { resolveBackend, type BackendDependencies } from './backends/resolve.js';
+import { conversationId } from './control-schemas.js';
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { z } from 'zod';
 import type { Config } from './config.js';
-import type { DesktopBackend } from './desktop-backend.js';
-import type { HistoryIndex } from './history.js';
 import type { Store } from './store.js';
 import { hostIdentity } from './device-identity.js';
 import { HostRelay } from './host-relay.js';
@@ -23,6 +25,8 @@ import { DevicePeer } from './device-peer.js';
 
 type Path = 'relay' | 'direct';
 interface Subscription {
+  backendId: string;
+  threadId: string;
   known?: SyncCheckpoint;
   release?: () => void;
   cancelled: boolean;
@@ -52,41 +56,73 @@ const idSchema = z.string().uuid();
 export class HostService {
   readonly core;
   readonly journal = new SyncJournal();
+  readonly registry: BackendRegistry;
+  private cores = new Map<string, ReturnType<typeof createGatewayCore>>();
+  private journals = new Map<string, SyncJournal>();
+  private detach: (() => void)[] = [];
+  private coreFor(backendId = DEFAULT_BACKEND) {
+    this.registry.get(backendId);
+    return this.cores.get(backendId)!;
+  }
   readonly metrics = { relayBytes: 0, directBytes: 0, resyncs: 0, connections: 0, directConnections: 0 };
   private sessions = new Map<string, Session>();
   private relay?: HostRelay;
   private sweep?: NodeJS.Timeout;
-  private readonly onThread = (view: ThreadView) => {
+  private readonly onThread = (view: ThreadView, backendId = DEFAULT_BACKEND) => {
     for (const session of this.sessions.values()) {
-      const sub = session.subscriptions.get(view.id);
+      const sub = session.subscriptions.get(conversationKey(backendId, view.id));
       if (sub && !sub.cancelled) {
         clearTimeout(sub.timer);
-        sub.timer = setTimeout(() => this.publish(session, view), 60);
+        sub.timer = setTimeout(() => this.publish(session, view, backendId), 60);
       }
     }
   };
   private readonly onStatus = () => {
-    for (const session of this.sessions.values())
-      this.send(session, { type: 'event', event: { type: 'status', status: this.core.status() } });
+    for (const backend of this.registry.all())
+      for (const session of this.sessions.values())
+        this.send(session, {
+          type: 'event',
+          backendId: backend.id,
+          event: { type: 'status', status: this.coreFor(backend.id).status() },
+        });
   };
   private readonly onOperation = (operation: Operation) => {
     for (const session of this.sessions.values())
-      if (this.deps.store.operation(operation.id, session.device.id))
-        this.send(session, { type: 'event', event: { type: 'operation', operation } });
+      if (this.deps.store.operation(operation.id, session.device.id, operation.backendId))
+        this.send(session, {
+          type: 'event',
+          backendId: operation.backendId,
+          event: { type: 'operation', operation },
+        });
   };
   constructor(
     readonly config: Config,
     readonly identity: Identity,
-    private deps: { store: Store; desktop: DesktopBackend; history: HistoryIndex },
+    private deps: { store: Store } & ({ registry: BackendRegistry } | BackendDependencies),
   ) {
-    this.core = createGatewayCore(config, deps);
-    deps.desktop.on('thread', this.onThread);
-    deps.desktop.on('status', this.onStatus);
-    this.core.operations.on('operation', this.onOperation);
+    this.registry =
+      'registry' in deps ? deps.registry : new BackendRegistry().register(resolveBackend(config, deps));
+    for (const backend of this.registry.all()) {
+      const core = createGatewayCore(config, { store: deps.store, backend });
+      core.router.get('/api/backends', () => ({ backends: this.registry.list() }));
+      this.cores.set(backend.id, core);
+      this.journals.set(backend.id, backend.id === DEFAULT_BACKEND ? this.journal : new SyncJournal());
+      const thread = (view: ThreadView) => this.onThread(view, backend.id);
+      backend.on('thread', thread);
+      backend.on('status', this.onStatus);
+      core.operations.on('operation', this.onOperation);
+      this.detach.push(() => {
+        backend.off('thread', thread);
+        backend.off('status', this.onStatus);
+        core.operations.off('operation', this.onOperation);
+        core.close();
+      });
+    }
+    this.core = this.coreFor();
   }
   static async create(
     config: Config,
-    deps: { store: Store; desktop: DesktopBackend; history: HistoryIndex },
+    deps: { store: Store } & ({ registry: BackendRegistry } | BackendDependencies),
   ) {
     return new HostService(config, await hostIdentity(config.stateDir, config.platform), deps);
   }
@@ -204,7 +240,11 @@ export class HostService {
       try {
         if (value.type === 'rpc') {
           if (!Object.hasOwn(RPC_ROUTES, value.call?.method ?? '')) throw new RpcError('不支持此操作', 404);
-          result = await this.core.router.call(value.call as RpcCall, session.device, packet.bytes);
+          result = await this.coreFor(value.call.backendId).router.call(
+            value.call as RpcCall,
+            session.device,
+            packet.bytes,
+          );
           if (
             RPC_ROUTES[value.call.method as keyof typeof RPC_ROUTES][0] === 'GET' &&
             value.knownHash === contentVersion(result)
@@ -212,16 +252,24 @@ export class HostService {
             result = { cacheHit: true };
           if (value.call.method === 'device.revoke') setTimeout(() => this.drop(session!), 20);
         } else if (value.type === 'file') {
-          const response = await this.core.files.handle(value.action, value, session.device.id, packet.bytes);
+          const response = await this.coreFor(value.backendId).files.handle(
+            value.action,
+            value,
+            session.device.id,
+            packet.bytes,
+          );
           result = response.value;
           responseBytes = response.bytes;
         } else if (value.type === 'watch') {
-          const threadId = idSchema.parse(value.threadId);
+          const threadId = conversationId.parse(value.threadId);
           const known = value.known === undefined ? undefined : checkpointSchema.parse(value.known);
-          await this.watch(session, threadId, known);
+          await this.watch(session, threadId, known, value.backendId ?? DEFAULT_BACKEND);
           result = { ok: true };
         } else if (value.type === 'unwatch') {
-          this.unwatch(session, idSchema.parse(value.threadId));
+          this.unwatch(
+            session,
+            conversationKey(value.backendId ?? DEFAULT_BACKEND, conversationId.parse(value.threadId)),
+          );
           result = { ok: true };
         } else if (value.type === 'offer') {
           if (!this.config.p2p?.enabled) throw new RpcError('直连未启用', 400);
@@ -283,65 +331,77 @@ export class HostService {
       void channel.send(message).catch(() => {});
     }
   }
-  private publish(session: Session, view: ThreadView) {
-    const subscription = session.subscriptions.get(view.id);
+  private publish(session: Session, view: ThreadView, backendId = DEFAULT_BACKEND) {
+    const subscription = session.subscriptions.get(conversationKey(backendId, view.id));
     if (!subscription || subscription.cancelled || !session.channels.size) return;
-    const updates = this.journal.resume(view, subscription.known);
-    const state = this.journal.update(view);
+    const journal = this.journals.get(backendId)!;
+    const updates = journal.resume(view, subscription.known);
+    const state = journal.update(view);
     subscription.known = checkpoint({ epoch: state.epoch, view: state.view });
-    this.send(session, { type: 'sync', threadId: view.id, updates });
+    this.send(session, { type: 'sync', backendId, threadId: view.id, updates });
   }
-  private async watch(session: Session, threadId: string, known?: SyncCheckpoint) {
-    const thread = this.deps.history.get(threadId);
+  private async watch(
+    session: Session,
+    threadId: string,
+    known?: SyncCheckpoint,
+    backendId = DEFAULT_BACKEND,
+  ) {
+    const backend = this.registry.get(backendId),
+      key = conversationKey(backendId, threadId);
+    const thread = await backend.history.get(threadId);
     if (!thread) throw new RpcError('找不到此会话', 404);
-    const existing = session.subscriptions.get(threadId);
+    const existing = session.subscriptions.get(key);
     if (existing) {
       existing.known = known;
-      const current = this.deps.desktop.view(threadId);
-      if (current) this.publish(session, current);
+      const current = backend.view(threadId);
+      if (current) this.publish(session, current, backendId);
       this.metrics.resyncs++;
       return;
     }
     if (session.subscriptions.size >= 8) throw new RpcError('订阅数量过多', 429);
-    const sub: Subscription = { known, cancelled: false };
-    session.subscriptions.set(threadId, sub);
+    const sub: Subscription = { known, cancelled: false, backendId, threadId };
+    session.subscriptions.set(key, sub);
     const preview = async () => {
-      if (sub.cancelled || this.deps.desktop.view(threadId)?.synchronized) return;
-      const { rolloutPath: _, ...summary } = thread;
-      const page = await this.deps.history.page(threadId);
-      if (sub.cancelled || this.deps.desktop.view(threadId)?.synchronized) return;
-      this.publish(session, {
-        ...summary,
-        messages: page.messages,
-        revision: -1,
-        owner: false,
-        synchronized: false,
-        activeTurnId: null,
-        runtimeStatus: 'notLoaded',
-        model: null,
-        pendingRequests: 0,
-        canSend: false,
-        canInterrupt: false,
-        reason: '正在与桌面同步',
-      });
+      if (sub.cancelled || backend.view(threadId)?.synchronized) return;
+      const summary = thread;
+      const page = await backend.history.page(threadId);
+      if (sub.cancelled || backend.view(threadId)?.synchronized) return;
+      this.publish(
+        session,
+        {
+          ...summary,
+          messages: page.messages,
+          revision: -1,
+          owner: false,
+          synchronized: false,
+          activeTurnId: null,
+          runtimeStatus: 'notLoaded',
+          model: null,
+          pendingRequests: 0,
+          canSend: false,
+          canInterrupt: false,
+          reason: '正在与实例同步',
+        },
+        backendId,
+      );
     };
     sub.timer = setTimeout(() => {
       void preview().catch(() => {});
     }, 700);
     void (async () => {
-      sub.release = await this.deps.desktop.acquire(threadId);
+      sub.release = await backend.acquire(threadId);
       if (sub.cancelled) {
         sub.release();
         return;
       }
-      const view = await this.deps.desktop.waitForView(threadId);
+      const view = await backend.waitForView(threadId);
       if (sub.cancelled) return;
-      if (view) this.publish(session, view);
+      if (view) this.publish(session, view, backendId);
       else await preview();
-      for (const operation of this.deps.store.recent(session.device.id, threadId))
-        this.send(session, { type: 'event', event: { type: 'operation', operation } });
+      for (const operation of this.deps.store.recent(session.device.id, threadId, backendId))
+        this.send(session, { type: 'event', backendId, event: { type: 'operation', operation } });
     })().catch(() =>
-      this.send(session, { type: 'event', event: { type: 'error', message: '无法同步此会话' } }),
+      this.send(session, { type: 'event', backendId, event: { type: 'error', message: '无法同步此会话' } }),
     );
   }
   private unwatch(session: Session, threadId: string) {
@@ -366,9 +426,6 @@ export class HostService {
     this.relay?.stop();
     clearInterval(this.sweep);
     for (const session of this.sessions.values()) this.drop(session);
-    this.deps.desktop.off('thread', this.onThread);
-    this.deps.desktop.off('status', this.onStatus);
-    this.core.operations.off('operation', this.onOperation);
-    this.core.close();
+    for (const detach of this.detach) detach();
   }
 }

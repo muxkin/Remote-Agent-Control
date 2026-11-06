@@ -1,0 +1,105 @@
+import { createServer } from 'node:net';
+import { spawn } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { afterEach, expect, it } from 'vitest';
+import { platformRuntime, powershell } from '../src/server/platform.js';
+import { codexPaths, codexProfile } from '../src/server/connectors/codex-local.js';
+import { authorizeFile } from '../src/server/media.js';
+import { readStorageSettings } from '../src/server/config.js';
+const cleanup: (() => void)[] = [];
+afterEach(() =>
+  cleanup
+    .splice(0)
+    .reverse()
+    .forEach((fn) => fn()),
+);
+async function fixture(executable: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'pocket-ipc-'));
+  if (process.platform !== 'win32') chmodSync(dir, 0o700);
+  const path =
+    process.platform === 'win32' ? `\\\\.\\pipe\\pocket-test-${randomUUID()}` : join(dir, 'peer.sock');
+  const server = createServer((socket) => socket.on('data', (bytes) => socket.write(bytes)));
+  server.listen(path);
+  await once(server, 'listening');
+  if (process.platform !== 'win32') chmodSync(path, 0o600);
+  const child = spawn(process.platform === 'win32' ? 'python' : 'python3', [
+    '-I',
+    '-B',
+    resolve('src/server/peer-bridge.py'),
+    path,
+    executable,
+  ]);
+  cleanup.push(() => {
+    child.kill();
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return child;
+}
+it('validates the real native Socket/Pipe peer then relays bytes', async () => {
+  const child = await fixture(process.execPath);
+  let stderr = '';
+  child.stderr.on('data', (bytes) => (stderr += bytes));
+  await expect.poll(() => stderr).toContain('"ready"');
+  const data = once(child.stdout, 'data');
+  child.stdin.write(Buffer.from([0, 10, 255, 13, 1]));
+  expect((await data)[0]).toEqual(Buffer.from([0, 10, 255, 13, 1]));
+  child.stdin.end();
+});
+it('refuses the actual endpoint when its server executable is not the expected product', async () => {
+  const child = await fixture(join(tmpdir(), 'wrong-product-executable'));
+  let stderr = '';
+  child.stderr.on('data', (bytes) => (stderr += bytes));
+  await once(child, 'close');
+  expect(stderr).toContain('"error"');
+  expect(stderr).not.toContain('"ready"');
+});
+it('creates private storage using native permissions', () => {
+  const runtime = platformRuntime(),
+    dir = mkdtempSync(join(tmpdir(), 'pocket-private-'));
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  runtime.privateDirectory(dir);
+  const file = join(dir, 'secret');
+  writeFileSync(file, 'fixture');
+  runtime.privateFile(file);
+  if (process.platform === 'win32') {
+    const identities = powershell(
+      '(Get-Acl -LiteralPath $env:POCKET_PRIVATE_PATH).Access | ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}',
+      { ...process.env, POCKET_PRIVATE_PATH: file },
+    ).split(/\r?\n/);
+    expect(identities.every((id) => id === 'S-1-5-18' || id.startsWith('S-1-5-21-'))).toBe(true);
+  } else {
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  }
+});
+it('keeps unverified versions read-only and never describes other OS profiles as desktop-verified', () => {
+  expect(codexProfile('win32', 'unknown').controls).toBe(false);
+  expect(codexProfile('darwin', '26.1029.61003').experimental).toBe(true);
+  expect(codexPaths('linux', '/home/test/.codex').socketPath).toBe(
+    join('/home/test/.codex', 'ipc', 'ipc.sock'),
+  );
+});
+it('accepts native drive/space paths and file URLs without treating them as remote schemes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pocket-path-'));
+  cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
+  const file = join(directory, 'attachment with spaces.txt');
+  writeFileSync(file, 'fixture');
+  const url = pathToFileURL(file).href;
+  expect(
+    await authorizeFile(url, directory, [{ id: 'message', role: 'assistant', text: `[file](${url})` }]),
+  ).toBe(realpathSync(file));
+  const previous = process.env.POCKET_MEDIA_ADAPTER;
+  try {
+    process.env.POCKET_MEDIA_ADAPTER = join(directory, 'adapter with spaces.mjs');
+    expect(readStorageSettings('media')?.adapterPath).toBe(join(directory, 'adapter with spaces.mjs'));
+  } finally {
+    if (previous === undefined) delete process.env.POCKET_MEDIA_ADAPTER;
+    else process.env.POCKET_MEDIA_ADAPTER = previous;
+  }
+});

@@ -1,4 +1,4 @@
-import { type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { connectorFor, type VerifiedPipe } from './connectors/codex-local.js';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -7,16 +7,7 @@ import { FrameReader, encodeFrame } from './framing.js';
 import { DeliveryError } from './transport.js';
 import type { Config } from './config.js';
 import { platformRuntime } from './platform.js';
-export const creationBody = z
-  .object({
-    requestId: z.string().uuid(),
-    title: z.string().trim().max(160).optional(),
-    prompt: z.string().trim().min(1).max(16000),
-    projectId: z.string().min(1).max(200).optional(),
-    model: z.string().min(1).max(100).optional(),
-    thinking: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional(),
-  })
-  .strict();
+import { creationBody } from './control-schemas.js';
 export interface DesktopProject {
   id: string;
   desktopId?: string;
@@ -25,19 +16,14 @@ export interface DesktopProject {
 }
 class VerifiedAppPipe {
   closed = false;
-  private child: ChildProcessWithoutNullStreams;
+  private child: VerifiedPipe;
   private pending = new Map<
     string,
     { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
   >();
   ready: Promise<void>;
   constructor(config: Config, path: string) {
-    this.child = (config.platform ?? platformRuntime()).verifiedPipe(
-      config.bridgePath,
-      path,
-      config.desktopRoot,
-      true,
-    );
+    this.child = connectorFor(config).pipe(config, path, true);
     const reader = new FrameReader();
     this.child.stdout.on('data', (bytes) => {
       try {
@@ -129,10 +115,11 @@ export class DesktopAppTools {
     return this.connecting;
   }
   private async open() {
-    const directory = (this.config.platform ?? platformRuntime()).appToolsDirectory();
-    const files = await readdir(directory).catch(() => []);
-    for (const file of files.filter((f) => /^[a-f0-9-]{36}\.sock$/.test(f)).slice(0, 10)) {
-      const client = new VerifiedAppPipe(this.config, join(directory, file));
+    const files = await connectorFor(this.config).appTools(this.config);
+    if (files.length > 1)
+      throw new DeliveryError('检测到多个桌面应用工具端点，请配置 POCKET_CODEX_APP_TOOLS', true);
+    for (const file of files) {
+      const client = new VerifiedAppPipe(this.config, file);
       try {
         await client.ready;
         const catalog = await client.request('tools/list', { threadStartKind: 'all' }, 5000);
@@ -247,3 +234,5 @@ export class DesktopAppTools {
     this.projectCache = undefined;
   }
 }
+
+export { creationBody } from './control-schemas.js';

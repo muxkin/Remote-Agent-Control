@@ -1,3 +1,4 @@
+import { apiCall } from '../src/shared/rpc.js';
 import { expect, it } from 'vitest';
 import { readRoute, routeURL, parentRoute } from '../src/web/shell/routes';
 it('restores a host-scoped conversation and keeps browser back destinations explicit', () => {
@@ -14,4 +15,11 @@ it('handles one-use pairing fragments before ordinary routes without reflecting 
   });
   expect(routeURL({ page: 'pair' })).toBe('/?page=pair');
   expect(readRoute(new URL('https://app.invalid/?page=unknown'))).toEqual({ page: 'workbench' });
+});
+
+it('round-trips opaque native IDs and preserves the selected backend', () => {
+  const thread = 'native:id?# with spaces';
+  const route = { page: 'workbench' as const, backend: 'dsh-one', thread };
+  expect(readRoute(new URL(routeURL(route), 'https://example.com'))).toEqual(route);
+  expect(apiCall(`/threads/${encodeURIComponent(thread)}/history`).params.id).toBe(thread);
 });

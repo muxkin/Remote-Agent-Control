@@ -1,3 +1,4 @@
+import { LocalCodexConnector } from '../src/server/connectors/codex-local.js';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -551,7 +552,7 @@ it('resumes an owned but unloaded desktop instead of treating ownership as readi
   t.current = state({ threadRuntimeStatus: { type: 'notLoaded' }, resumeState: 'needs_resume' });
   t.revision++;
   t.snapshot();
-  const runtime = platformRuntime();
+  const runtime = new LocalCodexConnector();
   const open = vi.fn(async () => {
     setTimeout(() => {
       t.current = state({ threadRuntimeStatus: { type: 'idle' }, resumeState: 'resumed' });
@@ -560,7 +561,7 @@ it('resumes an owned but unloaded desktop instead of treating ownership as readi
     }, 50);
   });
   runtime.openThread = open;
-  c.platform = runtime;
+  c.codexConnector = runtime;
   expect(d.view(THREAD)?.owner).toBe(true);
   expect(d.view(THREAD)?.canSend).toBe(false);
   await d.openThread(THREAD);

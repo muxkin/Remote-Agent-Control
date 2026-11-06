@@ -1,5 +1,7 @@
 # 架构与协议
 
+通用后端、实例路由、DSH 和三系统连接的当前实现见 [后端架构与兼容配置](BACKENDS.md)。下文保留 Codex follower 及现有加密网络的协议细节。
+
 ## 组件
 
 - **Web 客户端**：复用 React/Vite 界面及共享输入框；SyncStore 管理本地缓存，DeviceSession 管理跨聊天复用的加密 WSS/WebRTC 连接。
@@ -8,7 +10,8 @@
 - **Desktop Adapter**：连接桌面 IPC，发现会话 owner，订阅状态并执行已适配的 follower 方法。
 - **History Index**：只读查询 Codex SQLite 元数据和 JSONL 历史，不接管桌面持久化。
 - **FileService / Media Service**：复用会话附件授权，增加分块直连、加密中继、密文存储回退及缺失块续传。
-- **PlatformRuntime / DesktopBackend**：隔离 Linux 路径、进程校验和启动方式，为 Windows/macOS 实际协议适配保留边界。
+- **AgentBackend / BackendRegistry**：封装产品语义，按实例路由历史、控制、目录与操作结果。
+- **PlatformRuntime / 连接器**：系统路径与私有权限独立于产品发现及通信；支持 POSIX Socket 和 Windows Pipe 验证基础。
 
 Gateway 不启动独立 Codex App Server，也不认领会话执行权。手机断开不终止桌面任务。
 
@@ -62,4 +65,4 @@ IPC 使用四字节 little-endian 长度前缀及 UTF-8 JSON。初始化获得 f
 - [Faryo](https://github.com/SongJunguo/faryo-codex-web-ui)：流式和完成态内容渲染。
 - [Codex Mobile](https://github.com/Ike-li/codex-mobile)：配对、审批与连接状态处理。
 
-本项目的传输适配围绕现有 Linux 桌面会话独立实现。
+现有 Linux 桌面协议经 CodexBackend 复用；DSH 使用原生 Web 客户端接口，独立维护上游生命周期。

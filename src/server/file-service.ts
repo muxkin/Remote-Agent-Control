@@ -1,3 +1,4 @@
+import { conversationId } from './control-schemas.js';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, writeFile, stat, readdir, rm, rename } from 'node:fs/promises';
 import { join, basename, extname } from 'node:path';
@@ -199,7 +200,7 @@ export class FileService {
     device: string,
     bytes?: Uint8Array,
   ): Promise<{ value: any; bytes?: Uint8Array }> {
-    const thread = uuid.parse(body.threadId),
+    const thread = conversationId.parse(body.threadId),
       t = await this.get(body.fileId, device, thread);
     if (action === 'missing')
       return {

@@ -1,18 +1,12 @@
 import { EventEmitter } from 'node:events';
-import { type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { connectorFor, type VerifiedPipe } from './connectors/codex-local.js';
 import { randomUUID } from 'node:crypto';
 import { encodeFrame, FrameReader } from './framing.js';
 import type { Config } from './config.js';
 import { platformRuntime } from './platform.js';
 
-export class DeliveryError extends Error {
-  constructor(
-    message: string,
-    public readonly notSent = false,
-  ) {
-    super(message);
-  }
-}
+import { DeliveryError } from './delivery-error.js';
+export { DeliveryError } from './delivery-error.js';
 export interface RpcTransport extends EventEmitter {
   connected: boolean;
   connect(): Promise<void>;
@@ -22,7 +16,7 @@ export interface RpcTransport extends EventEmitter {
 }
 export class DesktopTransport extends EventEmitter implements RpcTransport {
   connected = false;
-  private child: ChildProcessWithoutNullStreams | null = null;
+  private child: VerifiedPipe | null = null;
   private clientId = 'pocket-uninitialized';
   private pending = new Map<
     string,
@@ -33,11 +27,7 @@ export class DesktopTransport extends EventEmitter implements RpcTransport {
   }
   async connect(): Promise<void> {
     if (this.child) throw new Error('Transport already started');
-    const child = (this.config.platform ?? platformRuntime()).verifiedPipe(
-      this.config.bridgePath,
-      this.config.socketPath,
-      this.config.desktopRoot,
-    );
+    const child = connectorFor(this.config).pipe(this.config, this.config.socketPath);
     this.child = child;
     const reader = new FrameReader();
     let reason = 'Desktop IPC disconnected';

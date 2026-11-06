@@ -1,3 +1,4 @@
+import { DEFAULT_BACKEND, conversationKey } from '../shared/backends';
 import { CipherWire, SecureChannel, type Identity, type Lane } from '../shared/secure-channel';
 import { DeviceLink, type DeviceAuth } from '../shared/device-link';
 import { apiCall, RpcError, type RpcCall } from '../shared/rpc';
@@ -9,6 +10,13 @@ import type { GatewayStatus, ServerEvent, ThreadView } from '../shared/types';
 
 export class DeviceSession {
   readonly cache = new SyncStore();
+  backendId = DEFAULT_BACKEND;
+  private statuses = new Map<string, GatewayStatus>();
+  selectBackend(id: string) {
+    this.backendId = id;
+    this.status = this.statuses.get(id);
+    this.changed();
+  }
   host?: PairedHost;
   status?: GatewayStatus;
   private identity?: Identity;
@@ -46,11 +54,11 @@ export class DeviceSession {
   private changed() {
     this.events.dispatchEvent(new Event('change'));
   }
-  private key(suffix: string) {
-    return `${this.identity?.peerId}:${this.host?.hostId}:${suffix}`;
+  private key(suffix: string, backendId = this.backendId) {
+    return `${this.identity?.peerId}:${this.host?.hostId}:${backendId === DEFAULT_BACKEND ? '' : `backend:${backendId}:`}${suffix}`;
   }
-  contentKey(suffix: string) {
-    return this.key(suffix);
+  contentKey(suffix: string, backendId = this.backendId) {
+    return this.key(suffix, backendId);
   }
   async init() {
     this.identity ??= await this.cache.identity();
@@ -208,12 +216,14 @@ export class DeviceSession {
     this.links.get(key)?.close();
     this.links.set(key, link);
     void link.ready.then((ready) => {
-      if (generation !== this.generation) return;
-      this.status = ready.status;
+      if (generation !== this.generation || this.links.get(key) !== link || link.closed) return;
+      this.statuses.set(DEFAULT_BACKEND, ready.status);
+      if (this.backendId === DEFAULT_BACKEND) this.status = ready.status;
       this.changed();
     });
     link.onClose(() => {
-      if (this.links.get(key) === link) this.links.delete(key);
+      if (generation !== this.generation || this.links.get(key) !== link) return;
+      this.links.delete(key);
       this.changed();
       if (lane === 'control') {
         void this.resume();
@@ -233,9 +243,11 @@ export class DeviceSession {
     this.changed();
   }
   private link(lane: Lane = 'control') {
-    const link = this.links.get(`direct:${lane}`) ?? this.links.get(`relay:${lane}`);
-    if (!link || link.closed) throw new RpcError('电脑未连接，当前显示缓存内容', 0);
-    return link;
+    for (const path of ['direct', 'relay']) {
+      const link = this.links.get(`${path}:${lane}`);
+      if (link && !link.closed) return link;
+    }
+    throw new RpcError('电脑未连接，当前显示缓存内容', 0);
   }
   private async receive(event: Record<string, any>) {
     if (event.type === 'candidate') {
@@ -245,41 +257,48 @@ export class DeviceSession {
       this.closePeer();
       this.schedulePeer();
     } else if (event.type === 'sync') {
+      const backendId = event.backendId ?? DEFAULT_BACKEND,
+        key = conversationKey(backendId, event.threadId);
       const old =
-        this.views.get(event.threadId) ??
-        (await this.cache.get<CachedThread>(this.key(`thread:${event.threadId}`)));
+        this.views.get(key) ??
+        (await this.cache.get<CachedThread>(this.key(`thread:${event.threadId}`, backendId)));
       let next = old ?? null;
       for (const update of event.updates) {
         next = applySync(next, update);
         if (!next) break;
       }
       if (!next) {
-        this.views.delete(event.threadId);
+        this.views.delete(key);
         this.metrics.resyncs++;
-        await this.watchRemote(event.threadId, false);
+        await this.watchRemote(key, false);
         return;
       }
-      this.views.set(event.threadId, next);
-      this.cache.put(this.key(`thread:${event.threadId}`), next);
-      for (const fn of this.watchers.get(event.threadId) ?? []) fn({ type: 'thread', thread: next.view });
+      this.views.set(key, next);
+      this.cache.put(this.key(`thread:${event.threadId}`, backendId), next);
+      for (const fn of this.watchers.get(key) ?? []) fn({ type: 'thread', thread: next.view });
     } else if (event.type === 'event') {
+      const backendId = event.backendId ?? DEFAULT_BACKEND;
       if (event.event.type === 'status') {
-        this.status = event.event.status;
+        this.statuses.set(backendId, event.event.status);
+        if (backendId === this.backendId) this.status = event.event.status;
         this.changed();
       }
-      for (const listeners of this.watchers.values()) for (const fn of listeners) fn(event.event);
+      for (const [key, listeners] of this.watchers)
+        if (JSON.parse(key)[0] === backendId) for (const fn of listeners) fn(event.event);
     }
   }
-  subscribe(threadId: string, fn: (event: ServerEvent) => void) {
-    const listeners = this.watchers.get(threadId) ?? new Set();
+  subscribe(threadId: string, fn: (event: ServerEvent) => void, backendId = this.backendId) {
+    const key = conversationKey(backendId, threadId);
+    const listeners = this.watchers.get(key) ?? new Set();
     listeners.add(fn);
-    this.watchers.set(threadId, listeners);
+    this.watchers.set(key, listeners);
     void (async () => {
       const cached =
-        this.views.get(threadId) ?? (await this.cache.get<CachedThread>(this.key(`thread:${threadId}`)));
+        this.views.get(key) ??
+        (await this.cache.get<CachedThread>(this.key(`thread:${threadId}`, backendId)));
       if (!listeners.has(fn)) return;
       if (cached) {
-        this.views.set(threadId, cached);
+        this.views.set(key, cached);
         fn({
           type: 'thread',
           thread: {
@@ -291,41 +310,43 @@ export class DeviceSession {
           },
         });
       }
-      await this.watchRemote(threadId);
+      await this.watchRemote(key);
     })().catch(() => {});
     return () => {
       listeners.delete(fn);
       if (!listeners.size) {
-        this.watchers.delete(threadId);
-        clearTimeout(this.watchRetries.get(threadId));
-        this.watchRetries.delete(threadId);
+        this.watchers.delete(key);
+        clearTimeout(this.watchRetries.get(key));
+        this.watchRetries.delete(key);
         if (this.online)
           void this.link()
-            .request('unwatch', { threadId })
+            .request('unwatch', { threadId, backendId })
             .catch(() => {});
       }
     };
   }
-  private async watchRemote(threadId: string, useCache = true) {
-    if (!this.online || !this.watchers.has(threadId)) return;
-    clearTimeout(this.watchRetries.get(threadId));
-    this.watchRetries.delete(threadId);
+  private async watchRemote(key: string, useCache = true) {
+    const [backendId, threadId] = JSON.parse(key) as [string, string];
+    if (!this.online || !this.watchers.has(key)) return;
+    clearTimeout(this.watchRetries.get(key));
+    this.watchRetries.delete(key);
     const generation = this.generation;
     try {
       await this.link().request('watch', {
         threadId,
-        known: useCache ? checkpoint(this.views.get(threadId) ?? null) : undefined,
+        backendId,
+        known: useCache ? checkpoint(this.views.get(key) ?? null) : undefined,
       });
     } catch (error) {
-      if (generation !== this.generation || !this.watchers.has(threadId)) return;
+      if (generation !== this.generation || !this.watchers.has(key)) return;
       if (error instanceof RpcError && error.status >= 400 && error.status < 500 && error.status !== 429)
         return;
       // Retry subscription confirmation even when the transport itself stays connected.
       this.watchRetries.set(
-        threadId,
+        key,
         setTimeout(() => {
-          this.watchRetries.delete(threadId);
-          void this.watchRemote(threadId, useCache);
+          this.watchRetries.delete(key);
+          void this.watchRemote(key, useCache);
         }, 1500),
       );
     }
@@ -435,7 +456,14 @@ export class DeviceSession {
       }
     }
   }
-  async request(type: string, data: Record<string, unknown>, bytes?: Uint8Array, bulk = false) {
+  async request(
+    type: string,
+    data: Record<string, unknown>,
+    bytes?: Uint8Array,
+    bulk = false,
+    backendId = this.backendId,
+  ) {
+    if (type === 'file') data = { backendId, ...data };
     if (!this.online) await this.connect();
     if (bulk && !this.links.get('direct:bulk')) await this.relay('bulk');
     const link = this.link(bulk ? 'bulk' : 'control');
@@ -445,17 +473,21 @@ export class DeviceSession {
     ] += (bytes?.length ?? 0) + (result.bytes?.length ?? 0) + JSON.stringify(result.value ?? null).length;
     return result;
   }
-  async cachedThread(threadId: string): Promise<ThreadView | undefined> {
+  async cachedThread(threadId: string, backendId = this.backendId): Promise<ThreadView | undefined> {
     await this.init();
-    return (this.views.get(threadId) ?? (await this.cache.get<CachedThread>(this.key(`thread:${threadId}`))))
-      ?.view;
+    return (
+      this.views.get(conversationKey(backendId, threadId)) ??
+      (await this.cache.get<CachedThread>(this.key(`thread:${threadId}`, backendId)))
+    )?.view;
   }
-  async cached<T>(path: string): Promise<T | undefined> {
+  async cached<T>(path: string, backendId = this.backendId): Promise<T | undefined> {
     await this.init();
-    const entry = await this.cache.get<{ value: T }>(this.key(`rpc:${contentVersion(apiCall(path))}`));
+    const entry = await this.cache.get<{ value: T }>(
+      this.key(`rpc:${contentVersion(apiCall(path))}`, backendId),
+    );
     return entry?.value;
   }
-  async api<T>(path: string, init?: RequestInit): Promise<T> {
+  async api<T>(path: string, init?: RequestInit, backendId = this.backendId): Promise<T> {
     await this.init();
     if (!this.host) throw new RpcError('请先扫码配对', 401);
     const call = apiCall(
@@ -464,17 +496,20 @@ export class DeviceSession {
       typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     );
     if (call.method === 'session.read')
-      return { device: { id: this.host.deviceId }, status: this.status } as T;
+      return {
+        device: { id: this.host.deviceId },
+        status: this.statuses.get(backendId) ?? (backendId === this.backendId ? this.status : undefined),
+      } as T;
     const cacheable =
       (init?.method ?? 'GET') === 'GET' &&
       !['operation.read', 'operations.list', 'status.read'].includes(call.method);
-    const key = this.key(`rpc:${contentVersion(call)}`),
+    const key = this.key(`rpc:${contentVersion(call)}`, backendId),
       old = cacheable ? await this.cache.get<{ hash: string; value: T }>(key) : undefined;
     if (!this.online) {
       if (old) return old.value;
       await this.connect();
     }
-    const { value } = await this.request('rpc', { call, knownHash: old?.hash });
+    const { value } = await this.request('rpc', { call: { ...call, backendId }, knownHash: old?.hash });
     const result = value?.cacheHit && old ? old.value : value;
     if (cacheable) this.cache.put(key, { hash: contentVersion(result), value: result });
     return result;
@@ -487,9 +522,14 @@ export class DeviceSession {
     this.disconnect();
     await this.cache.forget(hostId);
     this.host = undefined;
-    localStorage.removeItem(`pocket-pending:${deviceId}`);
-    sessionStorage.removeItem(`pocket-drafts:${deviceId}`);
-    localStorage.removeItem(`pocket-drafts:${deviceId}`);
+    for (const storage of [localStorage, sessionStorage])
+      for (const key of Object.keys(storage))
+        if (
+          ['pocket-pending:', 'pocket-drafts:'].some(
+            (prefix) => key === `${prefix}${deviceId}` || key.startsWith(`${prefix}${deviceId}:`),
+          )
+        )
+          storage.removeItem(key);
     (await import('./file-client')).clearFileProviders();
   }
   disconnect() {
@@ -506,19 +546,27 @@ export class DeviceSession {
     this.watchers.clear();
     this.views.clear();
     this.status = undefined;
+    this.statuses.clear();
     this.sessionId = crypto.randomUUID();
+    this.changed();
   }
 }
 export const deviceSession = new DeviceSession();
 /** Compatibility bridge for existing UI components; all requests still use the fixed RPC contract. */
-export async function remoteFetch(path: string, init?: RequestInit): Promise<Response> {
+export async function remoteFetch(
+  path: string,
+  init?: RequestInit,
+  backendId = deviceSession.backendId,
+): Promise<Response> {
   if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   try {
     const match = /^\/api\/threads\/([^/]+)\/media$/.exec(path);
     const data =
       match && typeof init?.body === 'string'
-        ? await (await import('./file-client')).mediaContent(match[1], JSON.parse(init.body).path)
-        : await deviceSession.api(path, init);
+        ? await (
+            await import('./file-client')
+          ).mediaContent(decodeURIComponent(match[1]), JSON.parse(init.body).path, backendId)
+        : await deviceSession.api(path, init, backendId);
     return Response.json(data);
   } catch (error) {
     if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');

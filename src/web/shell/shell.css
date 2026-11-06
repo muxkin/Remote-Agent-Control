@@ -535,3 +535,35 @@ dialog.question-dialog[open] {
   bottom: calc(100% - var(--app-visible-top, 0px) - var(--app-visible-height, 100dvh));
   max-height: calc(var(--app-visible-height, 100dvh) - 16px);
 }
+
+.backend-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin: 24px 0;
+}
+.backend-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 16px;
+  background: var(--surface, #fff);
+  padding: 24px;
+  color: inherit;
+}
+.backend-card strong {
+  font-size: 22px;
+}
+.backend-card small {
+  opacity: 0.65;
+}
+
+.backend-page {
+  padding: 0 20px 28px;
+}
+.backend-page .page-header {
+  padding-left: 0;
+  padding-right: 0;
+}

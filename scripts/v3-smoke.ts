@@ -4,7 +4,10 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { config, host, store, native, close } from './v2-fixture.js';
 import { THREAD, TURN } from '../test/helpers.js';
 const report: any = { fixture: true, checks: {}, errors: [], physicalPhone: false };
-const browser = await chromium.launch({ channel: 'chrome' });
+const browser = await chromium.launch({
+  channel: 'chrome',
+  args: [`--unsafely-treat-insecure-origin-as-secure=${config.origin}`],
+});
 const context = await browser.newContext({
   viewport: { width: 390, height: 844 },
   isMobile: true,

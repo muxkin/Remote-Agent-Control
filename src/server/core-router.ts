@@ -1,3 +1,4 @@
+import { DeliveryError } from './delivery-error.js';
 import { z } from 'zod';
 import { RPC_ROUTES, RpcError, type RpcCall, type RpcMethod } from '../shared/rpc.js';
 import { ConflictError } from './store.js';
@@ -50,9 +51,10 @@ export class CoreRouter {
     } catch (error) {
       if (error instanceof RpcError) throw error;
       if (error instanceof z.ZodError) throw new RpcError('请求参数无效', 400);
+      if (error instanceof DeliveryError) throw new RpcError(error.message, error.notSent ? 409 : 503);
       if (error instanceof SelectionError) throw new RpcError(error.message, 400);
       if (error instanceof ConflictError) throw new RpcError(error.message, 409);
-      throw new RpcError('暂时无法读取桌面数据，请检查本机状态');
+      throw new RpcError('暂时无法读取原实例数据，请检查连接状态');
     }
   }
 }

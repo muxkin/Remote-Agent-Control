@@ -5,35 +5,7 @@ import { z } from 'zod';
 import type { ApprovalDecision, ConversationRequest, RequestResponse } from '../shared/types.js';
 import { DeliveryError } from './transport.js';
 
-export const responseBody = z
-  .object({
-    requestId: z.string().uuid(),
-    targetRequestId: z.string().min(1).max(500),
-    expectedTurnId: z.string().max(200).nullable(),
-    expectedFingerprint: z.string().length(64).optional(),
-    planDecision: z.enum(['implement', 'revise']).optional(),
-    feedback: z.string().trim().min(1).max(16000).optional(),
-    decision: z.enum(['accept', 'acceptForSession', 'decline', 'cancel']).optional(),
-    answers: z.record(z.string().max(200), z.array(z.string().max(16000)).max(20)).optional(),
-    permissionIds: z.array(z.string().max(200)).max(100).optional(),
-    scope: z.enum(['turn', 'session']).optional(),
-    action: z.enum(['accept', 'decline', 'cancel']).optional(),
-    content: z.record(z.string(), z.unknown()).nullable().optional(),
-  })
-  .strict()
-  .refine(
-    (value) =>
-      [value.decision, value.answers, value.permissionIds, value.action, value.planDecision].filter(
-        (value) => value !== undefined,
-      ).length === 1,
-  )
-  .refine((value) =>
-    value.planDecision
-      ? !!value.expectedFingerprint &&
-        (value.planDecision === 'revise' ? !!value.feedback : value.feedback === undefined)
-      : value.feedback === undefined,
-  );
-
+export { responseBody } from './control-schemas.js';
 export function requestFingerprint(request: any): string {
   return createHash('sha256')
     .update(JSON.stringify([request.id, request.method, request.params]))

@@ -23,17 +23,21 @@ export function MessageContent({
   }, [message.id, message.text, message.details]);
   const displayed = full ?? message;
   async function expand() {
+    const backendId = deviceSession.backendId;
     setBusy(true);
     try {
       const cached = await deviceSession.cached<{ message: Message }>(
-        `/threads/${threadId}/content?messageId=${encodeURIComponent(message.id)}`,
+        `/threads/${encodeURIComponent(threadId)}/content?messageId=${encodeURIComponent(message.id)}`,
+        backendId,
       );
       if (cached) {
         setFull(cached.message);
         setBusy(false);
       }
       const response = await remoteFetch(
-        `/api/threads/${threadId}/content?messageId=${encodeURIComponent(message.id)}`,
+        `/api/threads/${encodeURIComponent(threadId)}/content?messageId=${encodeURIComponent(message.id)}`,
+        undefined,
+        backendId,
       );
       const data = await response.json();
       if (!response.ok) throw Error(data.error ?? '无法获取完整内容');

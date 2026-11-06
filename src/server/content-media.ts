@@ -27,7 +27,9 @@ export function itemMedia(item: any): string[] {
   if (item.type === 'imageGeneration') {
     const value = item.savedPath ?? item.src ?? item.result;
     if (typeof value === 'string' && value)
-      sources.push(/^(data:|https?:|file:|\/)/.test(value) ? value : `data:image/png;base64,${value}`);
+      sources.push(
+        /^(data:|https?:|file:|[a-z]:[\\/]|\/)/i.test(value) ? value : `data:image/png;base64,${value}`,
+      );
   }
   const visit = (value: any, depth = 0) => {
     if (!value || typeof value !== 'object' || depth > 8) return;

@@ -104,6 +104,9 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
 }
 const localReference = (url: string) =>
   (url.startsWith('/') && !url.startsWith('//')) ||
+  /^[a-z]:[\\/]/i.test(url) ||
+  url.startsWith('dsh-image:') ||
+  url.startsWith('dsh-file:') ||
   url.startsWith('file:') ||
   url.startsWith('sandbox:') ||
   url.startsWith('./') ||
@@ -150,7 +153,7 @@ export function Media({ src, label, threadId }: { src: string; label: string; th
       return;
     }
     const controller = new AbortController();
-    void remoteFetch(`/api/threads/${threadId}/media`, {
+    void remoteFetch(`/api/threads/${encodeURIComponent(threadId)}/media`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: src }),
@@ -249,7 +252,7 @@ export function LocalLink({
   async function open() {
     const tab = window.open('about:blank', '_blank');
     try {
-      const response = await remoteFetch(`/api/threads/${threadId}/media`, {
+      const response = await remoteFetch(`/api/threads/${encodeURIComponent(threadId)}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: href }),

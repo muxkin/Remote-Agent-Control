@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { realpath, stat, mkdir, writeFile } from 'node:fs/promises';
@@ -77,13 +78,14 @@ function referencePath(reference: string): string {
   if (raw.startsWith('file:')) {
     const url = new URL(raw);
     if (url.hostname && url.hostname !== 'localhost') throw Error('Remote file authority is unsupported');
-    raw = url.pathname;
-  } else if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) throw Error('Not a local file reference');
+    return fileURLToPath(url);
+  } else if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^[a-z]:[\\/]/i.test(raw))
+    throw Error('Not a local file reference');
   return decodeURIComponent(raw);
 }
 /** The conversation's exact attachment links are the capability, not its working directory. */
 const markdown = unified().use(remarkParse);
-function attachmentLinks(text: string): string[] {
+export function attachmentLinks(text: string): string[] {
   const tree = markdown.parse(text);
   const definitions = new Map<string, string>();
   const links: string[] = [],

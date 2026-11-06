@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { DEFAULT_BACKEND } from '../shared/backends.js';
 import type { Operation, OperationState } from '../shared/types.js';
 import { platformRuntime, type PlatformRuntime } from './platform.js';
 
@@ -27,14 +28,33 @@ export class Store {
       const columns = this.db.prepare('PRAGMA table_info(operations)').all();
       if (!columns.some((c) => c.name === 'result_thread_id'))
         this.db.exec('ALTER TABLE operations ADD COLUMN result_thread_id TEXT');
+      if (!columns.some((c) => c.name === 'backend_id'))
+        this.db.exec("ALTER TABLE operations ADD COLUMN backend_id TEXT NOT NULL DEFAULT 'codex-local'");
+      const primary = this.db
+        .prepare('PRAGMA table_info(operations)')
+        .all()
+        .filter((c) => Number(c.pk) > 0);
+      if (primary.length === 1)
+        this.db.exec(`
+        ALTER TABLE operations RENAME TO operations_legacy;
+        CREATE TABLE operations (id TEXT NOT NULL, device_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+          kind TEXT NOT NULL, fingerprint TEXT NOT NULL, state TEXT NOT NULL, turn_id TEXT, error TEXT,
+          created INTEGER NOT NULL, updated INTEGER NOT NULL, result_thread_id TEXT,
+          backend_id TEXT NOT NULL DEFAULT 'codex-local', PRIMARY KEY(backend_id,id));
+        INSERT INTO operations SELECT id,device_id,thread_id,kind,fingerprint,state,turn_id,error,created,updated,result_thread_id,backend_id FROM operations_legacy;
+        DROP TABLE operations_legacy;
+        CREATE INDEX operations_by_conversation ON operations(backend_id,thread_id,device_id,created);
+      `);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
   }
-  resultThread(id: string, threadId: string) {
-    this.db.prepare('UPDATE operations SET result_thread_id=? WHERE id=?').run(threadId, id);
+  resultThread(id: string, threadId: string, backendId = DEFAULT_BACKEND) {
+    this.db
+      .prepare('UPDATE operations SET result_thread_id=? WHERE id=? AND backend_id=?')
+      .run(threadId, id, backendId);
   }
   mintPairing(): { code: string; expiresAt: number } {
     const code = randomBytes(24).toString('base64url');
@@ -117,7 +137,7 @@ export class Store {
   recover(): void {
     this.db
       .prepare(
-        "UPDATE operations SET state='uncertain',error='网关重启，等待桌面状态确认',updated=? WHERE state='dispatching'",
+        "UPDATE operations SET state='uncertain',error='网关重启，等待原实例状态确认',updated=? WHERE state='dispatching'",
       )
       .run(Date.now());
     this.db
@@ -132,16 +152,19 @@ export class Store {
     thread: string,
     kind: Operation['kind'],
     input: string,
+    backendId = DEFAULT_BACKEND,
   ): { operation: Operation; fresh: boolean } {
     const fingerprint = hash(JSON.stringify([thread, kind, input]));
     const now = Date.now();
     const inserted = this.db
       .prepare(
-        'INSERT OR IGNORE INTO operations (id,device_id,thread_id,kind,fingerprint,state,created,updated) VALUES (?,?,?,?,?,?,?,?)',
+        'INSERT OR IGNORE INTO operations (id,device_id,thread_id,kind,fingerprint,state,created,updated,backend_id) VALUES (?,?,?,?,?,?,?,?,?)',
       )
-      .run(id, device, thread, kind, fingerprint, 'received', now, now);
-    const row = this.db.prepare('SELECT * FROM operations WHERE id=?').get(id) as any;
-    if (row.device_id !== device || row.fingerprint !== fingerprint)
+      .run(id, device, thread, kind, fingerprint, 'received', now, now, backendId);
+    const row = this.db
+      .prepare('SELECT * FROM operations WHERE id=? AND backend_id=?')
+      .get(id, backendId) as any;
+    if (row.backend_id !== backendId || row.device_id !== device || row.fingerprint !== fingerprint)
       throw new ConflictError('请求 ID 已用于其他操作');
     return { operation: this.toOperation(row), fresh: inserted.changes === 1 };
   }
@@ -150,34 +173,44 @@ export class Store {
     state: OperationState,
     turnId: string | null = null,
     error: string | null = null,
+    backendId = DEFAULT_BACKEND,
   ): Operation {
     this.db
-      .prepare('UPDATE operations SET state=?,turn_id=COALESCE(?,turn_id),error=?,updated=? WHERE id=?')
-      .run(state, turnId, error, Date.now(), id);
-    return this.operation(id)!;
+      .prepare(
+        'UPDATE operations SET state=?,turn_id=COALESCE(?,turn_id),error=?,updated=? WHERE id=? AND backend_id=?',
+      )
+      .run(state, turnId, error, Date.now(), id, backendId);
+    return this.operation(id, undefined, backendId)!;
   }
-  operation(id: string, device?: string): Operation | null {
-    const row = this.db.prepare('SELECT * FROM operations WHERE id=?').get(id) as any;
-    return row && (!device || row.device_id === device) ? this.toOperation(row) : null;
+  operation(id: string, device?: string, backendId = DEFAULT_BACKEND): Operation | null {
+    const row = this.db
+      .prepare('SELECT * FROM operations WHERE id=? AND backend_id=?')
+      .get(id, backendId) as any;
+    return row && (!device || row.device_id === device) && (!backendId || row.backend_id === backendId)
+      ? this.toOperation(row)
+      : null;
   }
-  pending(thread: string): Operation[] {
+  pending(thread: string, backendId = DEFAULT_BACKEND): Operation[] {
     return this.db
       .prepare(
-        "SELECT * FROM operations WHERE thread_id=? AND state IN ('dispatching','accepted','uncertain')",
+        "SELECT * FROM operations WHERE thread_id=? AND backend_id=? AND state IN ('dispatching','accepted','uncertain')",
       )
-      .all(thread)
+      .all(thread, backendId)
       .map((x) => this.toOperation(x));
   }
-  recent(device: string, thread: string): Operation[] {
+  recent(device: string, thread: string, backendId = DEFAULT_BACKEND): Operation[] {
     return this.db
-      .prepare('SELECT * FROM operations WHERE device_id=? AND thread_id=? ORDER BY created DESC LIMIT 20')
-      .all(device, thread)
+      .prepare(
+        'SELECT * FROM operations WHERE device_id=? AND thread_id=? AND backend_id=? ORDER BY created DESC LIMIT 20',
+      )
+      .all(device, thread, backendId)
       .map((x) => this.toOperation(x));
   }
   private toOperation(r: any): Operation {
     return {
       id: r.id,
       threadId: r.thread_id,
+      backendId: r.backend_id,
       kind: r.kind,
       state: r.state,
       ...(r.result_thread_id ? { resultThreadId: r.result_thread_id } : {}),

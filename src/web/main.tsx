@@ -6,6 +6,11 @@ import './mobile-design.css';
 import './mobile-v2.css';
 import './shell/shell.css';
 
+const icon = document.createElement('link');
+icon.rel = 'icon';
+icon.type = 'image/svg+xml';
+icon.href = '/icon.svg';
+document.head.append(icon);
 const manifest = document.createElement('link');
 manifest.rel = 'manifest';
 manifest.href = '/manifest.webmanifest';

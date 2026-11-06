@@ -4,7 +4,7 @@
 
 ## 配置与安装
 
-电脑和云端均使用 Node.js 24+。电脑额外需要现有 Linux 桌面应用和 Python IPC 校验桥。运行 `npm ci`、`npm run build`。公共资源默认同源，不需要 CDN。启用 CDN 时，生产构建和运行的 `POCKET_ASSET_BASE` 必须一致；先发布 CDN 哈希文件，再切换 HTML。
+电脑和云端均使用 Node.js 24+。电脑额外需要现有 Linux 桌面应用和 Python IPC 校验桥。运行 `npm ci`、`npm run build`。公共资源默认同源，不需要 CDN。启用 CDN 时，生产构建和运行的 `POCKET_ASSET_BASE` 必须一致；先发布 CDN 哈希文件，再切换 HTML。手机仅从当前公网入口的 `/version.json` 检查网页更新，首次进入、回到前台及前台每分钟检查一次；该文件和 HTML 必须禁止永久缓存。电脑网关只报告 Agent 状态，不发布网页构建号，本机构建不会触发手机更新。
 
 电脑 `local/gateway.env`：
 

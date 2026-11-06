@@ -1,10 +1,10 @@
 # Codex Pocket Remote
 
-**离开电脑，也能在手机上继续使用 Codex。**
+**离开电脑，也能在手机上继续使用已有的 Codex 与 DSH 会话。**
 
 Codex Pocket Remote 是一个可自行部署的移动端网页客户端，连接电脑上正在运行的 Codex 桌面会话。你可以查看执行进度、发送指令、回答问题、处理审批，以及接收代码、图片和文件。手机与电脑使用同一条会话，可以随时切换。
 
-目前实现 Linux 桌面主机适配，手机采用浏览器/PWA。v2 已通过 Linux Chrome 移动视口测试；Android/iOS 真机验收进度见 [验证记录](docs/VALIDATION_V2.md)。本项目为非官方项目，仍处于早期开发阶段。
+已抽取通用后端，新增已有 DSH Web 实例接入和多实例工作台；macOS / Windows 连接基础及 DSH 适配标为实验性，手机采用浏览器/PWA。配置、能力限制和实际验证边界见 [通用后端与兼容矩阵](docs/BACKENDS.md)。v2 已通过 Linux Chrome 移动视口测试；Android/iOS 真机验收进度见 [验证记录](docs/VALIDATION_V2.md)。本项目为非官方项目，仍处于早期开发阶段。
 
 ## 界面预览
 
@@ -22,18 +22,18 @@ Codex Pocket Remote 是一个可自行部署的移动端网页客户端，连接
 - **传递文件**：选择或粘贴图片与附件，打开会话中的文件，保留原文件内容。
 - **加密连接与缓存**：设备级 WebRTC 直连、加密 WSS 回退、手机历史缓存，以及可选的附件密文存储；公共资源默认同源托管，CDN 可选。
 
-界面按“消息 / 工作台 / 我的”组织。PC 使用左侧导航；手机在一级页面显示底部导航，进入对话后隐藏。工作台提供当前 Codex 功能，即时聊天连接器尚待接入。设置仅在“清理缓存”旁显示缓存用量，不提供容量预算或自动淘汰。详见 [前端模块说明](docs/FRONTEND_V3.md) 和 [更新记录](CHANGELOG.md)。
+界面按“消息 / 工作台 / 我的”组织。PC 使用左侧导航；手机在一级页面显示底部导航，进入对话后隐藏。工作台分别提供 Codex 与 DSH 实例入口，共用聊天组件；即时聊天连接器尚待接入。设置仅在“清理缓存”旁显示缓存用量，不提供容量预算或自动淘汰。详见 [前端模块说明](docs/FRONTEND_V3.md) 和 [更新记录](CHANGELOG.md)。
 
 ## 开始使用
 
 ### 环境要求
 
-| 组件     | 要求                                           |
-| -------- | ---------------------------------------------- |
-| 桌面主机 | Linux，运行并登录支持 Codex 的 ChatGPT Desktop |
-| 运行环境 | Node.js 24+、Python 3                          |
-| 手机     | Android Chrome                                 |
-| 远程访问 | 可用的 HTTPS 域名与反向代理入口                |
+| 组件       | 要求                                                        |
+| ---------- | ----------------------------------------------------------- |
+| Agent 主机 | 已运行 Codex 桌面或 DSH Web；macOS / Windows 连接器为实验性 |
+| 运行环境   | Node.js 24+、Python 3                                       |
+| 手机       | Android Chrome                                              |
+| 远程访问   | 可用的 HTTPS 域名与反向代理入口                             |
 
 当前兼容基线为 `chatgpt-bin 26.1029.61003-1`，内置 Codex `0.166.0-alpha.6`。其他桌面版本需要重新适配；未知版本下默认关闭控制功能。
 
@@ -103,7 +103,9 @@ flowchart LR
     Phone[手机 PWA 与本地缓存] <-->|Noise 加密 WSS| Cloud[云端注册、信令与中继]
     Gateway[电脑 Gateway] <-->|主动建立 WSS| Cloud
     Phone <-->|Noise 加密 WebRTC| Gateway
-    Gateway --> Adapter[桌面与平台适配接口] --> Desktop[现有 Linux 桌面会话]
+    Gateway --> Registry[BackendRegistry]
+    Registry --> Codex[CodexBackend + 系统连接器] --> Desktop[已有 Codex 桌面]
+    Registry --> DSH[DshBackend + Web 连接器] --> Web[已有 DSH Web 实例]
     Phone <-.->|附件密文回退| Storage[私有对象存储]
     Gateway <-.->|附件密文回退| Storage
     CDN[同源公共静态资源 / 可选 CDN] --> Phone

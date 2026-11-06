@@ -1,3 +1,7 @@
+import { BackendRegistry } from '../src/server/backends/registry.js';
+import { CodexBackend } from '../src/server/backends/codex.js';
+import { DshBackend } from '../src/server/backends/dsh.js';
+import { DshFixtureConnection } from './dsh-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
@@ -36,7 +40,7 @@ async function port() {
   await new Promise<void>((r) => socket.close(() => r()));
   return n;
 }
-async function setup(direct = false) {
+async function setup(direct = false, multiple = false) {
   const config = fixtureConfig();
   historyFixture(config);
   config.port = await port();
@@ -57,20 +61,30 @@ async function setup(direct = false) {
   });
   await relay.app.listen({ host: '127.0.0.1', port: config.port });
   const pairing = store.mintPairing();
-  const host = new HostService(config, identity, { store, desktop, history });
+  const registry = new BackendRegistry().register(new CodexBackend(config, desktop, history));
+  if (multiple)
+    for (const id of ['dsh-one', 'dsh-two'])
+      registry.register(
+        new DshBackend(
+          { id, name: id, url: 'http://127.0.0.1:7777', token: 'fixture', version: '0.2.1-rc.5' },
+          join(config.stateDir, id),
+          false,
+          new DshFixtureConnection(THREAD, id),
+        ),
+      );
+  const host = new HostService(config, identity, { store, registry });
   cleanups.push(async () => {
     host.stop();
-    desktop.stop();
-    history.close();
+    registry.stop();
     store.close();
     await relay.app.close();
     rmSync(config.desktopRoot, { recursive: true, force: true });
   });
-  await desktop.start();
+  await registry.start();
   host.start();
   // Wait for host registration without opening any unencrypted business API.
   await new Promise((resolve) => setTimeout(resolve, 80));
-  return { config, store, host, pairing, relay, transport, identity, desktop };
+  return { config, store, host, pairing, relay, transport, identity, desktop, registry };
 }
 
 /** Real RTC transport; the business suite below is identical for both paths. */
@@ -136,12 +150,33 @@ async function connect(
   return DeviceLink.authenticate(channel, auth);
 }
 describe('device relay and shared business dispatcher', () => {
+  it('notifies a late subscriber when a just-authenticated link has closed', async () => {
+    const { config, pairing, identity } = await setup();
+    const link = await connect(
+      config.origin,
+      identity.peerId,
+      await createIdentity(),
+      createHash('sha256').update(pairing.code).digest('hex'),
+      { type: 'pair', protocol: 2, sessionId: crypto.randomUUID(), code: pairing.code, name: 'late-close' },
+    );
+    link.close();
+    await vi.waitFor(() => expect(link.closed).toBe(true));
+    const closed = vi.fn();
+    link.onClose(closed);
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+  });
+
   it.each(['relay', 'direct', 'switch'] as const)(
     'preserves the complete business contract over %s',
     async (path) => {
       const { config, pairing, identity, desktop, store, host } = await setup(path !== 'relay');
       // Native behavior is covered by desktop/operations suites; here verify validation,
       // arguments, durable receipts and deduplication through each encrypted network path.
+      const realStatus = desktop.status.bind(desktop);
+      vi.spyOn(desktop, 'status').mockImplementation(() => {
+        const status = realStatus();
+        return { ...status, capabilities: { ...status.capabilities, newThread: true } };
+      });
       const control = vi.spyOn(desktop, 'control').mockResolvedValue(TURN);
       const projects = vi.spyOn(desktop, 'projects').mockResolvedValue([]);
       writeFileSync(
@@ -164,6 +199,8 @@ describe('device relay and shared business dispatcher', () => {
       const direct =
         path === 'relay' ? undefined : await directLink(relay, phone, identity.peerId, sessionId);
       let active = direct?.link ?? relay;
+      expect((await active.ready).status).not.toHaveProperty('webBuildId');
+      expect(await active.rpc(apiCall('/status'))).not.toHaveProperty('webBuildId');
       expect((await active.rpc<any>(apiCall('/projects'))).total).toBe(1);
       expect((await active.rpc<any>(apiCall(`/threads/${THREAD}/history`))).thread.id).toBe(THREAD);
       expect((await active.rpc<any>(apiCall(`/threads/${THREAD}/projects`))).projects).toEqual([]);
@@ -351,4 +388,67 @@ describe('device relay and shared business dispatcher', () => {
     ).rejects.toMatchObject({ status: 409 });
     second.close();
   });
+});
+
+it('routes Codex and two DSH instances with colliding native conversation and request IDs over Noise', async () => {
+  const { config, identity, pairing, host, store, registry } = await setup(false, true);
+  const phone = await createIdentity();
+  const link = await connect(
+    config.origin,
+    identity.peerId,
+    phone,
+    createHash('sha256').update(pairing.code).digest('hex'),
+    { type: 'pair', protocol: 2, sessionId: crypto.randomUUID(), code: pairing.code, name: 'phone' },
+  );
+  const events: any[] = [];
+  link.onEvent((event) => events.push(event));
+  const backends = await link.rpc<any>(apiCall('/backends'));
+  expect(backends.backends.map((b: any) => b.id)).toEqual(['codex-local', 'dsh-one', 'dsh-two']);
+  expect(JSON.stringify(backends)).not.toContain('fixture');
+  expect(JSON.stringify(backends)).not.toContain('127.0.0.1');
+  const id = crypto.randomUUID();
+  for (const backendId of ['codex-local', 'dsh-one', 'dsh-two']) {
+    const listed = await link.rpc<any>({ ...apiCall('/threads'), backendId });
+    expect(listed.threads[0].id).toBe(THREAD);
+    await link.request('watch', { threadId: THREAD, backendId });
+    await expect.poll(() => events.some((e) => e.type === 'sync' && e.backendId === backendId)).toBe(true);
+    if (backendId !== 'codex-local') {
+      const call = {
+        ...apiCall(`/threads/${THREAD}/messages`, 'POST', { requestId: id, text: backendId }),
+        backendId,
+      };
+      await link.rpc(call);
+      await link.rpc(call);
+      await expect.poll(() => store.operation(id, undefined, backendId)?.state).toBe('accepted');
+    }
+  }
+  expect(store.operation(id)).toBeNull();
+  const original = await link.rpc<any>(apiCall(`/threads/${THREAD}`));
+  expect(original.thread.title).toBe('测试会话');
+  const first = await link.rpc<any>({ ...apiCall(`/threads/${THREAD}/history`), backendId: 'dsh-one' });
+  expect(first.thread.title).toBe('dsh-one');
+  const second = await link.rpc<any>({ ...apiCall(`/threads/${THREAD}/history`), backendId: 'dsh-two' });
+  expect(second.thread.title).toBe('dsh-two');
+  const checksum = createHash('sha256').update('x').digest('hex');
+  const spec = { name: 'isolated.txt', size: 1, sha256: checksum, hashes: [checksum] };
+  const file = await link.rpc<any>({
+    ...apiCall(`/threads/${THREAD}/uploads`, 'POST', spec),
+    backendId: 'dsh-one',
+  });
+  await expect(
+    link.request('file', { action: 'missing', threadId: THREAD, fileId: file.id, backendId: 'dsh-two' }),
+  ).rejects.toThrow();
+  await expect(link.rpc({ ...apiCall('/threads'), backendId: 'missing' })).rejects.toMatchObject({
+    status: 404,
+  });
+  expect(host.metrics.connections).toBe(1);
+  registry.get('dsh-one').stop();
+  const status = await link.rpc<any>(apiCall('/backends'));
+  expect(status.backends.find((b: any) => b.id === 'dsh-one').connected).toBe(false);
+  expect(status.backends.find((b: any) => b.id === 'dsh-two').connected).toBe(true);
+  expect((await link.rpc<any>({ ...apiCall('/threads'), backendId: 'dsh-two' })).threads[0].title).toBe(
+    'dsh-two',
+  );
+  expect((await link.rpc<any>(apiCall('/threads'))).threads[0].title).toBe('测试会话');
+  link.close();
 });

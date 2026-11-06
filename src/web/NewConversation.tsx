@@ -58,14 +58,14 @@ export function NewConversation({
     setError('');
     let disposed = false;
     void deviceSession
-      .cached<{ projects: { id: string; name: string }[] }>(`/threads/${anchor}/projects`)
+      .cached<{ projects: { id: string; name: string }[] }>(`/threads/${encodeURIComponent(anchor)}/projects`)
       .then((cached) => {
         if (cached && !disposed) {
           setProjects(cached.projects);
           setLoading(false);
         }
       });
-    remoteFetch(`/api/threads/${anchor}/projects`, { signal: controller.signal })
+    remoteFetch(`/api/threads/${encodeURIComponent(anchor)}/projects`, { signal: controller.signal })
       .then(async (response) => {
         const data = await response.json();
         if (!response.ok) throw Error();
@@ -130,7 +130,7 @@ export function NewConversation({
           <summary>自定义标题（可选）</summary>
           <input
             aria-label="新会话标题（可选）"
-            placeholder="留空，由 Codex 自动命名"
+            placeholder="留空，由 Agent 自动命名"
             value={title}
             maxLength={160}
             disabled={disabled}
@@ -178,12 +178,12 @@ export function NewConversation({
               onClick={() => setModelOpen(true)}
               disabled={disabled}
             >
-              <span>{settings ? modelLabel(settings.model) : '桌面默认模型'}</span>
+              <span>{settings ? modelLabel(settings.model) : '实例默认模型'}</span>
               <Icon name="down" size={16} />
             </button>
           }
         />
-        <p className="hint creation-capabilities">首条消息支持文字；附件、技能与计划模式可在创建后使用。</p>
+        <p className="hint creation-capabilities">首条消息支持文字；附件与技能可在创建后使用。</p>
       </section>
       {modelOpen && (
         <ThreadTools
@@ -212,7 +212,7 @@ export function NewConversation({
                 setModelOpen(false);
               }}
             >
-              使用桌面默认模型
+              使用实例默认模型
             </button>
           )}
         </ThreadTools>

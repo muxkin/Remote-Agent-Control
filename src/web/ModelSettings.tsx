@@ -1,7 +1,7 @@
 import { remoteFetch } from './device-session';
 import { useEffect, useState } from 'react';
 import type { ThreadView, Operation } from '../shared/types';
-import type { ModelChoice } from '../server/models';
+import type { ModelChoice } from '../shared/backends';
 import { Icon } from './Icon';
 export type ModelUpdate = {
   model: string;
@@ -14,6 +14,7 @@ export type ModelUpdate = {
   expectedMode: 'default' | 'plan';
 };
 const effortNames: Record<string, string> = {
+  default: '原生默认',
   minimal: '最低',
   low: '低',
   medium: '中',
@@ -23,6 +24,14 @@ const effortNames: Record<string, string> = {
   ultra: '极高',
 };
 export function modelLabel(name: string | null) {
+  if (name?.startsWith('[')) {
+    try {
+      const pair = JSON.parse(name);
+      if (Array.isArray(pair) && pair.length === 2) return pair.join(' / ');
+    } catch {
+      /* Native label below. */
+    }
+  }
   return (
     name
       ?.replace(/^gpt-(\d+(?:\.\d+)?)-?/i, 'GPT-$1 ')
@@ -73,7 +82,7 @@ export function ModelSettings({
     const controller = new AbortController();
     remoteFetch('/api/models', { signal: controller.signal })
       .then(async (r) => {
-        if (!r.ok) throw Error('暂时无法读取桌面模型目录');
+        if (!r.ok) throw Error('暂时无法读取原实例模型目录');
         setModels((await r.json()).models);
       })
       .catch((e) => {
@@ -221,7 +230,7 @@ export function ModelSettings({
         )}
         {loading && (
           <p role="status" className="hint">
-            正在读取桌面模型…
+            正在读取原实例模型…
           </p>
         )}
         {error && (
@@ -231,7 +240,7 @@ export function ModelSettings({
         )}
         {stale && !submitted && (
           <p role="status" className="hint">
-            桌面设置已更新，请关闭并重新打开面板。
+            原实例设置已更新，请关闭并重新打开面板。
           </p>
         )}
       </div>

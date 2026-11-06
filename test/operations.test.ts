@@ -1,8 +1,9 @@
+import { codexObservations } from '../src/server/backends/codex-observations.js';
 import { EventEmitter } from 'node:events';
 import { rmSync } from 'node:fs';
 import { afterEach, expect, it } from 'vitest';
 import { Operations } from '../src/server/operations.js';
-import type { DesktopAdapter } from '../src/server/desktop.js';
+import type { AgentBackend } from '../src/server/backends/types.js';
 import { Store } from '../src/server/store.js';
 import { fixtureConfig, THREAD, state } from './helpers.js';
 const cleanup: (() => void)[] = [];
@@ -11,7 +12,7 @@ it.each(['accepted', 'rejected'])(
   'reconciles an unconfirmed async reply only from %s native steering',
   (status) => {
     const config = fixtureConfig();
-    const desktop = new EventEmitter() as DesktopAdapter;
+    const desktop = new EventEmitter() as AgentBackend;
     const store = new Store(config.stateDir);
     const operations = new Operations(desktop, store);
     cleanup.push(() => {
@@ -27,7 +28,7 @@ it.each(['accepted', 'rejected'])(
       clientUserMessageId: 'reply-id',
       status,
     });
-    desktop.emit('state', THREAD, snapshot);
+    desktop.emit('observations', THREAD, codexObservations(snapshot));
     expect(store.operation('reply-id')?.state).toBe(status === 'accepted' ? 'completed' : 'uncertain');
   },
 );

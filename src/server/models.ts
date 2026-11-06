@@ -1,13 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { SelectionError } from './selection-error.js';
-export interface ModelChoice {
-  id: string;
-  name: string;
-  efforts: string[];
-  defaultEffort: string | null;
-  speeds: { id: string; name: string; description: string }[];
-}
+import type { ModelChoice } from '../shared/backends.js';
+export type { ModelChoice } from '../shared/backends.js';
 export async function modelCatalog(
   codexHome: string,
 ): Promise<{ models: ModelChoice[]; fetchedAt: string | null; source: string }> {

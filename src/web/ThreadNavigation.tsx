@@ -15,6 +15,9 @@ export function ThreadNavigation({
   onMore,
   onCreate,
   pendingQuestions,
+  agentName = 'Codex',
+  onWorkbench,
+  canCreate,
 }: {
   projects: { projects: ProjectSummary[]; total: number; ungrouped: number };
   threads: ThreadSummary[];
@@ -27,6 +30,9 @@ export function ThreadNavigation({
   onMore: () => void;
   onCreate: (projectId?: string) => void;
   pendingQuestions: number;
+  agentName?: string;
+  onWorkbench?: () => void;
+  canCreate?: boolean;
 }) {
   const [tab, setTab] = useState<'recent' | 'projects'>('recent'),
     [query, setQuery] = useState(''),
@@ -139,7 +145,9 @@ export function ThreadNavigation({
         <span className="thread-label">
           <strong>{t.title || '未命名会话'}</strong>
           <small>
-            {grouped ? t.cwd.split('/').filter(Boolean).at(-1) || '本地会话' : (t.projectName ?? '未分类')}
+            {grouped
+              ? t.cwd.split(/[\\/]/).filter(Boolean).at(-1) || '本地会话'
+              : (t.projectName ?? '未分类')}
           </small>
         </span>
         <span className="thread-meta">
@@ -152,10 +160,18 @@ export function ThreadNavigation({
   return (
     <aside className="sidebar">
       <header className="sidebar-head">
-        <h1>工作台</h1>
+        <h1>
+          {onWorkbench ? (
+            <button className="text-button" onClick={onWorkbench}>
+              ← 工作台
+            </button>
+          ) : (
+            '工作台'
+          )}
+        </h1>
         <button
           className="new-thread-button"
-          disabled={!threads.length && !selected}
+          disabled={canCreate === undefined ? !threads.length && !selected : !canCreate}
           onClick={() => onCreate([...expanded].find((id) => id !== 'none'))}
         >
           <Icon name="plusCircle" size={20} />
@@ -167,7 +183,7 @@ export function ThreadNavigation({
           <Icon name="monitor" size={25} />
         </span>
         <div>
-          <strong>Codex</strong>
+          <strong>{agentName}</strong>
           <span>项目与任务</span>
         </div>
       </div>

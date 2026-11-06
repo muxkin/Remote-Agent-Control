@@ -1,3 +1,7 @@
+import { BackendRegistry } from '../src/server/backends/registry.js';
+import { CodexBackend } from '../src/server/backends/codex.js';
+import { DshBackend } from '../src/server/backends/dsh.js';
+import { DshFixtureConnection } from '../test/dsh-fixture.js';
 /** Isolated automated test fixture; never uses the user's real desktop/state. */
 import { resolve, join } from 'node:path';
 import { writeFile, rm } from 'node:fs/promises';
@@ -12,8 +16,9 @@ import { createIdentity } from '../src/shared/secure-channel.js';
 const config = fixtureConfig();
 historyFixture(config);
 config.port = Number(process.env.TEST_PORT ?? 18917);
-config.origin = `http://127.0.0.1:${config.port}`;
-config.webRoot = resolve('.implementation/web');
+const bind = process.env.TEST_BIND ?? '127.0.0.1';
+config.origin = `http://${bind}:${config.port}`;
+config.webRoot = resolve(process.env.TEST_WEB_ROOT ?? 'dist/web');
 config.p2p = { enabled: process.env.TEST_DIRECT !== '0', stunUrls: [] };
 config.relay = { origin: config.origin, enrollment: 'fixture-only-enrollment-secret-32-chars' };
 const file = join(config.desktopRoot, 'fixture.txt');
@@ -52,8 +57,19 @@ db.close();
 const store = new Store(config.stateDir),
   history = new HistoryIndex(config.codexHome),
   desktop = new DesktopAdapter(config, () => native);
+const registry = new BackendRegistry().register(new CodexBackend(config, desktop, history));
+if (process.env.TEST_DSH === '1')
+  for (const id of ['dsh-one', 'dsh-two'])
+    registry.register(
+      new DshBackend(
+        { id, name: id, url: 'http://127.0.0.1:7777', token: 'fixture', version: '0.2.1-rc.5' },
+        join(config.stateDir, id),
+        false,
+        new DshFixtureConnection(THREAD, id),
+      ),
+    );
 const identity = await createIdentity(),
-  host = new HostService(config, identity, { store, history, desktop });
+  host = new HostService(config, identity, { store, registry });
 const relay = await buildRelay({
   origin: config.origin,
   webRoot: config.webRoot,
@@ -61,8 +77,8 @@ const relay = await buildRelay({
   enrollmentSecret: config.relay.enrollment,
   uploadOrigins: [],
 });
-await relay.app.listen({ port: config.port, host: '127.0.0.1' });
-await desktop.start();
+await relay.app.listen({ port: config.port, host: bind });
+await registry.start();
 host.start();
 const pair = store.mintPairing();
 await writeFile(
@@ -77,14 +93,13 @@ await writeFile(
   }),
   { mode: 0o600 },
 );
-console.log(`Isolated v2 fixture ready on loopback:${config.port}`);
+console.log(`Isolated v2 fixture ready on ${bind}:${config.port}`);
 let closing = false;
 async function close() {
   if (closing) return;
   closing = true;
   host.stop();
-  desktop.stop();
-  history.close();
+  registry.stop();
   store.close();
   await relay.app.close();
   await rm(config.desktopRoot, { recursive: true, force: true });
@@ -92,4 +107,4 @@ async function close() {
 process.on('SIGTERM', () => void close());
 process.on('SIGINT', () => void close());
 
-export { config, host, relay, store, native, close, file };
+export { config, host, relay, store, native, close, file, registry };

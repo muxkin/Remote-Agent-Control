@@ -1,39 +1,47 @@
 import { readConfig } from '../src/server/config.js';
-import { DesktopAdapter } from '../src/server/desktop.js';
-import { HistoryIndex } from '../src/server/history.js';
-const config = readConfig();
-const desktop = new DesktopAdapter({ ...config, readOnly: true });
-const history = new HistoryIndex(config.codexHome);
+import { builtinBackends } from '../src/server/backends/builtins.js';
+import { DEFAULT_BACKEND } from '../src/shared/backends.js';
+const config = { ...readConfig(), readOnly: true };
+const registry = builtinBackends(config);
+const args = process.argv.slice(2),
+  backendFlag = args.indexOf('--backend');
+const backendId = backendFlag >= 0 ? args.splice(backendFlag, 2)[1] : DEFAULT_BACKEND;
 try {
-  await desktop.start();
-  console.log(JSON.stringify({ status: desktop.status() }, null, 2));
-  const listed = history.list();
-  console.log(
-    JSON.stringify({ indexedThreadsOnFirstPage: listed.threads.length, hasMore: !!listed.nextCursor }),
-  );
-  const id = process.argv[2];
-  if (id) {
-    const release = await desktop.acquire(id);
-    const view = await desktop.waitForView(id);
+  await registry.start();
+  // Public descriptors only: never log addresses, tokens, cookies, prompts or native responses.
+  console.log(JSON.stringify({ backends: registry.list() }, null, 2));
+  const backend = registry.get(backendId),
+    id = args[0];
+  try {
+    const listed = await backend.history.list(undefined, 30);
     console.log(
       JSON.stringify({
-        threadId: id,
-        owner: !!view?.owner,
-        synchronized: view?.synchronized,
-        revision: view?.revision,
-        messageCount: view?.messages.length,
-        roles: view?.messages.reduce(
-          (a, m) => ((a[m.role] = (a[m.role] ?? 0) + 1), a),
-          {} as Record<string, number>,
-        ),
-        runtimeStatus: view?.runtimeStatus,
-        activeTurnId: view?.activeTurnId,
-        reason: view?.reason ?? desktop.observation(id).reason,
+        backendId,
+        indexedThreadsOnFirstPage: listed.threads.length,
+        hasMore: !!listed.nextCursor,
       }),
     );
-    release();
+  } catch {
+    console.log(JSON.stringify({ backendId, historyAvailable: false }));
+  }
+  if (id) {
+    const release = await backend.acquire(id);
+    try {
+      const view = await backend.waitForView(id);
+      console.log(
+        JSON.stringify({
+          backendId,
+          owner: !!view?.owner,
+          synchronized: !!view?.synchronized,
+          revision: view?.revision,
+          messageCount: view?.messages.length,
+          runtimeStatus: view?.runtimeStatus,
+        }),
+      );
+    } finally {
+      release();
+    }
   }
 } finally {
-  desktop.stop();
-  history.close();
+  registry.stop();
 }

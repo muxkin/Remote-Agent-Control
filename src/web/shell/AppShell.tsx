@@ -1,3 +1,5 @@
+import { BackendChooser } from '../BackendChooser';
+import { DEFAULT_BACKEND } from '../../shared/backends';
 import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
@@ -5,7 +7,7 @@ import { Icon } from '../Icon';
 import { modules, workspaceTools } from './modules';
 import { parentRoute, readRoute, routeURL, type AppRoute } from './routes';
 import { useAppViewport } from './viewport';
-const CodexWorkspace = lazy(workspaceTools[0].load);
+const AgentWorkspace = lazy(workspaceTools[0].load);
 const MePages = lazy(() => import('./MePages'));
 
 export function PageHeader({
@@ -76,6 +78,14 @@ export function AppShell() {
   useEffect(() => {
     if (ready && route.page !== 'pair') void deviceSession.init().catch(() => {});
   }, [route.page, ready]);
+  const chooser = route.page === 'workbench' && !route.backend && !route.thread && !!deviceSession.host;
+  const workspaceRoute = route.page === 'workbench' || route.page === 'pair' ? route : workbenchRoute.current;
+  const backendId = workspaceRoute.backend ?? DEFAULT_BACKEND;
+  const [selectedBackend, setSelectedBackend] = useState(deviceSession.backendId);
+  useEffect(() => {
+    deviceSession.selectBackend(backendId);
+    setSelectedBackend(backendId);
+  }, [backendId]);
   const activeWorkspace = route.page === 'workbench' || route.page === 'pair';
   const root = ['messages', 'workbench', 'me'].includes(route.page) && !route.thread;
   const showNavigation = route.page !== 'pair';
@@ -86,7 +96,8 @@ export function AppShell() {
       className={`app-shell ${root ? 'shell-root' : 'shell-detail'} ${showNavigation ? 'has-navigation' : ''}`}
     >
       <div className="shell-content">
-        {ready && workspaceVisited && (
+        {chooser && <BackendChooser navigate={navigate} />}
+        {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
           <section className="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
             <Suspense
               fallback={
@@ -95,7 +106,12 @@ export function AppShell() {
                 </div>
               }
             >
-              <CodexWorkspace key={hostId || 'unpaired'} route={route} navigate={navigate} onBusy={setBusy} />
+              <AgentWorkspace
+                key={`${hostId || 'unpaired'}:${backendId}`}
+                route={workspaceRoute}
+                navigate={navigate}
+                onBusy={setBusy}
+              />
             </Suspense>
           </section>
         )}

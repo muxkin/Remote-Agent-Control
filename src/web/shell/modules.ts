@@ -37,5 +37,6 @@ export interface MessagingConnector {
 }
 export const messagingConnectors: readonly MessagingConnector[] = [];
 export const workspaceTools = [
+  { id: 'dsh', name: 'DSH', load: () => import('../CodexWorkspace') },
   { id: 'codex', name: 'Codex', load: () => import('../CodexWorkspace') },
 ] as const;

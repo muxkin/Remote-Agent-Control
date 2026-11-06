@@ -1,6 +1,6 @@
+import { CodexBackend } from '../../src/server/backends/codex.js';
 // V1 regression fixture only. Not included in any production entrypoint.
 import { loadStorage } from '../../src/server/object-storage.js';
-import { webBuildReader } from '../../src/server/web-build.js';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import staticFiles from '@fastify/static';
@@ -87,10 +87,8 @@ export async function buildGateway(
   deps: { store: Store; desktop: DesktopAdapter; history: HistoryIndex },
 ) {
   const { store, desktop, history } = deps;
-  const readWebBuild = webBuildReader(config.webRoot);
-  const withBuild = (status = desktop.status()) => ({ ...status, webBuildId: readWebBuild() });
   const app = Fastify({ logger: false, bodyLimit: 70000, trustProxy: false });
-  const operations = new Operations(desktop, store);
+  const operations = new Operations(new CodexBackend(config, desktop, history), store);
   const media = new MediaService(config);
   const uploads = new Uploads(config);
   const skills = new SkillCatalog(config.codexHome);
@@ -181,7 +179,7 @@ export async function buildGateway(
   });
   app.get('/api/session', async (req) => ({
     device: store.authenticate(req.cookies[COOKIE]),
-    status: withBuild(),
+    status: desktop.status(),
   }));
   app.post('/api/logout', async (req, reply) => {
     const device = store.authenticate(req.cookies[COOKIE])!;
@@ -189,7 +187,7 @@ export async function buildGateway(
     reply.clearCookie(COOKIE, { path: '/' });
     return { ok: true };
   });
-  app.get('/api/status', async () => withBuild());
+  app.get('/api/status', async () => desktop.status());
   app.get('/api/threads/:id/content', async (req, reply) => {
     const { id } = params.parse(req.params);
     const { messageId } = z
@@ -523,11 +521,8 @@ export async function buildGateway(
         }
         return output.send(encoded);
       };
-      let sentWebBuild: string | null = null;
       const onStatus = (status: any) => {
-        const current = withBuild(status);
-        sentWebBuild = current.webBuildId;
-        return send({ type: 'status', status: current });
+        return send({ type: 'status', status });
       };
       const publish = (view: ThreadView) => {
         if (view.synchronized) clearTimeout(previewTimer);
@@ -561,7 +556,6 @@ export async function buildGateway(
         stunUrls: config.p2p?.stunUrls ?? [],
       });
       const ping = setInterval(() => {
-        if (readWebBuild() !== sentWebBuild) onStatus(desktop.status());
         if (!store.authenticate(token)) {
           ws.close(1008, 'Device revoked or expired');
           return;

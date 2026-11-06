@@ -1,3 +1,5 @@
+import { connectorFor, codexProfile } from './connectors/codex-local.js';
+import { codexObservations } from './backends/codex-observations.js';
 import { nativeUserInput } from './user-content.js';
 import { SkillCatalog } from './skills.js';
 import { PluginCatalog } from './plugins.js';
@@ -80,7 +82,8 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
     this.pluginCatalog = new PluginCatalog(config.codexHome);
   }
   status(): GatewayStatus {
-    const supportedVersion = this.version === SUPPORTED_VERSION;
+    const profile = codexProfile((this.config.platform ?? platformRuntime()).id, this.version);
+    const supportedVersion = profile.controls;
     const writesEnabled = this.ready && supportedVersion && !this.config.readOnly;
     return {
       connected: this.ready,
@@ -98,7 +101,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
         questions: writesEnabled,
         approvals: writesEnabled,
         permissionRequests: writesEnabled ? 'experimental' : false,
-        openThread: writesEnabled,
+        openThread: writesEnabled && profile.nativeOpen,
         elicitationForms: writesEnabled ? 'experimental' : false,
         newThread: writesEnabled && this.appTools.available,
         queue: writesEnabled,
@@ -112,9 +115,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   private async connect(): Promise<void> {
     if (this.stopped) return;
     try {
-      this.version = await (this.config.platform ?? platformRuntime()).desktopVersion(
-        this.config.desktopRoot,
-      );
+      this.version = await connectorFor(this.config).version(this.config.desktopRoot);
       const transport = this.factory();
       this.transport = transport;
       transport.on('broadcast', (message) => this.receive(message));
@@ -137,7 +138,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
         return;
       }
       this.ready = true;
-      if (this.version === SUPPORTED_VERSION) await this.appTools.probe().catch(() => {});
+      if (this.status().supportedVersion) await this.appTools.probe().catch(() => {});
       this.lastError = null;
       this.attempt = 0;
       this.emit('status', this.status());
@@ -333,7 +334,10 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   private emitView(id: string): void {
     const view = this.view(id);
     if (view) this.emit('thread', view);
-    if (this.subscriptions.get(id)?.synced) this.emit('state', id, this.subscriptions.get(id)!.state);
+    if (this.subscriptions.get(id)?.synced) {
+      this.emit('state', id, this.subscriptions.get(id)!.state);
+      this.emit('observations', id, codexObservations(this.subscriptions.get(id)!.state));
+    }
   }
   async waitForView(id: string, timeout = 3000): Promise<ThreadView | null> {
     const current = this.view(id);
@@ -369,7 +373,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
     };
     if (ready()) return;
     try {
-      await (this.config.platform ?? platformRuntime()).openThread(id);
+      await connectorFor(this.config).openThread(id);
     } catch {
       throw new DeliveryError('本机桌面链接处理程序不可用', true);
     }

@@ -1,5 +1,6 @@
 /** The only public business methods. Paths are a UI compatibility mapping, not an HTTP proxy. */
 export const RPC_ROUTES = {
+  'backends.list': ['GET', '/api/backends'],
   'session.read': ['GET', '/api/session'],
   'device.revoke': ['POST', '/api/logout'],
   'status.read': ['GET', '/api/status'],
@@ -30,6 +31,7 @@ export const RPC_ROUTES = {
 } as const;
 export type RpcMethod = keyof typeof RPC_ROUTES;
 export interface RpcCall {
+  backendId?: string;
   method: RpcMethod;
   params: Record<string, string>;
   query: Record<string, string>;

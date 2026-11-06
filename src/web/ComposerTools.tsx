@@ -2,6 +2,7 @@ import { useEffect, useRef, useId } from 'react';
 import { Icon } from './Icon';
 
 export function ComposerTools({
+  product = 'codex',
   plan,
   disabled,
   running,
@@ -9,6 +10,7 @@ export function ComposerTools({
   onSkills,
   onPlugins,
 }: {
+  product?: 'codex' | 'dsh';
   plan: boolean;
   disabled: boolean;
   running: boolean;
@@ -76,38 +78,42 @@ export function ComposerTools({
             <Icon name="close" size={20} />
           </button>
         </header>
-        <p className="tools-section-label">模式</p>
-        <button
-          type="button"
-          className="tool-menu-row mode-row"
-          role="switch"
-          aria-checked={plan}
-          aria-label="计划模式"
-          disabled={disabled}
-          onClick={() => onMode(plan ? 'default' : 'plan')}
-        >
-          <Icon name="plan" />
-          <span>
-            <strong>计划模式</strong>
-            <small>{running ? '应用到下一轮，当前任务不变' : '先讨论方案，再开始实施'}</small>
-          </span>
-          <span className={`mode-switch ${plan ? 'on' : ''}`} />
-        </button>
-        <button
-          type="button"
-          className="tool-menu-row"
-          onClick={() => {
-            ref.current?.hidePopover();
-            onPlugins();
-          }}
-        >
-          <Icon name="puzzle" />
-          <span>
-            <strong>插件</strong>
-            <small>浏览与选择插件</small>
-          </span>
-          <Icon name="chevron" size={18} />
-        </button>
+        {product === 'codex' && (
+          <>
+            <p className="tools-section-label">模式</p>
+            <button
+              type="button"
+              className="tool-menu-row mode-row"
+              role="switch"
+              aria-checked={plan}
+              aria-label="计划模式"
+              disabled={disabled}
+              onClick={() => onMode(plan ? 'default' : 'plan')}
+            >
+              <Icon name="plan" />
+              <span>
+                <strong>计划模式</strong>
+                <small>{running ? '应用到下一轮，当前任务不变' : '先讨论方案，再开始实施'}</small>
+              </span>
+              <span className={`mode-switch ${plan ? 'on' : ''}`} />
+            </button>
+            <button
+              type="button"
+              className="tool-menu-row"
+              onClick={() => {
+                ref.current?.hidePopover();
+                onPlugins();
+              }}
+            >
+              <Icon name="puzzle" />
+              <span>
+                <strong>插件</strong>
+                <small>浏览与选择插件</small>
+              </span>
+              <Icon name="chevron" size={18} />
+            </button>
+          </>
+        )}
         <button
           type="button"
           className="tool-menu-row"

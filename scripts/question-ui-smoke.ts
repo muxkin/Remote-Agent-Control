@@ -97,10 +97,11 @@ async function run(webRoot: string) {
     await dialog.getByLabel('收起答题面板').click();
     const beforeUpdate = await page.evaluate(() => performance.timeOrigin);
     await writeFile(join(c.webRoot, 'version.json'), JSON.stringify({ buildId: 'ffffffffffffffff' }));
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     const updateNotice = page.getByRole('status', { name: '网页更新提示' });
     await expect(updateNotice).toBeVisible({ timeout: 20000 });
     await expect(updateNotice.getByRole('button', { name: '刷新页面' })).toBeDisabled();
-    report.checks.versionPushWithoutReload =
+    report.checks.publicVersionCheckWithoutReload =
       beforeUpdate === (await page.evaluate(() => performance.timeOrigin));
     report.checks.answerDraftBlocksReload = true;
 

@@ -85,6 +85,12 @@ export class DeviceLink {
     return () => this.listeners.delete(listener);
   }
   onClose(listener: () => void) {
+    if (this.closed) {
+      // Authentication can finish immediately before the transport closes.
+      queueMicrotask(() => {
+        if (this.closedListeners.has(listener)) listener();
+      });
+    }
     this.closedListeners.add(listener);
     return () => this.closedListeners.delete(listener);
   }

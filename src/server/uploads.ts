@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, stat, rename } from 'node:fs/promises';
-import { join, basename } from 'node:path';
+import { join, basename, sep } from 'node:path';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -139,9 +139,9 @@ export class Uploads {
     }
   }
   async reference(path: string, device: string, thread: string): Promise<string | null> {
-    const prefix = this.directory() + '/';
+    const prefix = this.directory() + sep;
     if (!path.startsWith(prefix)) return null;
-    const id = path.slice(prefix.length).split('/')[0];
+    const id = path.slice(prefix.length).split(sep)[0];
     try {
       const u = await this.get(id, device, thread);
       return u.complete && u.file === path ? u.file : null;

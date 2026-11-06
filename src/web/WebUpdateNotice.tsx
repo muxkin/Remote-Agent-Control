@@ -1,19 +1,8 @@
 import { useEffect, useState } from 'react';
 
 const build = typeof __POCKET_WEB_BUILD_ID__ === 'string' ? __POCKET_WEB_BUILD_ID__ : '';
-export function WebUpdateNotice({
-  serverBuild,
-  hasDraft,
-  busy,
-}: {
-  serverBuild?: string | null;
-  hasDraft: boolean;
-  busy: boolean;
-}) {
-  const [latest, setLatest] = useState(serverBuild);
-  useEffect(() => {
-    if (serverBuild) setLatest(serverBuild);
-  }, [serverBuild]);
+export function WebUpdateNotice({ hasDraft, busy }: { hasDraft: boolean; busy: boolean }) {
+  const [latest, setLatest] = useState<string>();
   useEffect(() => {
     let stopped = false;
     let checking = false;
@@ -35,12 +24,15 @@ export function WebUpdateNotice({
         checking = false;
       }
     };
-    // Active chats receive versions over their existing WebSocket; lists recheck when returning.
+    // Only the origin serving this page knows which web release is actually published.
+    void check();
+    const timer = window.setInterval(check, 60_000);
     window.addEventListener('focus', check);
     window.addEventListener('online', check);
     document.addEventListener('visibilitychange', check);
     return () => {
       stopped = true;
+      window.clearInterval(timer);
       window.removeEventListener('focus', check);
       window.removeEventListener('online', check);
       document.removeEventListener('visibilitychange', check);
