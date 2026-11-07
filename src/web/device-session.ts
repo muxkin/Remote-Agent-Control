@@ -62,8 +62,12 @@ export class DeviceSession {
     return this.key(suffix, backendId);
   }
   async init() {
-    this.identity ??= await this.cache.identity();
-    this.host ??= await this.cache.active();
+    const generation = this.generation;
+    const host = this.host ?? (await this.cache.active());
+    const identity = this.identity ?? host?.identity ?? (await this.cache.identity());
+    if (generation !== this.generation) return;
+    this.host = host;
+    this.identity = identity;
     if (this.host && !this.running) {
       this.running = true;
       void this.connect();
@@ -98,7 +102,10 @@ export class DeviceSession {
   };
   async pair(hostId: string, code: string, name: string) {
     this.disconnect();
-    this.identity ??= await this.cache.identity();
+    const generation = this.generation;
+    const identity = this.identity ?? (await this.cache.identity());
+    if (generation !== this.generation) throw Error('账号或电脑已切换，请重新配对');
+    this.identity = identity;
     const ticket = bytesToHex(sha256(new TextEncoder().encode(code)));
     const link = await this.openRelay(hostId, ticket, 'control', {
       type: 'pair',
@@ -108,14 +115,23 @@ export class DeviceSession {
       name,
     });
     const ready = await link.ready;
+    if (generation !== this.generation) {
+      link.close();
+      throw Error('账号或电脑已切换，请重新配对');
+    }
     this.host = {
       hostId,
       name: ready.hostName,
       deviceId: ready.device.id,
       ticket: ready.ticket,
       phoneId: this.identity.peerId,
+      identity: this.identity,
     };
     await this.cache.saveHost(this.host);
+    if (generation !== this.generation) {
+      link.close();
+      throw Error('账号或电脑已切换');
+    }
     this.running = true;
     this.attach(link, 'relay', 'control');
     this.schedulePeer();
@@ -125,10 +141,27 @@ export class DeviceSession {
   }
   async select(host: PairedHost) {
     this.disconnect();
+    const generation = this.generation;
+    const identity = host.identity ?? (await this.cache.identity());
+    if (generation !== this.generation) return;
     this.host = host;
-    await this.cache.saveHost(host);
+    this.identity = identity;
+    await this.cache.saveHost(host, false);
+    if (generation !== this.generation) return;
     this.running = true;
     await this.connect();
+  }
+  resetAccount(scope: string) {
+    this.disconnect();
+    this.host = undefined;
+    this.identity = undefined;
+    this.status = undefined;
+    this.statuses.clear();
+    this.views.clear();
+    this.watchers.clear();
+    this.cache.scope = scope;
+    void import('./file-client').then((module) => module.clearFileProviders());
+    this.changed();
   }
   private auth(): DeviceAuth {
     return { type: 'authenticate', protocol: 2, sessionId: this.sessionId };

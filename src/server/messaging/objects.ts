@@ -108,7 +108,7 @@ export class MessagingObjects {
   async resource(
     kind: MediaKind,
     id: string,
-    file: { name: string; mime: string; size: number; data: Buffer },
+    file: { name: string; mime: string; size: number; data: Buffer; encrypted?: string },
     url: string,
     full: boolean,
   ) {
@@ -117,6 +117,7 @@ export class MessagingObjects {
     const preview = !!object && !full && file.mime.startsWith('image/');
     if (object && !this.adapter) throw Error('Private object storage is unavailable');
     return {
+      ...(file.encrypted ? { encrypted: file.encrypted } : {}),
       url: object
         ? await signedDownload(this.adapter!, preview ? object.previewKey : object.key, expiresAt)
         : url,

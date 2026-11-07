@@ -57,7 +57,7 @@ test('recovers an acknowledged update whose response was lost and stops after ca
 test('passes pure image messages as ACP image blocks and explicitly flags unsupported voice', async () => {
   const folder = await mkdtemp(path.join(tmpdir(), 'im-bot-test-'));
   try {
-    const response = () => Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
+    const response = () => Promise.resolve({ data: new Uint8Array([1, 2, 3]) });
     const blocks = await incomingContent({
       message: {
         conversationId: 'c',
@@ -66,10 +66,9 @@ test('passes pure image messages as ACP image blocks and explicitly flags unsupp
         ],
       },
       origin: 'https://im.test',
-      token: 'fixture',
       inbox: folder,
       capabilities: { image: true },
-      fetcher: response,
+      download: response,
     });
     assert.equal(blocks[1].type, 'image');
     assert.equal(blocks[1].data, 'AQID');
@@ -81,10 +80,9 @@ test('passes pure image messages as ACP image blocks and explicitly flags unsupp
         ],
       },
       origin: 'https://im.test',
-      token: 'fixture',
       inbox: folder,
       capabilities: { audio: false },
-      fetcher: response,
+      download: response,
     });
     assert.match(voice[1].text, /不支持音频/);
     await assert.rejects(
@@ -93,7 +91,7 @@ test('passes pure image messages as ACP image blocks and explicitly flags unsupp
         origin: 'https://im.test',
         inbox: folder,
         capabilities: {},
-        fetcher: response,
+        download: response,
       }),
     );
   } finally {

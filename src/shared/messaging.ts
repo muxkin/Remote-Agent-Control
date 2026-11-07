@@ -5,6 +5,7 @@ export interface ChatUser {
   /** Qualified UID scoped to the account service, e.g. 10000000@chat.example.com. */
   address: string;
   kind: 'human' | 'agent';
+  encrypted?: boolean;
   avatarUrl?: string;
   username: string;
   displayName: string;
@@ -15,6 +16,7 @@ export interface ChatContact extends ChatUser {
   blocked: boolean;
 }
 export interface ChatAttachment {
+  encrypted?: string;
   id: string;
   name: string;
   size: number;
@@ -50,6 +52,7 @@ export interface ChatInteraction extends InteractionInput {
   respondedAt?: number;
 }
 export interface ChatSticker {
+  encrypted?: string;
   id: string;
   name: string;
   mime: string;
@@ -57,6 +60,8 @@ export interface ChatSticker {
   url: string;
 }
 export interface ChatMessage {
+  /** Decrypted client-only retry contract, never a plaintext server field. */
+  initialRequest?: { text: string; options: SendMessageOptions };
   id: string;
   sequence: number;
   conversationId: string;

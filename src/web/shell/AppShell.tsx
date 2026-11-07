@@ -12,6 +12,9 @@ const AgentWorkspace = lazy(workspaceTools[0].load);
 const MessagingPages = lazy(() => import('../messaging/MessagingPages'));
 import MePages from './MePages';
 import { PageBoundary, PageLoading } from './PageBoundary';
+import { AccountSecurity } from '../messaging/AccountSecurity';
+import { onAccountSessionChange, syncAccountHosts, accountSyncError } from '../account-session';
+import { messaging } from '../messaging/context';
 
 export { PageHeader } from './PageHeader';
 
@@ -20,7 +23,7 @@ export function AppShell() {
   useEffect(() => {
     window.dispatchEvent(new Event('pocket:app-ready'));
   }, []);
-  const { conversations } = useMessaging();
+  const { conversations, loading: accountLoading, user } = useMessaging();
   const unread = conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
   const [route, setRoute] = useState(() => readRoute(new URL(location.href)));
   const workbenchRoute = useRef<AppRoute>(route.page === 'workbench' ? route : { page: 'workbench' });
@@ -57,13 +60,30 @@ export function AppShell() {
     setHostId(deviceSession.host?.hostId ?? '');
   }, []);
   useEffect(() => {
+    if (accountLoading) return;
+    onAccountSessionChange(() => void refreshHosts());
     void deviceSession
       .init()
       .then(refreshHosts)
       .catch(() => setError('无法读取本机配对，请检查浏览器存储权限'))
       .finally(() => setReady(true));
     return deviceSession.onChange(() => void refreshHosts().catch(() => {}));
-  }, [refreshHosts]);
+  }, [refreshHosts, accountLoading, user?.id]);
+  useEffect(() => {
+    if (!user?.encrypted) return;
+    const sync = () => {
+      if (document.visibilityState !== 'hidden')
+        void syncAccountHosts(messaging.account)
+          .then(refreshHosts)
+          .catch(() => {});
+    };
+    const timer = setInterval(sync, 30000);
+    window.addEventListener('focus', sync);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', sync);
+    };
+  }, [user?.id, user?.encrypted, refreshHosts]);
   useEffect(() => {
     if (ready && route.page !== 'pair') void deviceSession.init().catch(() => {});
   }, [route.page, ready]);
@@ -88,101 +108,108 @@ export function AppShell() {
         : 'me';
   const back = () => navigate(parentRoute(route));
   return (
-    <div
-      className={`app-shell ${root ? 'shell-root' : 'shell-detail'} ${showNavigation ? 'has-navigation' : ''}`}
-    >
-      <div className="shell-content">
-        {chooser && <BackendChooser navigate={navigate} />}
-        {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
-          <section className="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
-            <Suspense fallback={<PageLoading label="正在打开工作台…" />}>
+    <AccountSecurity>
+      <div
+        className={`app-shell ${root ? 'shell-root' : 'shell-detail'} ${showNavigation ? 'has-navigation' : ''}`}
+      >
+        <div className="shell-content">
+          {chooser && <BackendChooser navigate={navigate} />}
+          {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
+            <section className="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
+              <Suspense fallback={<PageLoading label="正在打开工作台…" />}>
+                <PageBoundary
+                  page="workbench"
+                  backLabel="返回消息"
+                  onBack={() => navigate({ page: 'messages' })}
+                >
+                  <AgentWorkspace
+                    key={`${hostId || 'unpaired'}:${backendId}`}
+                    route={workspaceRoute}
+                    navigate={navigate}
+                    onBusy={setBusy}
+                  />
+                </PageBoundary>
+              </Suspense>
+            </section>
+          )}
+          {activeWorkspace && !ready && (
+            <div className="page-loading" role="status">
+              正在打开…
+            </div>
+          )}
+          {route.page === 'pair' && (
+            <button className="pair-back icon-button" aria-label="返回" onClick={back}>
+              <Icon name="back" />
+            </button>
+          )}
+          {messagingPage && (
+            <Suspense fallback={<PageLoading />}>
               <PageBoundary
-                page="workbench"
-                backLabel="返回消息"
-                onBack={() => navigate({ page: 'messages' })}
+                key={route.page}
+                page={route.page}
+                backLabel="返回工作台"
+                onBack={() => navigate({ page: 'workbench' })}
               >
-                <AgentWorkspace
-                  key={`${hostId || 'unpaired'}:${backendId}`}
-                  route={workspaceRoute}
+                <MessagingPages route={route} navigate={navigate} />
+              </PageBoundary>
+            </Suspense>
+          )}
+          {!activeWorkspace && !messagingPage && (
+            <Suspense fallback={<PageLoading />}>
+              <PageBoundary
+                key={route.page}
+                page={route.page}
+                backLabel="返回工作台"
+                onBack={() => navigate({ page: 'workbench' })}
+              >
+                <MePages
+                  route={route}
                   navigate={navigate}
-                  onBusy={setBusy}
+                  back={back}
+                  hosts={hosts}
+                  hostId={hostId}
+                  busy={busy}
+                  refreshHosts={refreshHosts}
                 />
               </PageBoundary>
             </Suspense>
-          </section>
-        )}
-        {activeWorkspace && !ready && (
-          <div className="page-loading" role="status">
-            正在打开…
-          </div>
-        )}
-        {route.page === 'pair' && (
-          <button className="pair-back icon-button" aria-label="返回" onClick={back}>
-            <Icon name="back" />
-          </button>
-        )}
-        {messagingPage && (
-          <Suspense fallback={<PageLoading />}>
-            <PageBoundary
-              key={route.page}
-              page={route.page}
-              backLabel="返回工作台"
-              onBack={() => navigate({ page: 'workbench' })}
-            >
-              <MessagingPages route={route} navigate={navigate} />
-            </PageBoundary>
-          </Suspense>
-        )}
-        {!activeWorkspace && !messagingPage && (
-          <Suspense fallback={<PageLoading />}>
-            <PageBoundary
-              key={route.page}
-              page={route.page}
-              backLabel="返回工作台"
-              onBack={() => navigate({ page: 'workbench' })}
-            >
-              <MePages
-                route={route}
-                navigate={navigate}
-                back={back}
-                hosts={hosts}
-                hostId={hostId}
-                busy={busy}
-                refreshHosts={refreshHosts}
-              />
-            </PageBoundary>
-          </Suspense>
-        )}
-        {error && (activeWorkspace || route.page === 'devices') && (
-          <p className="shell-error" role="alert">
-            {error}
-          </p>
+          )}
+          {error && (activeWorkspace || route.page === 'devices') && (
+            <p className="shell-error" role="alert">
+              {error}
+            </p>
+          )}
+          {accountSyncError && (
+            <p className="shell-error" role="status">
+              {accountSyncError}
+            </p>
+          )}
+        </div>
+        {showNavigation && (
+          <nav className="bottom-navigation" aria-label="主要功能">
+            <div className="shell-brand">
+              <img src="/app-icon-32.png" alt="Agent 空间" />
+            </div>
+            {modules.map((module) => (
+              <button
+                key={module.id}
+                aria-current={activeModule === module.id ? 'page' : undefined}
+                onClick={() =>
+                  navigate(module.id === 'workbench' ? workbenchRoute.current : { page: module.id })
+                }
+              >
+                <Icon name={module.icon} size={24} />
+                <span>{module.title}</span>
+                {module.id === 'messages' && unread > 0 && (
+                  <b className="navigation-unread" aria-hidden="true">
+                    {unread > 99 ? '99+' : unread}
+                  </b>
+                )}
+              </button>
+            ))}
+          </nav>
         )}
       </div>
-      {showNavigation && (
-        <nav className="bottom-navigation" aria-label="主要功能">
-          <div className="shell-brand">
-            <img src="/app-icon-32.png" alt="Agent 空间" />
-          </div>
-          {modules.map((module) => (
-            <button
-              key={module.id}
-              aria-current={activeModule === module.id ? 'page' : undefined}
-              onClick={() =>
-                navigate(module.id === 'workbench' ? workbenchRoute.current : { page: module.id })
-              }
-            >
-              <Icon name={module.icon} size={24} />
-              <span>{module.title}</span>
-              {module.id === 'messages' && unread > 0 && (
-                <b className="navigation-unread" aria-hidden="true">
-                  {unread > 99 ? '99+' : unread}
-                </b>
-              )}
-            </button>
-          ))}
-        </nav>
-      )}
-    </div>
+    </AccountSecurity>
   );
 }

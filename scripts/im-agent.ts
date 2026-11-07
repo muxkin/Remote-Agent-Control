@@ -1,10 +1,12 @@
 /** Agent-friendly JSON CLI. Credentials are written privately, never printed by registration. */
 import { parseArgs } from 'node:util';
-import { mkdir, readFile, open, unlink } from 'node:fs/promises';
+import { mkdir, readFile, open, unlink, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { HttpMessagingClient } from '../src/client/messaging.js';
+import { EncryptedMessagingClient } from '../src/client/encrypted-messaging.js';
+import { protectAccount, type AccountSecrets } from '../src/shared/account-crypto.js';
+import type { ChatUser } from '../src/shared/messaging.js';
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -72,7 +74,7 @@ async function main() {
       files:
         'upload --conversation ID --file PATH; send --conversation ID [--text TEXT] [--attachments FILE_ID,FILE_ID] [--mentions USER_ID,USER_ID] [--reply MESSAGE_ID]; search --conversation ID --query TEXT',
     };
-  let saved: { origin?: string; token?: string } = {};
+  let saved: { origin?: string; token?: string; secrets?: AccountSecrets; user?: ChatUser } = {};
   let stateExists = false;
   try {
     saved = JSON.parse(await readFile(state, 'utf8'));
@@ -85,7 +87,11 @@ async function main() {
   ).origin;
   if (saved.token && saved.origin !== origin && !process.env.POCKET_IM_TOKEN && command !== 'register')
     throw Error('Origin differs from saved credentials; use a separate --state file');
-  const client = new HttpMessagingClient(origin, process.env.POCKET_IM_TOKEN ?? saved.token);
+  const client = new EncryptedMessagingClient(origin, process.env.POCKET_IM_TOKEN ?? saved.token);
+  if (saved.secrets && saved.user) {
+    client.account.activate(saved.user, saved.secrets);
+    await client.account.refreshItems();
+  }
   switch (command) {
     case 'register': {
       if (stateExists)
@@ -97,24 +103,40 @@ async function main() {
       // Reserve a writable destination before consuming the one-use invitation.
       const file = await open(state, 'wx', 0o600);
       try {
-        const result = await client.registerAgent(invitation, username, displayName);
+        const protectedAccount = await protectAccount(randomUUID() + randomUUID());
         await file.writeFile(
-          JSON.stringify(
-            {
-              origin,
-              token: result.token,
-              user: result.user,
-              owner: result.owner,
-              expiresAt: result.expiresAt,
-            },
-            null,
-            2,
-          ) + '\n',
+          JSON.stringify({ origin, secrets: protectedAccount.secrets, pendingRegistration: true, username }) +
+            '\n',
         );
         await file.sync();
+        const result = await client.registerAgent(invitation, username, displayName, protectedAccount.vault);
+        const next = `${state}.${randomUUID()}.tmp`;
+        const completed = await open(next, 'wx', 0o600);
+        try {
+          await completed.writeFile(
+            JSON.stringify(
+              {
+                origin,
+                token: result.token,
+                user: result.user,
+                owner: result.owner,
+                expiresAt: result.expiresAt,
+                secrets: protectedAccount.secrets,
+              },
+              null,
+              2,
+            ) + '\n',
+          );
+          await completed.sync();
+        } finally {
+          await completed.close();
+        }
+        await file.close();
+        await rename(next, state);
         return { user: result.user, owner: result.owner, expiresAt: result.expiresAt, credentialFile: state };
       } catch (error) {
-        await unlink(state).catch(() => {});
+        // Preserve any issued credential/key material; a failed second request must be recoverable.
+        if ((await file.stat().catch(() => ({ size: 1 }))).size === 0) await unlink(state).catch(() => {});
         throw error;
       } finally {
         await file.close();

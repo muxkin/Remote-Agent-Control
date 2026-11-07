@@ -34,7 +34,7 @@ export function TranscriptMessages({
     else groups.push({ key: message.id, tools, messages: [message] });
   }
   const render = (m: Message) => (
-    <article key={m.id} className={`message ${m.role}`}>
+    <article key={m.id} className={`message ${m.role}`} data-user-turn={m.role === 'user' ? m.id : undefined}>
       <div className="message-role">
         {m.role === 'assistant' && agent.avatar && (
           <img className="codex-avatar" src={agent.avatar} alt="" width={32} height={32} />

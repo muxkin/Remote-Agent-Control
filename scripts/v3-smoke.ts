@@ -3,6 +3,7 @@ import { chromium, expect } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { config, host, store, native, close } from './v2-fixture.js';
 import { THREAD, TURN } from '../test/helpers.js';
+import { saveRecoveryCode } from './lib/messaging-smoke.js';
 const report: any = { fixture: true, checks: {}, errors: [], physicalPhone: false };
 const browser = await chromium.launch({
   channel: 'chrome',
@@ -38,6 +39,13 @@ async function openChat() {
   await expect(page.locator('.chat-head h2')).toContainText('测试会话');
 }
 try {
+  await page.goto(`${config.origin}/?page=messages`);
+  await page.getByLabel('昵称', { exact: true }).fill('测试账户');
+  await page.getByLabel('用户名', { exact: true }).fill('frontend-fixture');
+  await page.getByLabel('密码', { exact: true }).fill('frontend-fixture-password');
+  await page.getByRole('button', { name: '创建账户', exact: true }).click();
+  await saveRecoveryCode(page);
+  await expect(page.getByText('还没有聊天记录')).toBeVisible();
   const pair = store.mintPairing();
   await page.goto(`${config.origin}/#pair=${pair.code}&host=${host.identity.peerId}`);
   await page.getByRole('button', { name: '连接电脑', exact: true }).click();
@@ -63,13 +71,8 @@ try {
   const peerCount = await page.evaluate(() => (window as any).__peers.length);
   await page.getByRole('button', { name: '返回会话列表' }).click();
   await tab('消息');
-  await expect(page.getByText('和 Agent 保持联系')).toBeVisible();
-  await screenshot('messages');
-  await page.getByLabel('昵称', { exact: true }).fill('测试账户');
-  await page.getByLabel('用户名', { exact: true }).fill('frontend-fixture');
-  await page.getByLabel('密码', { exact: true }).fill('frontend-fixture-password');
-  await page.getByRole('button', { name: '创建账户', exact: true }).click();
   await expect(page.getByText('还没有聊天记录')).toBeVisible();
+  await screenshot('messages');
   await tab('联系人');
   await page.getByRole('button', { name: '接入 Agent', exact: true }).click();
   await expect(page.getByText('让你的 Agent 加入聊天')).toBeVisible();

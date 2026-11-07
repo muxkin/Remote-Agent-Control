@@ -11,6 +11,7 @@ export function SendButton({
   hintId = 'send-queue-hint',
   labels,
   activity,
+  mobileLabel,
 }: {
   running: boolean;
   hasDraft: boolean;
@@ -21,6 +22,7 @@ export function SendButton({
   hintId?: string;
   labels?: { send: string; stop: string; running: string };
   activity?: string;
+  mobileLabel?: string;
 }) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined),
     handled = useRef(false);
@@ -109,7 +111,10 @@ export function SendButton({
       {activity ? (
         <span className="sending-spinner" aria-hidden="true" />
       ) : (
-        <Icon name={pause ? 'pause' : 'up'} size={23} />
+        <>
+          <Icon name={pause ? 'pause' : 'up'} size={23} />
+          {mobileLabel && !pause && <span className="send-mobile-label">{mobileLabel}</span>}
+        </>
       )}
     </button>
   );

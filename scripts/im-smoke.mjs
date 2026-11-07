@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { PNG } from 'pngjs';
 import { buildRelay } from '../src/server/relay.ts';
+import { saveRecoveryCode, registerAgentFixture, messagingFixtureRequest } from './lib/messaging-smoke.ts';
 // Isolated accounts and local relay; no live desktop or personal IM state is touched.
 const bind = process.env.TEST_BIND ?? '127.0.0.1',
   port = Number(process.env.TEST_PORT ?? 18931);
@@ -38,18 +39,11 @@ const suffix = Date.now().toString().slice(-7),
 const errors = [],
   checks = {};
 page.on('pageerror', (e) => errors.push(e.message));
+const agentClients = new Map();
 async function api(path, method = 'GET', data, token) {
-  const r = await fetch(origin + '/api/im' + path, {
-    method,
-    headers: {
-      ...(data ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    ...(data ? { body: JSON.stringify(data) } : {}),
-  });
-  const body = await r.json();
-  if (!r.ok) throw Error(`${path}: ${r.status} ${JSON.stringify(body)}`);
-  return body;
+  const client = agentClients.get(token);
+  if (!client) throw Error('Missing encrypted fixture client');
+  return messagingFixtureRequest(client, path, method, data);
 }
 async function humanAPI(path, method = 'GET', data) {
   const r = await page.request.fetch(origin + '/api/im' + path, {
@@ -72,6 +66,7 @@ try {
   await page.getByLabel('用户名', { exact: true }).fill(username);
   await page.getByLabel('密码', { exact: true }).fill('isolated-qa-password-123');
   await page.getByRole('button', { name: '创建账户', exact: true }).click();
+  await saveRecoveryCode(page);
   await expect(page.getByText('还没有聊天记录', { exact: true })).toBeVisible();
   const registered = (await humanAPI('/me')).user;
   expect(registered.id).toBe('10000000');
@@ -81,12 +76,14 @@ try {
   await page.getByRole('button', { name: '接入 Agent', exact: true }).click();
   await page.getByRole('button', { name: '生成一次性邀请', exact: true }).click();
   const instructions = await page.getByLabel('Agent 注册说明').inputValue();
-  const payload = JSON.parse(instructions.slice(instructions.indexOf('{'), instructions.indexOf('\n}') + 2));
-  const agent = await api('/agents/register', 'POST', {
-    ...payload,
+  const invitation = instructions.match(/一次性邀请：([^\s]+)/)?.[1];
+  expect(invitation).toBeTruthy();
+  const agent = await registerAgentFixture(origin, {
+    invitation,
     username: `agent${suffix}`,
     displayName: '研究助手',
   });
+  agentClients.set(agent.token, agent.client);
   await expect(page.locator('.im-agent-row')).toContainText('研究助手');
   // Keep invitation/credentials out of screenshots.
   await page.getByRole('button', { name: '返回', exact: true }).click();
@@ -101,6 +98,7 @@ try {
   await friendPage.getByLabel('用户名', { exact: true }).fill(friend);
   await friendPage.getByLabel('密码', { exact: true }).fill('isolated-friend-password');
   await friendPage.getByRole('button', { name: '创建账户', exact: true }).click();
+  await saveRecoveryCode(friendPage);
   await expect(friendPage.getByText('还没有聊天记录', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '添加联系人', exact: true }).click();
   await page.getByLabel('UID 或用户名').fill('@' + friend);
@@ -175,7 +173,10 @@ try {
   checks.replyAndMention = true;
   await page.getByRole('button', { name: '搜索聊天记录', exact: true }).click();
   await page.getByLabel('搜索关键词').fill('核对');
-  await page.getByRole('dialog', { name: '搜索聊天记录' }).getByRole('button', { name: '搜索', exact: true }).click();
+  await page
+    .getByRole('dialog', { name: '搜索聊天记录' })
+    .getByRole('button', { name: '搜索', exact: true })
+    .click();
   await expect(page.locator('.im-search-results>button')).toHaveCount(2);
   await page.locator('.im-search-results>button').first().click();
   await expect(page.getByRole('dialog', { name: '消息详情' })).toBeVisible();
@@ -220,7 +221,8 @@ try {
   await page.getByLabel('新密码', { exact: true }).fill('updated-qa-password-123');
   await page.getByLabel('确认新密码', { exact: true }).fill('updated-qa-password-123');
   await page.getByRole('button', { name: '更新密码', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('密码已修改');
+  await saveRecoveryCode(page);
+  await expect(page.getByRole('heading', { name: '账户设置', exact: true })).toBeVisible();
   checks.accountSettings = true;
   await page.getByRole('button', { name: '返回', exact: true }).click();
   await page.getByRole('button', { name: /设置/ }).click();
@@ -269,8 +271,8 @@ try {
   const downloadsBefore = imageDownloads;
   await page.reload();
   await expect(page.locator('.im-message img[alt="演示图片.png"]')).toBeVisible();
-  expect(imageDownloads).toBe(downloadsBefore);
-  checks.persistentImageCache = true;
+  expect(imageDownloads).toBeGreaterThan(downloadsBefore);
+  checks.encryptedImageReload = true;
   const [popup] = await Promise.all([
     page.waitForEvent('popup'),
     csv.getByRole('button', { name: '计算结果.csv 电子表格 · 预览', exact: true }).click(),
@@ -399,7 +401,7 @@ try {
   checks.emoji = true;
   await page.getByRole('button', { name: '收藏表情 演示图片.png' }).click();
   await page.getByRole('button', { name: '表情与 Emoji', exact: true }).click();
-  await page.getByRole('button', { name: '我的表情包', exact: true }).click();
+  await page.getByRole('tab', { name: '收藏', exact: true }).click();
   await expect(page.getByRole('button', { name: '发送表情 演示图片.png' })).toBeVisible();
   await page.getByLabel('导入表情包').setInputFiles({
     name: '挥手.gif',
@@ -422,17 +424,16 @@ try {
     };
   });
   await page.getByRole('button', { name: '语音消息', exact: true }).click();
-  await page.getByRole('button', { name: '开始录音', exact: true }).click();
-  await expect(page.locator('.im-voice-time')).toHaveText('0:02');
+  await page.getByRole('button', { name: '也可以点击录音', exact: true }).click();
+  await expect(page.locator('.im-voice-time')).toHaveText('0:02 / 2:00');
   await page.getByRole('button', { name: '停止录音', exact: true }).click();
   await expect(page.getByLabel('试听语音')).toBeVisible();
   expect(await page.evaluate(() => window.__qaTracks.every((t) => t.readyState === 'ended'))).toBe(true);
   await page.getByLabel('试听语音').evaluate((el) => el.play());
   await expect.poll(() => page.getByLabel('试听语音').evaluate((el) => el.currentTime)).toBeGreaterThan(0);
   await page.screenshot({ path: out + '/desktop-voice-preview.png' });
-  await page.getByRole('button', { name: '添加到消息', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: '语音消息' })).toHaveCount(0);
-  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.getByRole('button', { name: '发送语音', exact: true }).click();
+  await expect(page.getByRole('region', { name: '语音消息' })).toHaveCount(0);
   await friendPage.locator('.im-message [data-media-type=audio]').last().scrollIntoViewIfNeeded();
   const audio = friendPage.locator('.im-message audio').last();
   await expect(audio).toBeVisible();
@@ -440,11 +441,11 @@ try {
   await expect.poll(() => audio.evaluate((el) => el.currentTime)).toBeGreaterThan(0);
   checks.voiceRecordPreviewSendPlayback = true;
   await page.getByRole('button', { name: '语音消息', exact: true }).click();
-  await page.getByRole('button', { name: '开始录音', exact: true }).click();
+  await page.getByRole('button', { name: '也可以点击录音', exact: true }).click();
   await expect(page.getByRole('button', { name: '停止录音' })).toBeVisible();
   await page
-    .getByRole('dialog', { name: '语音消息' })
-    .getByRole('button', { name: '关闭', exact: true })
+    .getByRole('region', { name: '语音消息' })
+    .getByRole('button', { name: '关闭语音', exact: true })
     .click();
   expect(await page.evaluate(() => window.__qaTracks.every((t) => t.readyState === 'ended'))).toBe(true);
   await page.evaluate(() => {
@@ -453,11 +454,11 @@ try {
     };
   });
   await page.getByRole('button', { name: '语音消息', exact: true }).click();
-  await page.getByRole('button', { name: '开始录音', exact: true }).click();
+  await page.getByRole('button', { name: '也可以点击录音', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('麦克风权限未开启');
   await page
-    .getByRole('dialog', { name: '语音消息' })
-    .getByRole('button', { name: '关闭', exact: true })
+    .getByRole('region', { name: '语音消息' })
+    .getByRole('button', { name: '关闭语音', exact: true })
     .click();
   checks.voiceCancelAndPermissionFailure = true;
   await page.setViewportSize({ width: 390, height: 844 });
@@ -466,7 +467,7 @@ try {
   await page.getByRole('button', { name: '表情与 Emoji', exact: true }).click();
   await noOverflow();
   await page.screenshot({ path: out + '/mobile-emoji.png' });
-  await page.getByRole('button', { name: '我的表情包', exact: true }).click();
+  await page.getByRole('tab', { name: '收藏', exact: true }).click();
   await noOverflow();
   await page.screenshot({ path: out + '/mobile-stickers.png' });
   await page
@@ -521,7 +522,11 @@ try {
   checks.scrollStaysWhileReading = true;
   // The CLI exercises group mutation, files and ordered streaming against the same fixture.
   const credentials = join(state, 'agent.json');
-  await writeFile(credentials, JSON.stringify({ origin, token: agent.token }), { mode: 0o600 });
+  await writeFile(
+    credentials,
+    JSON.stringify({ origin, token: agent.token, user: agent.user, secrets: agent.secrets }),
+    { mode: 0o600 },
+  );
   const execute = promisify(execFile);
   async function cli(...args) {
     const { stdout } = await execute(process.execPath, [
@@ -596,11 +601,26 @@ try {
   await nav('我的');
   await page.getByRole('button', { name: /个人资料/ }).click();
   await page.getByRole('button', { name: '退出登录', exact: true }).click();
-  await expect(otherTab.getByRole('heading', { name: '和 Agent 保持联系' })).toBeVisible();
-  await expect.poll(() => page.evaluate(async uid => {
-    const db=await new Promise((resolve,reject)=>{const request=indexedDB.open('pocket-im-media');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
-    return await new Promise((resolve,reject)=>{const request=db.transaction('blobs').objectStore('blobs').index('account').count(uid);request.onsuccess=()=>{db.close();resolve(request.result);};request.onerror=()=>reject(request.error);});
-  },registered.id)).toBe(0);
+  await expect(otherTab.getByRole('heading', { name: '一个账号，连接你的设备' })).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(async (uid) => {
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('pocket-im-media');
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        return await new Promise((resolve, reject) => {
+          const request = db.transaction('blobs').objectStore('blobs').index('account').count(uid);
+          request.onsuccess = () => {
+            db.close();
+            resolve(request.result);
+          };
+          request.onerror = () => reject(request.error);
+        });
+      }, registered.id),
+    )
+    .toBe(0);
   checks.logoutClearsPrivateImageCache = true;
   checks.crossTabLogout = true;
   await page.getByRole('button', { name: '登录', exact: true }).click();

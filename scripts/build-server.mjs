@@ -20,3 +20,15 @@ await build({
   packages: 'external',
   sourcemap: true,
 });
+
+// The migration executable is offline tooling, never part of the relay request path.
+await build({
+  entryPoints: ['scripts/im-encryption-migrate.ts'],
+  outfile: 'dist/server/account-encryption-migrate.js',
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node24',
+  packages: 'external',
+  sourcemap: true,
+});

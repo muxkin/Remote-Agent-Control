@@ -1,0 +1,98 @@
+.transcript-stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  container-type: inline-size;
+}
+.transcript-stage .transcript {
+  width: 100%;
+}
+.turn-navigation {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  left: 8px;
+  width: 24px;
+  transform: translateY(-50%);
+}
+.turn-navigation-marks {
+  position: relative;
+  max-height: min(40dvh, 240px);
+  overflow: auto;
+  scrollbar-width: none;
+}
+.turn-navigation-marks::-webkit-scrollbar {
+  display: none;
+}
+.turn-navigation button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 14px;
+  padding: 0;
+  border-radius: 4px;
+}
+.turn-navigation button span {
+  display: block;
+  height: 2px;
+  width: 8px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+  transition:
+    width 120ms,
+    background 120ms;
+}
+.turn-navigation button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.turn-navigation button[aria-current] span,
+.turn-navigation button:hover span,
+.turn-navigation button:focus-visible span {
+  width: 13px;
+  background: var(--accent);
+}
+.turn-navigation-preview {
+  position: absolute;
+  left: 30px;
+  width: max-content;
+  max-width: min(260px, 60vw);
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  box-shadow: 0 8px 24px var(--shadow);
+  pointer-events: none;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.turn-navigation-preview small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.transcript-stage .message.user {
+  scroll-margin-top: 24px;
+  background: var(--soft);
+  color: var(--ink);
+  border-radius: 16px 5px 16px 16px;
+}
+@container (max-width: 640px) {
+  .turn-navigation {
+    display: none;
+  }
+}
+@media (max-width: 900px) {
+  .turn-navigation {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .turn-navigation button span {
+    transition: none;
+  }
+}

@@ -4,6 +4,12 @@ import { PNG } from 'pngjs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildRelay } from '../src/server/relay.ts';
+import {
+  saveRecoveryCode,
+  registerAgentFixture,
+  browserAccountFixture,
+  messagingFixtureRequest,
+} from './lib/messaging-smoke.ts';
 // Synthetic artwork keeps this check reproducible without personal files.
 const artwork = new PNG({ width: 64, height: 64 });
 for (let i = 0; i < artwork.data.length; i += 4) artwork.data.set([22, 120, 102, i % 128 ? 255 : 0], i);
@@ -31,18 +37,18 @@ const context = await browser.newContext({ viewport: { width: 1488, height: 1056
   page = await context.newPage();
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
-async function req(p, body, token) {
-  const r = await fetch(origin + '/api/im' + p, {
-    method: body ? 'POST' : 'GET',
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) throw Error(`fixture ${r.status}`);
-  return r.json();
+page.on('console', (message) => {
+  // The fixture and browser can pin the same contact concurrently; the client retries this CAS conflict.
+  const pinConflict =
+    /\/api\/im\/crypto\/items\//.test(message.location().url) && /409 \(Conflict\)/.test(message.text());
+  if (message.type() === 'error' && !pinConflict) errors.push(message.text());
+});
+let agentClient, humanClient;
+async function req(p, body) {
+  return messagingFixtureRequest(agentClient, p, body ? 'POST' : 'GET', body);
 }
 async function human(p, body) {
-  const r = await page.request.post(origin + '/api/im' + p, { data: body, headers: { Origin: origin } });
-  return r.json();
+  return messagingFixtureRequest(humanClient, p, 'POST', body);
 }
 try {
   await page.goto(origin + '/?page=messages');
@@ -50,13 +56,16 @@ try {
   await page.getByLabel('用户名', { exact: true }).fill('qing-design');
   await page.getByLabel('密码', { exact: true }).fill('design-test-password');
   await page.getByRole('button', { name: '创建账户', exact: true }).click();
+  await saveRecoveryCode(page);
+  humanClient = await browserAccountFixture(page, origin, 'design-test-password');
   await expect(page.getByText('还没有聊天记录', { exact: true })).toBeVisible();
   const invitation = await human('/agent-invitations', {}),
-    agent = await req('/agents/register', {
+    agent = await registerAgentFixture(origin, {
       invitation: invitation.invitation,
       username: 'assistant-design',
       displayName: '研究助手',
     });
+  agentClient = agent.client;
   const { conversation } = await human('/conversations', { userId: agent.user.id }),
     cid = conversation.id;
   const avatar = image;
@@ -79,17 +88,8 @@ try {
     agent.token,
   );
   const sticker = image;
-  const upload = await fetch(origin + `/api/im/conversations/${cid}/files`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${agent.token}`,
-      'Content-Type': 'application/octet-stream',
-      'X-File-Name': encodeURIComponent('开心.png'),
-    },
-    body: sticker,
-  });
-  const file = (await upload.json()).file;
-  const saved = await req('/stickers', { conversationId: cid, fileId: file.id }, agent.token);
+  const { file } = await agentClient.upload(cid, '开心.png', sticker);
+  const saved = await agentClient.saveSticker(cid, file.id);
   await req(
     `/conversations/${cid}/messages`,
     { clientId: '3', stickerId: saved.stickers[0].id },
@@ -97,7 +97,10 @@ try {
   );
   await human(`/conversations/${cid}/messages`, { clientId: '4', text: '这样舒服多了 😊' });
   await page.reload();
-  await page.getByRole('button', { name: /研究助手/ }).first().click();
+  await page
+    .getByRole('button', { name: /研究助手/ })
+    .first()
+    .click();
   await expect(page.locator('.is-sticker img')).toBeVisible();
   await expect(page.locator('.im-message .im-avatar img').first()).toBeVisible();
   expect(await page.getByRole('button', { name: '发起交互请求', exact: true }).count()).toBe(0);
@@ -125,6 +128,67 @@ try {
     expect(panel.x + panel.width).toBeLessThanOrEqual(width);
     await page.screenshot({ path: out + `/mobile-${width}.png` });
   }
+
+  await page.getByRole('button', { name: '关闭表情', exact: true }).click();
+  const formula = await agentClient.send(
+    cid,
+    String.raw`> Defect energy:
+>
+> \[
+> E_{\mathrm d}^{\mathrm{sc}} = E_D^{\mathrm{sc}} - E_0^{\mathrm{sc}} - \sum_i \Delta N_i\mu_i.
+> \]
+>
+> Al₇Cu₅Sc–Al₂Cu–Al₃Sc
+
+\[
+\int_0^\infty \frac{a_1+b_2+c_3+d_4+e_5+f_6+g_7+h_8+i_9+j_{10}+k_{11}+l_{12}}{1+x^2}\,dx \tag{2}
+\]`,
+    'formula-layout',
+  );
+  const mathMessage = page.locator(`[data-message-id="${formula.message.id}"]`);
+  await expect(mathMessage.locator('.katex-display')).toHaveCount(2);
+  for (const width of [1488, 420, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    const metrics = await mathMessage.evaluate(async (el) => {
+      await document.fonts.ready;
+      const formula = el.querySelector('.katex');
+      const script = formula.querySelector('.katex-sizing.size3');
+      const displays = [...el.querySelectorAll('.katex-display')];
+      return {
+        scriptRatio:
+          parseFloat(getComputedStyle(script).fontSize) / parseFloat(getComputedStyle(formula).fontSize),
+        chemistry: el.querySelectorAll('.chemical-formula sub').length,
+        legacy: el.querySelectorAll('.sizing').length,
+        overflow: document.documentElement.scrollWidth > innerWidth,
+        reachable: displays.every(
+          (display) =>
+            display.querySelector('.katex').getBoundingClientRect().left >=
+            display.getBoundingClientRect().left - 1,
+        ),
+        fonts: [...document.fonts]
+          .filter((font) => font.family.startsWith('KaTeX') && font.status === 'loaded')
+          .map((font) => font.family),
+      };
+    });
+    expect(metrics.scriptRatio).toBeCloseTo(0.7, 2);
+    expect(metrics.chemistry).toBe(4);
+    expect(metrics.legacy).toBe(0);
+    expect(metrics.overflow).toBe(false);
+    expect(metrics.reachable).toBe(true);
+    expect(metrics.fonts).toContain('KaTeX_Main');
+    if (width === 320) {
+      const display = mathMessage.locator('.katex-display').last();
+      expect(await display.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+      expect(
+        await display.evaluate((el) => {
+          el.scrollLeft = el.scrollWidth;
+          return el.scrollLeft;
+        }),
+      ).toBeGreaterThan(0);
+    }
+  }
+  await expect(page.getByRole('navigation', { name: '会话提问导航' })).toHaveCount(0);
+  await page.screenshot({ path: out + '/mobile-math.png' });
   expect(errors).toEqual([]);
   await writeFile(
     out + '/result.json',
@@ -135,6 +199,7 @@ try {
         nonModal: true,
         emptyInteractionHidden: true,
         responsive: [390, 320],
+        mathTypography: true,
         errors,
       },
       null,

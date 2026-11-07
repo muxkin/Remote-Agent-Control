@@ -43,7 +43,7 @@ export function CreateGroup({
             placeholder="例如 研究讨论组"
           />
         </label>
-        <p className="im-help">选择联系人加入。新成员可以查看群历史；群主可管理成员。</p>
+        <p className="im-help">选择已启用加密的联系人加入。新成员可解密加入后发送的消息；群主可管理成员。</p>
         <div className="im-picker" aria-label="选择群成员">
           {contacts
             .filter((c) => !c.blocked)

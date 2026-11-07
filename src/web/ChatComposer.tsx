@@ -79,6 +79,7 @@ export function ChatComposer({
   sendLabels,
   activity,
   insertText,
+  mobileSendLabel,
 }: {
   value: ChatDraft;
   threadId?: string;
@@ -101,7 +102,8 @@ export function ChatComposer({
   maxLength?: number;
   sendLabels?: { send: string; stop: string; running: string };
   activity?: string;
-  insertText?: { key: string; text: string };
+  mobileSendLabel?: string;
+  insertText?: { key: string; text: string; focus?: boolean };
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const desktopKeyboard = useDesktopKeyboard();
@@ -113,7 +115,9 @@ export function ChatComposer({
     const el = textareaRef.current;
     if (el) {
       el.style.height = 'auto';
-      el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+      const limit = Math.min(parseFloat(getComputedStyle(el).maxHeight) || 140, 140);
+      el.style.height = `${Math.min(el.scrollHeight, limit)}px`;
+      el.style.overflowY = el.scrollHeight > el.clientHeight + 1 ? 'auto' : 'hidden';
     }
   }, [text]);
   useEffect(() => {
@@ -126,7 +130,7 @@ export function ChatComposer({
     onChange({ text: next });
     requestAnimationFrame(() => {
       if (!input.isConnected) return;
-      input.focus();
+      if (insertText.focus !== false) input.focus({ preventScroll: true });
       input.setSelectionRange(start + insertText.text.length, start + insertText.text.length);
     });
   }, [insertText]);
@@ -275,6 +279,7 @@ export function ChatComposer({
         <div className="composer-send">
           <SendButton
             activity={activity}
+            mobileLabel={mobileSendLabel}
             labels={sendLabels}
             running={running}
             hasDraft={hasDraft}

@@ -34,6 +34,8 @@ export default defineConfig(() => {
     build: {
       outDir: '../../dist/web',
       emptyOutDir: true,
+      // Small math fonts must remain files: the app's font CSP intentionally excludes data: URLs.
+      assetsInlineLimit: (path) => (/\.(?:woff2?|ttf|otf)$/i.test(path) ? false : undefined),
       rollupOptions: {
         output: {
           manualChunks(id) {

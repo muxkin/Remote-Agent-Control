@@ -1,10 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
-import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
+import { scrypt } from 'node:crypto';
 import { z } from 'zod';
 import { USER_ID_PATTERN, USERNAME_PATTERN } from '../../shared/account-identity.js';
 import { ChatError, MessagingStore } from './store.js';
 import { MessagingObjects, type MediaKind } from './objects.js';
+import { registerAccounts, vaultSchema } from './accounts.js';
+import { assertEncryptedDatabase } from './encryption-state.js';
 import type { StorageAdapter } from '../object-storage.js';
 import { attachmentMime } from './media.js';
 import sharp from 'sharp';
@@ -19,7 +21,6 @@ const username = z
 const userId = z.string().regex(USER_ID_PATTERN, 'UID 必须是无前导零的正十进制字符串');
 const identifier = z.string().trim().min(1).toLowerCase();
 const displayName = z.string().trim().min(1).max(60);
-const password = z.string().min(10).max(128);
 const opaque = z.string().min(20).max(256);
 const integer = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const COOKIE = 'pocket_im_session';
@@ -40,6 +41,12 @@ export interface MessagingConfig {
 /** HTTP is intentionally independent of the encrypted desktop relay protocol. */
 export async function registerMessaging(parent: FastifyInstance, config: MessagingConfig) {
   const store = new MessagingStore(config.database, new URL(config.origin).host.toLowerCase());
+  try {
+    assertEncryptedDatabase(store.db);
+  } catch (error) {
+    store.close();
+    throw error;
+  }
   const objects = new MessagingObjects(store, config.storage, config.origin);
   await parent.register(
     async (app) => {
@@ -93,6 +100,16 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         return { user };
       };
       const cid = (req: FastifyRequest) => z.object({ id: z.string().uuid() }).parse(req.params).id;
+      await registerAccounts(app, {
+        store,
+        identity,
+        human,
+        token,
+        session,
+        hash,
+        take,
+        registrationCode: config.registrationCode,
+      });
       const uid = (req: FastifyRequest) => z.object({ id: userId }).parse(req.params).id;
       app.addHook('onRequest', async (req, reply) => {
         reply.header('Cache-Control', 'no-store');
@@ -130,7 +147,7 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
       });
       app.addContentTypeParser(
         'application/octet-stream',
-        { parseAs: 'buffer', bodyLimit: 10 * 1024 * 1024 },
+        { parseAs: 'buffer', bodyLimit: 10 * 1024 * 1024 + 16 },
         (_req, body, done) => done(null, body),
       );
       const messageParams = (req: FastifyRequest) =>
@@ -142,7 +159,7 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         reply: FastifyReply,
         kind: MediaKind,
         id: string,
-        file: { name: string; mime: string; size: number; data: Buffer },
+        file: { name: string; mime: string; size: number; data: Buffer; encrypted?: string },
       ) => {
         const query = z
           .object({
@@ -200,22 +217,6 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         const file = store.avatar(identity(req).id, params.userId, params.version);
         return serveMedia(req, reply, 'avatar', file.id, file);
       });
-      app.post('/password', { bodyLimit: 4096 }, async (req) => {
-        const user = human(req);
-        take(`password:${user.id}`, 5);
-        const body = z.object({ currentPassword: password, newPassword: password }).parse(req.body);
-        const existing = store.credentials(user.username)!;
-        const [salt, expected] = existing.passwordHash.split(':');
-        if (!timingSafeEqual(await hash(body.currentPassword, salt), Buffer.from(expected, 'hex')))
-          throw new ChatError(403, '当前密码不正确');
-        const nextSalt = randomBytes(16).toString('hex'),
-          key = await hash(body.newPassword, nextSalt);
-        // Another change while hashing must not overwrite newer credentials.
-        if (store.credentials(user.username)?.passwordHash !== existing.passwordHash)
-          throw new ChatError(409, '密码已被更改，请重新登录');
-        store.changePassword(user.id, `${nextSalt}:${key.toString('hex')}`, token(req));
-        return { ok: true };
-      });
       app.post('/logout-others', async (req) => {
         store.logoutOthers(human(req).id, token(req));
         return { ok: true };
@@ -269,14 +270,20 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         const params = messageParams(req);
         return { message: store.message(identity(req).id, params.id, params.messageId) };
       });
-      app.patch('/conversations/:id/messages/:messageId', { bodyLimit: 256 * 1024 }, async (req) => {
+      app.get('/conversations/:id/by-client/:clientId', async (req) => {
+        const params = z
+          .object({ id: z.string().uuid(), clientId: z.string().min(1).max(128) })
+          .parse(req.params);
+        return { message: store.byClient(identity(req).id, params.id, params.clientId) };
+      });
+      app.patch('/conversations/:id/messages/:messageId', { bodyLimit: 1024 * 1024 }, async (req) => {
         const user = identity(req);
         take(`stream:${user.id}`, 600);
         const params = messageParams(req),
           body = z
             .object({
               revision: z.number().int().min(1).max(1000000),
-              text: z.string().max(64000),
+              text: z.string().max(800000),
               state: z.enum(['streaming', 'complete', 'failed']).default('streaming'),
             })
             .parse(req.body);
@@ -324,7 +331,7 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         const file = store.sticker(identity(req).id, cid(req));
         return serveMedia(req, reply, 'sticker', file.id, file);
       });
-      app.post('/conversations/:id/files', { bodyLimit: 10 * 1024 * 1024 }, async (req) => {
+      app.post('/conversations/:id/files', { bodyLimit: 10 * 1024 * 1024 + 16 }, async (req) => {
         const user = identity(req);
         take(`upload:${user.id}`, 30);
         let name: string;
@@ -341,7 +348,10 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
           .regex(/^[^\x00-\x1f/\\]+$/)
           .parse(name);
         if (!Buffer.isBuffer(req.body)) throw new ChatError(400, '请发送原始文件字节');
-        const file = store.upload(user.id, cid(req), name, req.body);
+        const encrypted = req.headers['x-encrypted-header']
+          ? z.string().max(16000).parse(req.headers['x-encrypted-header'])
+          : undefined;
+        const file = store.upload(user.id, cid(req), name, req.body, encrypted);
         if (config.storage) {
           try {
             objects.commit('file', file.id, await objects.put(req.body, file.mime));
@@ -378,33 +388,6 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         };
       });
       app.get('/status', async () => ({ registrationRequiresCode: !!config.registrationCode }));
-      app.post('/register', { bodyLimit: 4096 }, async (req, reply) => {
-        const body = z
-          .object({ username, displayName, password, registrationCode: z.string().max(256).optional() })
-          .parse(req.body);
-        if (config.registrationCode && body.registrationCode !== config.registrationCode)
-          throw new ChatError(403, '注册码不正确');
-        const salt = randomBytes(16).toString('hex');
-        const key = await hash(body.password, salt);
-        const user = store.createUser(
-          'human',
-          body.username,
-          body.displayName,
-          `${salt}:${key.toString('hex')}`,
-        );
-        reply.code(201);
-        return session(reply, user);
-      });
-      app.post('/login', { bodyLimit: 4096 }, async (req, reply) => {
-        const body = z.object({ identifier, password }).parse(req.body);
-        const user = store.credentials(body.identifier);
-        take(`login:${user?.id ?? body.identifier}`, 15);
-        const [salt, expected] = (user?.passwordHash ?? `${'0'.repeat(32)}:${'0'.repeat(128)}`).split(':');
-        const key = await hash(body.password, salt);
-        if (!user || !timingSafeEqual(key, Buffer.from(expected, 'hex')))
-          throw new ChatError(401, '用户名或密码不正确');
-        return session(reply, store.user(user.id));
-      });
       app.get('/me', async (req) => ({ user: token(req) ? identity(req) : null }));
       app.patch('/me', { bodyLimit: 4096 }, async (req) => {
         const user = identity(req);
@@ -421,9 +404,11 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         return { ok: true };
       });
       app.post('/agent-invitations', async (req) => store.invite(human(req).id));
-      app.post('/agents/register', { bodyLimit: 4096 }, async (req, reply) => {
-        const body = z.object({ invitation: opaque, username, displayName }).parse(req.body);
-        const result = store.registerAgent(body.invitation, body.username, body.displayName);
+      app.post('/agents/register', { bodyLimit: 32 * 1024 }, async (req, reply) => {
+        const body = z
+          .object({ invitation: opaque, username, displayName, vault: vaultSchema })
+          .parse(req.body);
+        const result = store.registerAgent(body.invitation, body.username, body.displayName, body.vault);
         reply.code(201);
         return result;
       });
@@ -442,13 +427,13 @@ export async function registerMessaging(parent: FastifyInstance, config: Messagi
         const query = z.object({ before: integer.optional() }).parse(req.query);
         return store.history(identity(req).id, cid(req), query.before);
       });
-      app.post('/conversations/:id/messages', { bodyLimit: 256 * 1024 }, async (req) => {
+      app.post('/conversations/:id/messages', { bodyLimit: 1024 * 1024 }, async (req) => {
         const user = identity(req);
         take(`send:${user.id}`, 120);
         const body = z
           .object({
             clientId: z.string().min(1).max(128),
-            text: z.string().max(64000).default(''),
+            text: z.string().max(800000).default(''),
             state: z.enum(['complete', 'streaming']).optional(),
             attachmentIds: z.array(z.string().uuid()).max(6).optional(),
             mentions: z.array(userId).max(50).optional(),

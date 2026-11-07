@@ -721,6 +721,15 @@
   display: grid;
   gap: 20px;
 }
+.pair-scanner {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+}
+.pair-scanner > .im-import-sticker {
+  justify-content: center;
+  text-align: center;
+}
 .im-account .empty-symbol {
   width: 60px;
   height: 60px;

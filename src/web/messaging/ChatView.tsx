@@ -17,6 +17,7 @@ import { readDraft, writeDraft, type MessagingDraft } from './drafts';
 import { Avatar, Dialog, Notice, errorText, time, type Navigate } from './ui';
 import { loadMessagingMedia } from './media-cache';
 import { GroupDetails } from './Groups';
+import { SecurityCodes } from './SecurityCodes';
 import { InteractionCard, CreateInteraction } from './InteractionCard';
 const Expressions = lazy(() => import('./Expressions').then((m) => ({ default: m.Expressions })));
 const VoiceRecorder = lazy(() => import('./VoiceRecorder').then((m) => ({ default: m.VoiceRecorder })));
@@ -74,8 +75,9 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     [before, setBefore] = useState<number>(),
     [draft, setDraft] = useState<MessagingDraft>(() => readDraft(id));
   const [tool, setTool] = useState<'expressions' | 'voice' | 'interaction'>();
-  const [insertText, setInsertText] = useState<{ key: string; text: string }>();
+  const [insertText, setInsertText] = useState<{ key: string; text: string; focus?: boolean }>();
   const [savedSticker, setSavedSticker] = useState('');
+  const voiceRequest = useRef<{ file: File; id: string; uploaded?: ChatAttachment } | undefined>(undefined);
   const specialRequest = useRef<{ key: string; id: string } | undefined>(undefined);
   const [busy, setBusy] = useState(false),
     [uploading, setUploading] = useState(false),
@@ -90,6 +92,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     [quoted, setQuoted] = useState<ChatMessage>(),
     [copied, setCopied] = useState(''),
     [following, setFollowing] = useState(true);
+  const [security, setSecurity] = useState(false);
   const latest = useRef(0),
     scroll = useRef<HTMLDivElement>(null),
     follow = useRef(true),
@@ -186,6 +189,16 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
   useEffect(() => {
     if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
   }, [messages]);
+  useEffect(() => {
+    const root = scroll.current;
+    if (!root) return;
+    // Opening a mobile tray or resizing the keyboard keeps the latest message visible.
+    const observer = new ResizeObserver(() => {
+      if (follow.current) root.scrollTop = root.scrollHeight;
+    });
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, []);
   async function older() {
     if (!before) return;
     setOlderBusy(true);
@@ -287,6 +300,26 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     setMessages((old) => merge(old, [result.message]));
     specialRequest.current = undefined;
   }
+  async function sendVoice(file: File) {
+    if (busy || uploading || unavailable || conversation?.closed)
+      throw new Error('当前无法发送语音，请稍后重试。');
+    const request =
+      voiceRequest.current?.file === file
+        ? voiceRequest.current
+        : { file, id: browserId(), uploaded: undefined as ChatAttachment | undefined };
+    voiceRequest.current = request;
+    setBusy(true);
+    try {
+      if (!request.uploaded) request.uploaded = (await messaging.upload(id, file.name, file)).file;
+      const { message } = await messaging.send(id, '', request.id, { attachmentIds: [request.uploaded.id] });
+      follow.current = true;
+      setFollowing(true);
+      setMessages((old) => merge(old, [message]));
+      voiceRequest.current = undefined;
+    } finally {
+      setBusy(false);
+    }
+  }
   async function favorite(file: ChatAttachment) {
     try {
       await messaging.saveSticker(id, file.id);
@@ -316,6 +349,9 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                 : ''
           }
         >
+          <button className="icon-button" aria-label="查看加密安全码" onClick={() => setSecurity(true)}>
+            <Icon name="shield" />
+          </button>
           <button className="icon-button" aria-label="搜索聊天记录" onClick={() => setSearch(true)}>
             <Icon name="search" />
           </button>
@@ -367,7 +403,10 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                     </span>
                   </div>
                 )}
-                <article className={`im-message ${mine ? 'mine' : ''}`} data-message-id={message.id}>
+                <article
+                  className={`im-message ${mine ? 'mine' : ''} ${sender?.kind === 'agent' ? 'from-agent' : ''}`}
+                  data-message-id={message.id}
+                >
                   <Avatar user={sender} />
                   <div className="im-message-main">
                     <div className="im-message-author">
@@ -491,17 +530,6 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
         )}
         <Notice text={error} />
         <footer className="im-compose-wrap">
-          <Suspense fallback={null}>
-            {tool === 'expressions' && (
-              <Expressions
-                userId={user!.id}
-                conversationId={id}
-                onClose={() => setTool(undefined)}
-                onEmoji={(text) => setInsertText({ key: browserId(), text })}
-                onSticker={(stickerId) => sendSpecial({ stickerId })}
-              />
-            )}
-          </Suspense>
           {draft.reply && (
             <div className="im-reply-draft">
               <span>
@@ -518,6 +546,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
           )}
           <ChatComposer
             activity={busy ? '正在发送…' : undefined}
+            mobileSendLabel="发送"
             insertText={insertText}
             value={{
               text: draft.text,
@@ -573,17 +602,25 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                   disabled={busy || uploading || loading || unavailable || !!conversation?.closed}
                   data-expression-trigger
                   aria-expanded={tool === 'expressions'}
-                  onClick={() => setTool(tool === 'expressions' ? undefined : 'expressions')}
+                  onClick={(event) => {
+                    event.currentTarget.closest('form')?.querySelector('textarea')?.blur();
+                    setTool(tool === 'expressions' ? undefined : 'expressions');
+                  }}
                 >
                   <Icon name="smile" size={22} />
                 </button>
                 <button
                   type="button"
                   className="icon-button"
+                  data-voice-trigger
                   aria-label="语音消息"
                   title="语音消息"
                   disabled={busy || uploading || loading || unavailable || !!conversation?.closed}
-                  onClick={() => setTool('voice')}
+                  aria-expanded={tool === 'voice'}
+                  onClick={(event) => {
+                    event.currentTarget.closest('form')?.querySelector('textarea')?.blur();
+                    setTool(tool === 'voice' ? undefined : 'voice');
+                  }}
                 >
                   <Icon name="mic" size={22} />
                 </button>
@@ -591,6 +628,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                   <button
                     type="button"
                     className="icon-button"
+                    data-interaction-trigger
                     aria-label="发起交互请求"
                     title="问题与授权确认"
                     disabled={busy || loading || unavailable || !!conversation?.closed}
@@ -626,21 +664,24 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               </>
             }
           />
+          <Suspense fallback={null}>
+            {tool === 'expressions' && (
+              <Expressions
+                userId={user!.id}
+                conversationId={id}
+                onClose={() => setTool(undefined)}
+                onEmoji={(text) => setInsertText({ key: browserId(), text, focus: false })}
+                onSticker={(stickerId) => sendSpecial({ stickerId })}
+              />
+            )}
+          </Suspense>
+          <Suspense fallback={null}>
+            {tool === 'voice' && <VoiceRecorder onClose={() => setTool(undefined)} onSend={sendVoice} />}
+          </Suspense>
           <p className="im-compose-help">
             {conversation?.closed ? '历史消息仍可阅读' : 'Enter 发送 · Shift + Enter 换行'}
           </p>
         </footer>
-        <Suspense
-          fallback={
-            <p role="status" className="im-tool-loading">
-              正在打开…
-            </p>
-          }
-        >
-          {tool === 'voice' && (
-            <VoiceRecorder onClose={() => setTool(undefined)} onAttach={(file) => upload([file])} />
-          )}
-        </Suspense>
         {tool === 'interaction' && conversation && (
           <CreateInteraction
             conversation={conversation}
@@ -651,6 +692,9 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
         )}
         {details && conversation && (
           <GroupDetails conversation={conversation} onClose={() => setDetails(false)} navigate={navigate} />
+        )}
+        {security && conversation && (
+          <SecurityCodes users={conversation.members} onClose={() => setSecurity(false)} />
         )}
         {search && <SearchMessages id={id} onClose={() => setSearch(false)} onSelect={setQuoted} />}
         {quoted && (

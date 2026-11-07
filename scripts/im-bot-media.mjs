@@ -50,7 +50,7 @@ export function createStreamWriter({ initial, patch, read, onCancelled = () => {
     },
   };
 }
-export async function incomingContent({ message, origin, token, inbox, capabilities, fetcher = fetch }) {
+export async function incomingContent({ message, origin, inbox, capabilities, download }) {
   const blocks = [];
   for (const file of (message.attachments ?? []).slice(0, 6)) {
     const url = new URL(file.url, origin),
@@ -61,25 +61,10 @@ export async function incomingContent({ message, origin, token, inbox, capabilit
       !/^[a-zA-Z0-9-]+$/.test(file.id)
     )
       throw Error('Invalid attachment location');
-    const response = await fetcher(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(45000),
-    });
-    if (!response.ok) throw Error(`Attachment download failed (${response.status})`);
-    const reader = response.body.getReader(),
-      chunks = [];
-    let size = 0;
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      size += chunk.value.length;
-      if (size > 10 * 1024 * 1024) {
-        await reader.cancel();
-        throw Error('Attachment exceeds limit');
-      }
-      chunks.push(Buffer.from(chunk.value));
-    }
-    const bytes = Buffer.concat(chunks);
+    if (typeof download !== 'function') throw Error('Use EncryptedMessagingClient.download for attachments');
+    const decrypted = await download(file.url, AbortSignal.timeout(45000));
+    const bytes = Buffer.from(decrypted.data);
+    if (bytes.length > 10 * 1024 * 1024) throw Error('Attachment exceeds limit');
     if (!bytes.length) throw Error('Attachment is empty');
     const folder = path.join(inbox, file.id);
     await mkdir(folder, { recursive: true, mode: 0o700 });

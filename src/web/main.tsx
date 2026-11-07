@@ -10,6 +10,7 @@ import './composer-controls.css';
 import './attachments.css';
 import './theme/theme.css';
 import './shell/surfaces.css';
+import './scrollbars.css';
 import { initializeAppearance } from './theme/store';
 
 initializeAppearance();

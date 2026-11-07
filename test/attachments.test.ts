@@ -1,8 +1,22 @@
 import { expect, it } from 'vitest';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
-import { attachmentName, attachmentPath, remarkFileCitations } from '../src/shared/attachments';
+import {
+  attachmentInfo,
+  attachmentName,
+  attachmentPath,
+  remarkFileCitations,
+} from '../src/shared/attachments';
 import { attachmentLinks } from '../src/server/media';
+
+it('uses decrypted filenames to classify encrypted attachments without changing their URL', () => {
+  const path = '/api/im/conversations/fixture/files/file-id/encrypted.pocket';
+  expect(attachmentInfo(path, '计算结果.csv')).toMatchObject({ kind: '电子表格', previewable: true });
+  expect(attachmentInfo(path, '报告.pdf')).toMatchObject({ kind: 'PDF 文档', previewable: true });
+  expect(attachmentInfo(path, '页面.html').previewable).toBe(false);
+  expect(attachmentInfo('dsh-image:fixture', '图片').media).toBe('image');
+  expect(attachmentInfo(path).name).toBe('encrypted.pocket');
+});
 
 it.each(
   [':', '::'].flatMap((prefix) =>

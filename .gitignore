@@ -12,6 +12,7 @@ __pycache__/
 /.test-output/
 /relay-state/
 /docs/design/
+/design/
 .env
 .env.*
 *.env

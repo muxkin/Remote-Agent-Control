@@ -20,14 +20,26 @@ const database =
 const metadata = new Map<string, { until: number; promise: Promise<MediaResource> }>();
 const memory = new Map<string, { url: string; size: number }>();
 const inflight = new Map<string, Promise<string>>();
+const decrypted = new Map<string, { name: string; mime: string; size: number }>();
+const decrypting = new Map<string, Promise<void>>();
 let account = '',
   epoch = 0,
   controller = new AbortController();
 interface MediaResource extends AttachmentResource {
+  encrypted?: string;
   cacheKey: string;
   width?: number;
   height?: number;
   downloadUrl: string;
+}
+let encryptedDownload:
+  | ((
+      path: string,
+      signal?: AbortSignal,
+    ) => Promise<{ data: Uint8Array<ArrayBuffer>; name: string; mime: string; size: number }>)
+  | undefined;
+export function setEncryptedDownload(loader: NonNullable<typeof encryptedDownload>) {
+  encryptedDownload = loader;
 }
 export function setMediaAccount(next: string | null) {
   if (account === (next ?? '')) return;
@@ -38,6 +50,8 @@ export function setMediaAccount(next: string | null) {
   controller = new AbortController();
   metadata.clear();
   inflight.clear();
+  decrypted.clear();
+  decrypting.clear();
   for (const value of memory.values()) URL.revokeObjectURL(value.url);
   memory.clear();
   if (previous)
@@ -115,6 +129,42 @@ export async function loadMessagingMedia(
   }
   const resource = await entry.promise;
   if (ticketEpoch !== epoch || signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  if (resource.encrypted) {
+    const blobKey = `${accountId}:encrypted:${resource.cacheKey}`;
+    if (!encryptedDownload) throw Error('请先解锁账号');
+    if (!memory.has(blobKey)) {
+      let pending = decrypting.get(blobKey);
+      if (!pending) {
+        const loader = encryptedDownload;
+        pending = (async () => {
+          const file = await loader(path, controller.signal);
+          if (ticketEpoch !== epoch) throw new DOMException('Aborted', 'AbortError');
+          const url = URL.createObjectURL(new Blob([file.data], { type: file.mime }));
+          memory.set(blobKey, { url, size: file.size });
+          decrypted.set(blobKey, { name: file.name, mime: file.mime, size: file.size });
+          let total = [...memory.values()].reduce((sum, v) => sum + v.size, 0);
+          for (const [old, value] of memory) {
+            if (total <= 64 * 1024 * 1024) break;
+            if (old === blobKey) continue;
+            total -= value.size;
+            URL.revokeObjectURL(value.url);
+            memory.delete(old);
+            decrypted.delete(old);
+          }
+        })();
+        decrypting.set(blobKey, pending);
+        void pending
+          .finally(() => {
+            if (decrypting.get(blobKey) === pending) decrypting.delete(blobKey);
+          })
+          .catch(() => {});
+      }
+      await pending;
+    }
+    if (ticketEpoch !== epoch || signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const cached = memory.get(blobKey)!.url;
+    return { ...resource, ...decrypted.get(blobKey)!, url: cached, downloadUrl: cached, expiresAt: 0 };
+  }
   if (!resource.mime.startsWith('image/')) return resource;
   const blobKey = `${accountId}:${resource.cacheKey}`;
   let cached = memory.get(blobKey)?.url;

@@ -1,3 +1,6 @@
+import { remarkChemicalFormulas } from '../shared/chemical-formulas';
+import './math-typography.css';
+import { markdownSource } from '../shared/markdown-source';
 import { browserId } from './browser-id';
 import { Icon } from './Icon';
 import { memo, useEffect, useMemo, useState } from 'react';
@@ -175,23 +178,14 @@ export default memo(function RichMessage({
     }),
     [threadId, streaming],
   );
-  // Codex also emits LaTeX's \(...\) and \[...\] delimiters.
-  const source = text
-    .replace(/^\s*<proposed_plan>\s*\n([\s\S]*?)\n\s*<\/proposed_plan>\s*$/, '$1')
-    .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
-    .map((part, index) =>
-      index % 2
-        ? part
-        : part
-            .replace(/\\\[([\s\S]*?)\\\]/g, (_m, body) => `\n$$\n${body}\n$$\n`)
-            .replace(/\\\(([^\n]*?)\\\)/g, (_m, body) => `$${body}$`),
-    )
-    .join('');
+  const source = markdownSource(text);
   return (
     <div className="markdown">
       <Markdown
         remarkPlugins={
-          math ? [remarkFileCitations, remarkGfm, math.remarkMath] : [remarkFileCitations, remarkGfm]
+          math
+            ? [remarkFileCitations, remarkGfm, remarkChemicalFormulas, math.remarkMath]
+            : [remarkFileCitations, remarkGfm, remarkChemicalFormulas]
         }
         rehypePlugins={
           math ? [[math.rehypeKatex, { throwOnError: false, strict: 'ignore', trust: false }]] : []

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ChatSticker } from '../../shared/messaging';
 import { messaging } from './context';
 import { Notice, errorText } from './ui';
@@ -92,13 +92,15 @@ export function Expressions({
   onSticker: (id: string) => Promise<void>;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<'emoji' | 'stickers'>('emoji'),
+  const [tab, setTab] = useState<'recent' | 'emoji' | 'stickers'>('emoji'),
     [query, setQuery] = useState(''),
     [error, setError] = useState('');
   const [stickers, setStickers] = useState<ChatSticker[]>([]),
     [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false);
   const panel = useRef<HTMLElement>(null);
+  const bodyId = useId();
+  const [managing, setManaging] = useState(false);
   useEffect(() => {
     const outside = (event: PointerEvent) => {
       if (
@@ -110,7 +112,7 @@ export function Expressions({
       if (!busy) onClose();
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !busy) {
         event.stopPropagation();
         onClose();
       }
@@ -157,7 +159,6 @@ export function Expressions({
       /* Emoji still inserts without storage. */
     }
     onEmoji(value);
-    onClose();
   }
   async function importSticker(file?: File) {
     if (!file) return;
@@ -182,50 +183,57 @@ export function Expressions({
       setBusy(false);
     }
   }
+  const filtered = emoji.filter(([value, label]) => !query || (value + label).includes(query.trim()));
+  const tabs = [
+    { id: 'recent', label: '最近', icon: 'clock' },
+    { id: 'emoji', label: '表情', icon: 'smile' },
+    { id: 'stickers', label: '收藏', icon: 'sticker' },
+  ] as const;
   return (
-    <section ref={panel} className="im-expression-panel" role="region" aria-label="表情与 Emoji">
-      <header>
-        <strong>表情与 Emoji</strong>
-        <button className="icon-button" aria-label="关闭表情" onClick={onClose}>
-          <Icon name="close" size={17} />
-        </button>
-      </header>
-      <div className="im-expression-body">
-        <div className="im-tabs" aria-label="表情分类">
-          <button aria-pressed={tab === 'emoji'} onClick={() => setTab('emoji')}>
-            Emoji
-          </button>
-          <button aria-pressed={tab === 'stickers'} onClick={() => setTab('stickers')}>
-            我的表情包
+    <section
+      ref={panel}
+      className="im-expression-panel im-input-tray"
+      role="region"
+      aria-label="表情与 Emoji"
+    >
+      <header className="im-tray-header">
+        <strong>{tab === 'stickers' ? '收藏的表情' : tab === 'recent' ? '最近使用' : '表情'}</strong>
+        <div>
+          {tab === 'stickers' && !!stickers.length && (
+            <button className="im-tray-text-action" disabled={busy} onClick={() => setManaging(!managing)}>
+              {managing ? '完成' : '管理'}
+            </button>
+          )}
+          <button className="icon-button" aria-label="关闭表情" disabled={busy} onClick={onClose}>
+            <Icon name="close" size={18} />
           </button>
         </div>
-        <Notice text={error} />
-        {tab === 'emoji' ? (
+      </header>
+      {tab !== 'recent' && (
+        <div className="im-expression-search-wrap">
+          <Icon name="search" size={16} />
+          <input
+            className="im-expression-search"
+            aria-label={tab === 'emoji' ? '搜索 Emoji' : '搜索收藏表情'}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={tab === 'emoji' ? '搜索表情，如：开心、加油' : '搜索收藏的表情'}
+          />
+        </div>
+      )}
+      <Notice text={error} />
+      <div
+        id={bodyId}
+        key={`${tab}:${query}`}
+        className="im-expression-body"
+        role="tabpanel"
+        aria-label={tabs.find((t) => t.id === tab)!.label}
+      >
+        {tab !== 'stickers' ? (
           <>
-            <input
-              className="im-expression-search"
-              aria-label="搜索 Emoji"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="搜索表情，如：开心、谢谢、加油"
-            />
-            {!query && !!recent.length && (
-              <>
-                <p className="im-help">最近使用</p>
-                <div className="im-emoji-grid">
-                  {recent.map((value) => (
-                    <button key={value} aria-label={`最近 ${value}`} onClick={() => choose(value)}>
-                      {value}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-            <p className="im-help">常用表情</p>
             <div className="im-emoji-grid">
-              {emoji
-                .filter(([value, label]) => !query || (value + label).includes(query))
-                .map(([value, label]) => (
+              {(tab === 'recent' ? recent.map((value) => emoji.find(([e]) => e === value)!) : filtered).map(
+                ([value, label]) => (
                   <button
                     key={value}
                     aria-label={`${label} ${value}`}
@@ -234,52 +242,46 @@ export function Expressions({
                   >
                     {value}
                   </button>
-                ))}
+                ),
+              )}
             </div>
-            {query && !emoji.some(([value, label]) => (value + label).includes(query)) && (
-              <p className="im-help">没有找到这个表情，试试其他关键词。</p>
+            {((tab === 'recent' && !recent.length) || (tab === 'emoji' && !filtered.length)) && (
+              <div className="im-expression-empty">
+                <Icon name={tab === 'recent' ? 'clock' : 'search'} size={30} />
+                <p>{tab === 'recent' ? '常用的表情，会留在这里' : '没有找到这个表情'}</p>
+                <small>{tab === 'recent' ? '去「表情」里选一个吧' : '试试「开心」「谢谢」或「加油」'}</small>
+              </div>
             )}
           </>
+        ) : loading ? (
+          <p className="im-tray-status" role="status">
+            正在加载表情…
+          </p>
+        ) : !stickers.length ? (
+          <div className="im-expression-empty">
+            <Icon name="sticker" size={34} />
+            <p>收藏一点小心情</p>
+            <small>点击下方 + 添加图片或 GIF，也可以收藏聊天中的图片。</small>
+          </div>
         ) : (
           <>
-            <div className="im-sticker-toolbar">
-              <p className="im-help">PNG / JPEG / GIF / WebP · 每个 2 MB · {stickers.length}/50</p>
-              <label className="secondary im-import-sticker">
-                导入表情包
-                <input
-                  aria-label="导入表情包"
-                  type="file"
-                  accept="image/png,image/jpeg,image/gif,image/webp"
-                  disabled={busy}
-                  onChange={(e) => {
-                    void importSticker(e.target.files?.[0]);
-                    e.target.value = '';
-                  }}
-                />
-              </label>
-            </div>
-            {loading ? (
-              <p role="status">正在加载表情包…</p>
-            ) : !stickers.length ? (
-              <div className="im-expression-empty">
-                <span aria-hidden="true">🫶</span>
-                <p>把喜欢的图片收进来</p>
-                <small>导入图片，或在聊天图片下点击“收藏表情”。GIF 动图也可以。</small>
-              </div>
-            ) : (
-              <div className="im-sticker-grid">
-                {stickers.map((sticker) => (
+            <div className={`im-sticker-grid ${managing ? 'is-managing' : ''}`}>
+              {stickers
+                .filter(
+                  (s) => !query || s.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+                )
+                .map((sticker) => (
                   <div key={sticker.id}>
                     <button
-                      disabled={busy}
+                      disabled={busy || managing}
                       className="im-sticker-send"
                       aria-label={`发送表情 ${sticker.name}`}
+                      title={sticker.name}
                       onClick={async () => {
                         setBusy(true);
                         setError('');
                         try {
                           await onSticker(sticker.id);
-                          onClose();
                         } catch (e) {
                           setError(errorText(e));
                         } finally {
@@ -289,32 +291,91 @@ export function Expressions({
                     >
                       <CachedImage src={sticker.url} alt={sticker.name} />
                     </button>
-                    <button
-                      className="im-sticker-remove"
-                      aria-label={`移除表情 ${sticker.name}`}
-                      disabled={busy}
-                      onClick={async () => {
-                        setBusy(true);
-                        try {
-                          await messaging.removeSticker(sticker.id);
-                          setStickers((old) => old.filter((s) => s.id !== sticker.id));
-                        } catch (e) {
-                          setError(errorText(e));
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      移除
-                    </button>
+                    {managing && (
+                      <button
+                        className="im-sticker-remove"
+                        aria-label={`移除表情 ${sticker.name}`}
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          setError('');
+                          try {
+                            await messaging.removeSticker(sticker.id);
+                            setStickers((old) => old.filter((s) => s.id !== sticker.id));
+                          } catch (e) {
+                            setError(errorText(e));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        <Icon name="close" size={14} />
+                      </button>
+                    )}
                   </div>
                 ))}
-              </div>
-            )}
-            {busy && <p role="status">正在处理…</p>}
+            </div>
+            {query &&
+              !stickers.some((s) =>
+                s.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+              ) && <p className="im-tray-status">没有找到匹配的收藏表情</p>}
           </>
         )}
       </div>
+      <footer className="im-expression-footer">
+        <div
+          role="tablist"
+          aria-label="表情分类"
+          onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const index = tabs.findIndex((t) => t.id === tab);
+            const next =
+              event.key === 'Home'
+                ? 0
+                : event.key === 'End'
+                  ? 2
+                  : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            setTab(tabs[next].id);
+            setQuery('');
+            setManaging(false);
+            event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+          }}
+        >
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={tab === t.id}
+              aria-controls={bodyId}
+              tabIndex={tab === t.id ? 0 : -1}
+              onClick={() => {
+                setTab(t.id);
+                setQuery('');
+                setManaging(false);
+              }}
+            >
+              <Icon name={t.icon} size={20} />
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+        <label className="im-expression-add" title="添加收藏表情">
+          <Icon name="plus" size={22} />
+          <input
+            aria-label="导入表情包"
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            disabled={busy || loading}
+            onChange={(e) => {
+              setTab('stickers');
+              setQuery('');
+              void importSticker(e.target.files?.[0]);
+              e.target.value = '';
+            }}
+          />
+        </label>
+      </footer>
     </section>
   );
 }

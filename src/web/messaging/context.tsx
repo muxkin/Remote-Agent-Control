@@ -1,10 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
-import { setMediaAccount, invalidateMediaConversations } from './media-cache';
+import { setMediaAccount, invalidateMediaConversations, setEncryptedDownload } from './media-cache';
 import { clearDrafts } from './drafts';
 import { browserId } from '../browser-id';
-import { HttpMessagingClient, MessagingError } from '../../client/messaging';
+import { MessagingError } from '../../client/messaging';
+import { EncryptedMessagingClient } from '../../client/encrypted-messaging';
+import { activateAccount, syncAccountHosts } from '../account-session';
 import type { ChatConversation, ChatContact, ChatMessage, ChatUser } from '../../shared/messaging';
-export const messaging = new HttpMessagingClient();
+export const messaging = new EncryptedMessagingClient();
+setEncryptedDownload((path, signal) => messaging.download(path, signal));
 interface MessagingState {
   user: ChatUser | null;
   loading: boolean;
@@ -15,6 +18,7 @@ interface MessagingState {
   updates: ChatMessage[];
   connectionError: string;
   setUser: (user: ChatUser | null) => void;
+  updateProfile: (user: ChatUser) => void;
   refresh: () => Promise<void>;
 }
 const Context = createContext<MessagingState | null>(null);
@@ -32,11 +36,13 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     window.dispatchEvent(new Event('pocket-im-reconnect'));
     try {
       const next = (await messaging.me()).user;
+      await activateAccount(messaging.account, next);
       setMediaAccount(next?.id ?? null);
       setUser(next);
       setConnectionError('');
     } catch (e) {
       if (e instanceof MessagingError && e.status === 401) {
+        await activateAccount(messaging.account, null);
         setMediaAccount(null);
         setUser(null);
       } else setConnectionError('消息服务暂不可用，请检查连接后重试');
@@ -45,11 +51,26 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const updateUser = useCallback((next: ChatUser | null) => {
-    setMediaAccount(next?.id ?? null);
-    setUser(next);
+    setLoading(true);
+    void activateAccount(messaging.account, next)
+      .then(() => {
+        setMediaAccount(next?.id ?? null);
+        setUser(next);
+        setRevision((v) => v + 1);
+      })
+      .catch((e) => {
+        setUser(next);
+        setConnectionError(e instanceof Error ? e.message : '账号同步失败');
+      })
+      .finally(() => setLoading(false));
     try {
       localStorage.setItem('pocket-im-account-change', browserId());
     } catch {}
+  }, []);
+  const updateProfile = useCallback((next: ChatUser) => {
+    // Profile edits keep the unlocked session, mounted pages and drafts intact.
+    setUser((current) => (current?.id === next.id ? next : current));
+    setRevision((v) => v + 1);
   }, []);
   useEffect(() => {
     void refresh();
@@ -65,7 +86,8 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     setContacts([]);
     setConversations([]);
     setUpdates([]);
-    if (!user) return;
+    if (!user || loading) return;
+    if (user.encrypted && !messaging.account.secrets) return;
     const abort = new AbortController(),
       signal = abort.signal;
     let request: AbortController | undefined, resumePause: (() => void) | undefined;
@@ -99,6 +121,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
         const requestSignal = AbortSignal.any([signal, request.signal]);
         try {
           if (recovering) {
+            if (messaging.account.secrets) await syncAccountHosts(messaging.account);
             const state = await messaging.request<{
               contacts: ChatContact[];
               conversations: ChatConversation[];
@@ -144,6 +167,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
             continue;
           }
           if (e instanceof MessagingError && e.status === 401) {
+            await activateAccount(messaging.account, null);
             setMediaAccount(null);
             setUser(null);
             return;
@@ -162,7 +186,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('pocket-im-reconnect', wake);
       document.removeEventListener('visibilitychange', wake);
     };
-  }, [user?.id]);
+  }, [user?.id, user?.encrypted, loading]);
   return (
     <Context.Provider
       value={{
@@ -175,6 +199,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
         updates,
         connectionError,
         setUser: updateUser,
+        updateProfile,
         refresh,
       }}
     >

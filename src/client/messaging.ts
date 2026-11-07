@@ -158,11 +158,16 @@ export class HttpMessagingClient implements MessagingClient {
   sync(cursor: number, wait = 25_000, signal?: AbortSignal) {
     return this.request<ChatSync>(`/sync?cursor=${cursor}&wait=${wait}`, 'GET', undefined, signal);
   }
-  registerAgent(invitation: string, username: string, displayName: string) {
+  registerAgent(
+    invitation: string,
+    username: string,
+    displayName: string,
+    vault?: import('../shared/account-crypto.js').AccountVault,
+  ) {
     return this.request<{ user: ChatUser; owner: ChatUser; token: string; expiresAt: number }>(
       '/agents/register',
       'POST',
-      { invitation, username, displayName },
+      { invitation, username, displayName, vault },
     );
   }
 }

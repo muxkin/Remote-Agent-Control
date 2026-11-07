@@ -8,6 +8,7 @@ export interface PairedHost {
   deviceId: string;
   ticket: string;
   phoneId: string;
+  identity?: Identity;
 }
 interface Entry {
   key: string;
@@ -19,6 +20,11 @@ interface Entry {
 }
 /** Persistent content has no application budget or automatic eviction. */
 export class SyncStore {
+  scope = '';
+  onHostChange?: (hostId: string, host?: PairedHost) => Promise<void>;
+  private privateKey(key: string, scope = this.scope) {
+    return scope ? `account:${scope}:${key}` : key;
+  }
   private db = openDB('pocket-device-v2', 1, {
     upgrade(db) {
       db.createObjectStore('private');
@@ -42,39 +48,56 @@ export class SyncStore {
     this.memory.set(entry.key, entry);
     if (this.memory.size > 32) this.memory.delete(this.memory.keys().next().value!);
   }
-  async identity(): Promise<Identity> {
+  async identity(scope = this.scope): Promise<Identity> {
+    const key = this.privateKey('identity', scope);
     const db = await this.db;
-    const old = await db.get('private', 'identity');
+    const old = await db.get('private', key);
     if (old) return old;
     const identity = await createIdentity();
     const tx = db.transaction('private', 'readwrite');
-    const raced = await tx.store.get('identity');
-    if (!raced) await tx.store.put(identity, 'identity');
+    const raced = await tx.store.get(key);
+    if (!raced) await tx.store.put(identity, key);
     await tx.done;
     return raced ?? identity;
   }
-  async hosts(): Promise<PairedHost[]> {
-    return (await (await this.db).get('private', 'hosts')) ?? [];
+  async hosts(scope = this.scope): Promise<PairedHost[]> {
+    return (await (await this.db).get('private', this.privateKey('hosts', scope))) ?? [];
   }
-  async saveHost(host: PairedHost) {
-    const hosts = await this.hosts();
-    await (await this.db).put('private', [...hosts.filter((h) => h.hostId !== host.hostId), host], 'hosts');
-    await (await this.db).put('private', host.hostId, 'active');
-  }
-  async active() {
-    const hosts = await this.hosts(),
-      id = await (await this.db).get('private', 'active');
-    return hosts.find((h) => h.hostId === id) ?? hosts[0];
-  }
-  async forget(hostId: string) {
+  async saveHost(host: PairedHost, sync = true) {
+    const scope = this.scope,
+      changed = this.onHostChange;
+    const hosts = await this.hosts(scope);
+    host.identity ??= await this.identity(scope);
     await (
       await this.db
     ).put(
       'private',
-      (await this.hosts()).filter((h) => h.hostId !== hostId),
-      'hosts',
+      [...hosts.filter((h) => h.hostId !== host.hostId), host],
+      this.privateKey('hosts', scope),
+    );
+    await (await this.db).put('private', host.hostId, this.privateKey('active', scope));
+    if (sync) await changed?.(host.hostId, host);
+  }
+  async active() {
+    const scope = this.scope;
+    const hosts = await this.hosts(scope),
+      id = await (await this.db).get('private', this.privateKey('active', scope));
+    return hosts.find((h) => h.hostId === id) ?? hosts[0];
+  }
+  async forget(hostId: string, sync = true) {
+    const scope = this.scope;
+    if (sync) await this.onHostChange?.(hostId);
+    await (
+      await this.db
+    ).put(
+      'private',
+      (await this.hosts(scope)).filter((h) => h.hostId !== hostId),
+      this.privateKey('hosts', scope),
     );
     await this.clear(`:${hostId}:`);
+  }
+  async replaceHosts(hosts: PairedHost[], scope = this.scope) {
+    await (await this.db).put('private', hosts, this.privateKey('hosts', scope));
   }
   async get<T>(key: string): Promise<T | undefined> {
     const generation = this.generation;

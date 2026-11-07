@@ -4,9 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
-import { MessagingStore } from '../src/server/messaging/store.js';
+import { MessagingStore } from './messaging-fixtures.js';
 import { MessagingObjects } from '../src/server/messaging/objects.js';
 import { buildRelay } from '../src/server/relay.js';
+import { protectAccount, encryptFor, seal, encode64, decode64 } from '../src/shared/account-crypto.js';
 import type { StorageAdapter } from '../src/server/object-storage.js';
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => {
@@ -113,6 +114,12 @@ it('authorizes signed metadata and 304s, returns original downloads and supports
   const auth = store.issueSession(a.id).token,
     other = store.issueSession(b.id).token,
     unauthorized = store.issueSession(eve.id).token;
+  const keys = await Promise.all([a, b, eve].map(() => protectAccount('object-test-password-123')));
+  for (const [i, user] of [a, b, eve].entries())
+    store.db
+      .prepare('INSERT INTO im_account_crypto VALUES (?,?,?,1)')
+      .run(user.id, JSON.stringify(keys[i].vault), 'disabled');
+  const recipients = { [a.id]: keys[0].secrets.publicKeys, [b.id]: keys[1].secrets.publicKeys };
   const relay = await buildRelay({
     origin: 'https://chat.test',
     webRoot: '/nonexistent',
@@ -131,23 +138,47 @@ it('authorizes signed metadata and 304s, returns original downloads and supports
   const png = await sharp({ create: { width: 1200, height: 900, channels: 3, background: '#22aa88' } })
     .png()
     .toBuffer();
+  const context = `attachment:${cid}:${crypto.randomUUID()}`,
+    fileKey = crypto.getRandomValues(new Uint8Array(32));
+  const sealed = await seal(fileKey, png, context),
+    ciphertext = Buffer.from(decode64(sealed.data));
+  const encrypted = await encryptFor(keys[0].secrets, a.id, recipients, context, {
+    key: encode64(fileKey),
+    iv: sealed.iv,
+    context,
+    name: 'original.png',
+    mime: 'image/png',
+    size: png.length,
+  });
   const uploaded = await call(`/api/im/conversations/${cid}/files`, auth, {
     method: 'POST',
-    payload: png,
+    payload: ciphertext,
     headers: {
       host: 'chat.test',
       origin: 'https://chat.test',
       authorization: `Bearer ${auth}`,
       'content-type': 'application/octet-stream',
-      'x-file-name': 'original.png',
+      'x-file-name': 'encrypted.pocket',
+      'x-encrypted-header': encrypted,
     },
   });
   expect(uploaded.statusCode).toBe(200);
   const file = uploaded.json().file;
-  store.send(a.id, cid, 'image', '', { attachmentIds: [file.id] });
+  store.send(
+    a.id,
+    cid,
+    'image',
+    await encryptFor(keys[0].secrets, a.id, recipients, `message:${cid}:image:0`, {
+      text: '',
+      state: 'complete',
+      options: { attachmentIds: [file.id] },
+    }),
+    { attachmentIds: [file.id] },
+  );
   const meta = await call(file.url + '?meta=1', other);
   expect(meta.statusCode).toBe(200);
-  expect(meta.json().mime).toBe('image/webp');
+  expect(meta.json().mime).toBe('application/octet-stream');
+  expect(meta.json().encrypted).toBe(encrypted);
   expect((await call(file.url + '?meta=1', unauthorized)).statusCode).toBe(404);
   const raw = await call(file.url, other);
   expect(raw.statusCode).toBe(302);
@@ -155,7 +186,8 @@ it('authorizes signed metadata and 304s, returns original downloads and supports
     new MessagingObjects(store, s.adapter, '').metadata('file', file.id)!.hash,
   );
   const downloaded = await call(file.url + '?download=1', other);
-  expect(downloaded.rawPayload).toEqual(png);
+  expect(downloaded.rawPayload).toEqual(ciphertext);
+  expect(downloaded.rawPayload).not.toEqual(png);
   const headers = {
     host: 'chat.test',
     authorization: `Bearer ${other}`,

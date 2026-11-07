@@ -31,9 +31,11 @@ import { ModelSettings, modelLabel, settingsUpdate, type ModelUpdate } from './M
 import { RequestCards, type RequestResponse } from './RequestCards';
 import { NewConversation, type NewConversationInput } from './NewConversation';
 import { TranscriptMessages } from './TranscriptMessages';
+import { TurnNavigation } from './TurnNavigation';
 import { ThreadTools } from './ThreadTools';
 import { SkillPicker } from './SkillPicker';
 import { Icon } from './Icon';
+import { PairScanner } from './PairScanner';
 import { ChatComposer } from './ChatComposer';
 import { OperationFeedback, operationActivity } from './OperationFeedback';
 import { ThreadNavigation } from './ThreadNavigation';
@@ -103,7 +105,9 @@ export default function AgentWorkspace({
   const [name, setName] = useState('我的手机');
   const [deviceId, setDeviceId] = useState('');
   const [code, setCode] = useState(() => new URLSearchParams(location.hash.slice(1)).get('pair') ?? '');
-  const [fromPairLink] = useState(() => !!new URLSearchParams(location.hash.slice(1)).get('pair'));
+  const [fromPairLink, setFromPairLink] = useState(
+    () => !!new URLSearchParams(location.hash.slice(1)).get('pair'),
+  );
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -616,8 +620,16 @@ export default function AgentWorkspace({
           <p className="pair-guide" role="status">
             {fromPairLink && code
               ? '已读取配对链接，点击「连接电脑」即可。'
-              : '用手机相机扫描电脑上的配对二维码，即可打开连接页面。'}
+              : '点击扫码，扫描电脑上的配对二维码。登录后，已添加的电脑会加密同步到账号。'}
           </p>
+          <PairScanner
+            onScan={(host, code) => {
+              setHostId(host);
+              setCode(code);
+              setFromPairLink(true);
+              setError('');
+            }}
+          />
           <form onSubmit={pair}>
             <label>
               设备名称
@@ -629,12 +641,12 @@ export default function AgentWorkspace({
                 autoComplete="off"
               />
             </label>
-            <details className="pair-manual" open={!fromPairLink || !code}>
+            <details className="pair-manual">
+              <summary>手动输入配对码</summary>
               <label>
                 电脑身份
                 <input value={hostId} onChange={(e) => setHostId(e.target.value)} autoComplete="off" />
               </label>
-              <summary>手动输入配对码</summary>
               <label>
                 一次性配对码
                 <input
@@ -647,7 +659,7 @@ export default function AgentWorkspace({
                 />
               </label>
             </details>
-            <button className="primary" disabled={busy}>
+            <button className="primary" disabled={busy || !hostId.trim() || !code.trim()}>
               {busy ? '正在配对…' : '连接电脑'}
             </button>
           </form>
@@ -739,59 +751,74 @@ export default function AgentWorkspace({
           </section>
         ) : (
           <>
-            <section
-              ref={transcriptRef}
-              className="transcript"
-              aria-label="聊天记录"
-              onScroll={(e) => {
-                const el = e.currentTarget;
-                followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-              }}
-            >
-              {historyCursor && (
-                <button
-                  className="secondary older"
-                  disabled={historyLoading}
-                  onClick={() => void loadOlder()}
-                >
-                  {historyLoading ? '正在加载历史记录…' : '加载更早的记录'}
-                </button>
-              )}
-              {!view &&
-                (threadError ? (
-                  <div className="center">
-                    <p>会话暂时无法读取</p>
-                    <button
-                      className="secondary"
-                      onClick={() => setSubscriptionAttempt((value) => value + 1)}
-                    >
-                      重新加载会话
-                    </button>
-                  </div>
-                ) : (
-                  <p className="muted center">正在读取会话…</p>
-                ))}
-              <TranscriptMessages
-                agent={{ name: agentName }}
-                messages={messages}
-                threadId={selected.id}
-                activeTurnId={view?.activeTurnId}
-                requests={view?.requests}
-              />
-              {view && messages.length === 0 && <p className="muted center">此会话暂时没有可显示的消息</p>}
-              {!!view?.requests?.length && (
-                <RequestCards
+            <div className="transcript-stage">
+              <section
+                ref={transcriptRef}
+                className="transcript"
+                aria-label="聊天记录"
+                onScroll={(e) => {
+                  const el = e.currentTarget;
+                  followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+                }}
+              >
+                {historyCursor && (
+                  <button
+                    className="secondary older"
+                    disabled={historyLoading}
+                    onClick={() => void loadOlder()}
+                  >
+                    {historyLoading ? '正在加载历史记录…' : '加载更早的记录'}
+                  </button>
+                )}
+                {!view &&
+                  (threadError ? (
+                    <div className="center">
+                      <p>会话暂时无法读取</p>
+                      <button
+                        className="secondary"
+                        onClick={() => setSubscriptionAttempt((value) => value + 1)}
+                      >
+                        重新加载会话
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="muted center">正在读取会话…</p>
+                  ))}
+                <TranscriptMessages
+                  agent={{ name: agentName }}
+                  messages={messages}
                   threadId={selected.id}
-                  requests={view.requests}
-                  onDraftChange={questionDraftChanged}
-                  response={operations.find((operation) => operation.kind === 'respond')}
-                  disabled={
-                    busy || pending || !stream || !view.owner || !view.synchronized || !status?.writesEnabled
-                  }
-                  onRespond={(response) => act('respond', response)}
+                  activeTurnId={view?.activeTurnId}
+                  requests={view?.requests}
                 />
-              )}
-            </section>
+                {view && messages.length === 0 && <p className="muted center">此会话暂时没有可显示的消息</p>}
+                {!!view?.requests?.length && (
+                  <RequestCards
+                    threadId={selected.id}
+                    requests={view.requests}
+                    onDraftChange={questionDraftChanged}
+                    response={operations.find((operation) => operation.kind === 'respond')}
+                    disabled={
+                      busy ||
+                      pending ||
+                      !stream ||
+                      !view.owner ||
+                      !view.synchronized ||
+                      !status?.writesEnabled
+                    }
+                    onRespond={(response) => act('respond', response)}
+                  />
+                )}
+              </section>
+              <TurnNavigation
+                key={selected.id}
+                messages={messages}
+                transcript={transcriptRef}
+                onNavigate={() => {
+                  followBottom.current = false;
+                }}
+              />
+            </div>
             <section className="composer">
               {toast && (
                 <p className="composer-toast" role="status">

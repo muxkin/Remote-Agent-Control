@@ -30,7 +30,7 @@ export function FileAttachment({
   const [error, setError] = useState('');
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof mediaContent>> | null>(null);
   const [reload, setReload] = useState(0);
-  const info = attachmentInfo(href);
+  const info = attachmentInfo(href, displayName);
   const name = displayName || info.name;
   async function download() {
     const file = await load(threadId, href);

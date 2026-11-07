@@ -1,0 +1,42 @@
+/* This stylesheet must accompany the same KaTeX version as the renderer (npm override). */
+.markdown .katex {
+  font-size: 1.12em;
+  letter-spacing: normal;
+  overflow-wrap: normal;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+.markdown .katex-display {
+  max-width: 100%;
+  margin: 1em 0;
+  padding: 8px 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
+/* A wide equation starts at the reachable left edge; shorter equations stay centered. */
+.markdown .katex-display > .katex {
+  width: max-content;
+  min-width: 100%;
+}
+.markdown .katex-display > .katex > .katex-html > .katex-tag {
+  position: static;
+  margin-left: 2em;
+}
+.markdown .katex-display.leqno > .katex > .katex-html > .katex-tag {
+  float: left;
+  margin-left: 0;
+  margin-right: 2em;
+}
+.markdown .chemical-formula {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  font-variant-numeric: lining-nums;
+}
+.markdown .chemical-formula sub {
+  position: relative;
+  bottom: -0.22em;
+  vertical-align: baseline;
+  font-size: 0.75em;
+  line-height: 0;
+}

@@ -6,7 +6,7 @@ import { messaging, useMessaging } from './context';
 import { Avatar, UserIdentity, Notice as ErrorNotice, Confirm, errorText, time, type Navigate } from './ui';
 export function AccountForm() {
   const { setUser } = useMessaging();
-  const [mode, setMode] = useState<'register' | 'login'>('register');
+  const [mode, setMode] = useState<'register' | 'login' | 'recovery'>('register');
   const [requiresCode, setRequiresCode] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -22,11 +22,19 @@ export function AccountForm() {
     setBusy(true);
     const data = new FormData(event.currentTarget);
     try {
-      const result = await messaging.request<{ user: ChatUser }>(
-        `/${mode}`,
-        'POST',
-        Object.fromEntries(data.entries()),
-      );
+      const result =
+        mode === 'register'
+          ? await messaging.account.register(
+              String(data.get('username')),
+              String(data.get('displayName')),
+              String(data.get('password')),
+              data.get('registrationCode') ? String(data.get('registrationCode')) : undefined,
+            )
+          : await messaging.account.login(
+              String(data.get('identifier')),
+              String(data.get('password')),
+              mode === 'recovery',
+            );
       setUser(result.user);
     } catch (error) {
       setError(errorText(error));
@@ -39,8 +47,8 @@ export function AccountForm() {
       <span className="empty-symbol">
         <Icon name="chat" size={38} />
       </span>
-      <h2>和 Agent 保持联系</h2>
-      <p>创建自己的账户，把 Agent 和朋友添加为联系人。无需邮箱或手机号。</p>
+      <h2>一个账号，连接你的设备</h2>
+      <p>登录后同步已添加的 Codex 和加密聊天。无需邮箱或手机号。</p>
       <div className="im-tabs" role="group" aria-label="账户操作">
         <button
           aria-pressed={mode === 'register'}
@@ -59,6 +67,15 @@ export function AccountForm() {
           }}
         >
           登录
+        </button>
+        <button
+          aria-pressed={mode === 'recovery'}
+          onClick={() => {
+            setMode('recovery');
+            setError('');
+          }}
+        >
+          恢复账号
         </button>
       </div>
       <form className="im-form" onSubmit={submit}>
@@ -87,15 +104,19 @@ export function AccountForm() {
           <small>3–32 位字母、数字、横线或下划线，至少一个字母。注册后自动获得永久 UID。</small>
         )}
         <label>
-          密码
+          {mode === 'recovery' ? '恢复码' : '密码'}
           <input
             name="password"
             type="password"
             required
             minLength={10}
             maxLength={128}
-            autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
-            placeholder="至少 10 位"
+            autoComplete={
+              mode === 'register' ? 'new-password' : mode === 'recovery' ? 'off' : 'current-password'
+            }
+            placeholder={
+              mode === 'recovery' ? '输入注册时保存的恢复码' : '至少 10 位，建议使用密码管理器生成'
+            }
           />
         </label>
         {mode === 'register' && requiresCode && (
@@ -144,7 +165,22 @@ export function Agents({ navigate }: { navigate: Navigate }) {
     }
   }
   const instructions = invitation
-    ? `请使用以下一次性邀请注册为我的聊天 Agent（15 分钟有效）。\nPOST ${location.origin}/api/im/agents/register\nContent-Type: application/json\n\n${JSON.stringify({ invitation: invitation.invitation, username: 'my-agent', displayName: '我的助手' }, null, 2)}\n\n用户名请改为唯一值。返回的 user.id 是永久数字 UID（字符串），请勿转成数值；user.address 是完整账号标识。保存返回的 token；后续请求使用 Authorization: Bearer <token>。\n通过 POST /api/im/conversations {"userId":"<返回的 owner.id>"} 创建会话，POST /api/im/conversations/<id>/messages {"clientId":"<唯一请求标识>","text":"你好"} 发送消息，GET /api/im/sync?cursor=0&wait=25000 接收更新，更新事件内包含 message 快照。\n\n流式回复：POST messages 时加 "state":"streaming"，然后 PATCH /api/im/conversations/<id>/messages/<messageId>，提交 {"revision":1,"text":"当前完整内容","state":"streaming"}；版本逐次加一，结束用 "state":"complete"。收到 cancelled 或 409 时停止。\n支持 Markdown、引用回复 replyTo、附件 attachmentIds 与群内 mentions。群聊 GET /api/im/conversations，建群 POST /api/im/groups {"name":"讨论组","userIds":["<联系人 ID>"]}。\n问题与授权：发送消息时附加 interaction，例如 {"kind":"approval","recipientId":"<owner.id>","title":"确认操作","description":"具体动作与影响"}；问题改为 kind:"question" 并附 questions:[{id:"q1",header:"选择",question:"如何继续？",options:[{label:"继续",description:"按当前方案"}]}]。收到 message.updated 后读取 message.interaction；仅 status:"approved" 且 respondedBy 为指定用户时才执行该次操作，rejected/cancelled/expired 均应停止。普通文字回复不算授权。\n接收更新后保存并使用返回的 cursor 继续同步，按消息 ID 与 revision 去重，不要回复自己的消息。音频通过附件收发，Emoji 直接放入 text，表情包可用 stickerId 发送。\n使用仓库 CLI 时运行 npm run im -- help 查看 request、表情、群聊、流式更新、附件与搜索命令。`
+    ? `请使用最新版 Remote-Agent-Control 的加密客户端注册为我的聊天 Agent（邀请 15 分钟有效）。
+服务地址：${location.origin}
+一次性邀请：${invitation.invitation}
+
+推荐使用项目 CLI：把邀请设置为 POCKET_IM_INVITATION，然后执行：
+npm run im -- register --origin ${location.origin} --username my-agent --name 我的助手 --state /private/my-agent.json
+
+用户名请改为唯一值。CLI 会在本地生成加密身份，将令牌和解密私钥保存在权限为 0600 的状态文件。请安全备份此文件，不要上传或打印其中的秘密。
+
+后续使用相同 --state 执行 contacts、chat、send、sync、history、upload、request 等命令。用户 UID 始终是字符串，不要转换为数值。发送时提供稳定的 --request-id；保存 sync cursor，按消息 ID 与 revision 去重，不要回复自己的消息。
+
+也可使用 src/client/encrypted-messaging.ts 的 EncryptedMessagingClient，在本地恢复自己的 AccountSecrets。不要直接向 /api/im POST 明文 text 或文件字节；所有正文、附件描述与授权回复均由加密客户端处理。
+
+授权必须来自指定用户的有效签名回复，且绑定具体交互 ID。普通文本不算授权。收到 cancelled、rejected、expired 或无法验证的消息时，不要执行对应操作。
+
+妥善保存 Agent 状态文件；重置登录令牌不恢复丢失的解密密钥。`
     : '';
   return (
     <>
@@ -271,7 +307,7 @@ export function Agents({ navigate }: { navigate: Navigate }) {
   );
 }
 export function Profile({ navigate }: { navigate: Navigate }) {
-  const { user, setUser } = useMessaging(),
+  const { user, setUser, updateProfile } = useMessaging(),
     [name, setName] = useState(user!.displayName),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
@@ -325,7 +361,7 @@ export function Profile({ navigate }: { navigate: Navigate }) {
                     });
                     const body = await response.json();
                     if (!response.ok) throw Error(body.error);
-                    setUser(body.user);
+                    updateProfile(body.user);
                     setNotice('头像已更新');
                   });
                 }}
@@ -338,7 +374,7 @@ export function Profile({ navigate }: { navigate: Navigate }) {
                 onClick={() =>
                   void run(async () => {
                     const result = await messaging.request<{ user: ChatUser }>('/me/avatar', 'DELETE');
-                    setUser(result.user);
+                    updateProfile(result.user);
                   })
                 }
               >
@@ -355,7 +391,7 @@ export function Profile({ navigate }: { navigate: Navigate }) {
                 const result = await messaging.request<{ user: ChatUser }>('/me', 'PATCH', {
                   displayName: name,
                 });
-                setUser(result.user);
+                updateProfile(result.user);
                 setNotice('已保存');
               });
             }}
@@ -389,10 +425,12 @@ export function Profile({ navigate }: { navigate: Navigate }) {
                   return;
                 }
                 void run(async () => {
-                  await messaging.request('/password', 'POST', {
-                    currentPassword: data.get('currentPassword'),
-                    newPassword: data.get('newPassword'),
-                  });
+                  await messaging.account.changePassword(
+                    String(data.get('currentPassword')),
+                    String(data.get('newPassword')),
+                  );
+                  const { rememberAccount } = await import('../account-session');
+                  await rememberAccount(messaging.account);
                   form.reset();
                   setPasswordOpen(false);
                   setNotice('密码已修改，其他设备已退出登录');
@@ -442,7 +480,9 @@ export function Profile({ navigate }: { navigate: Navigate }) {
             <span>退出其他设备</span>
             <Icon name="chevron" size={18} />
           </button>
-          <p className="im-help">仅管理消息账户，不影响电脑的设备配对。</p>
+          <p className="im-help">
+            密码用于解锁云端密文。修改密码会生成新的恢复码。退出其他设备会撤销账号登录；已授权电脑的配对可在设备管理中解除。
+          </p>
         </section>
         <ErrorNotice text={error} />
         {notice && (

@@ -58,7 +58,8 @@
     "im": "node --import tsx scripts/im-agent.ts",
     "test:messaging": "node --import tsx scripts/im-smoke.mjs",
     "test:messaging-design": "node --import tsx scripts/im-design-smoke.mjs",
-    "test:delivery": "node --import tsx scripts/delivery-feedback-smoke.mjs"
+    "test:delivery": "node --import tsx scripts/delivery-feedback-smoke.mjs",
+    "im:migrate": "node --import ./scripts/env.mjs --import tsx scripts/im-encryption-migrate.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -128,5 +129,8 @@
   "description": "Encrypted mobile remote for existing Codex desktop and DSH Web conversations",
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "overrides": {
+    "katex": "$katex"
+  }
 }

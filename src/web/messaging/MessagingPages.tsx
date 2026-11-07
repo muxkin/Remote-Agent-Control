@@ -6,6 +6,7 @@ import MessagesPage from './MessagesPage';
 import { useMessaging } from './context';
 import { Notice, type Navigate } from './ui';
 import './messaging.css';
+import './input-tools.css';
 export default function MessagingPages({ route, navigate }: { route: AppRoute; navigate: Navigate }) {
   const { user, loading, connectionError, refresh } = useMessaging();
   if (loading)

@@ -14,7 +14,7 @@ export function AttachmentIdentity({
   leading?: ReactNode;
   action?: ReactNode;
 }) {
-  const info = attachmentInfo(path);
+  const info = attachmentInfo(path, name);
   return (
     <>
       {leading ?? (

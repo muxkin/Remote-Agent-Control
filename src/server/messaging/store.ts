@@ -3,6 +3,7 @@ import { attachmentMime } from './media.js';
 import { interactionInput, interactionResponse } from './interaction.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { SEALED_PREFIX, parseEnvelope, canonical, type AccountVault } from '../../shared/account-crypto.js';
 import { nextUserId, USER_ID_PATTERN, USERNAME_PATTERN } from '../../shared/account-identity.js';
 import type {
   ChatInteraction,
@@ -33,6 +34,16 @@ const userColumns = 'id, kind, username, display_name AS displayName, created_at
 const messageColumns =
   'id, sequence, conversation_id AS conversationId, sender_id AS senderId, client_id AS clientId, text, created_at AS createdAt, updated_at AS updatedAt, revision, state, mentions, reply_to AS replyTo';
 const DAY = 86_400_000;
+function logical(value: any): any {
+  if (typeof value === 'string' && value.startsWith(SEALED_PREFIX)) {
+    const envelope = parseEnvelope(value);
+    return { encrypted: envelope.operation, sender: envelope.sender, context: envelope.context };
+  }
+  if (Array.isArray(value)) return value.map(logical);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, logical(v)]));
+  return value;
+}
 
 /** Persistent, single-process provider. All multi-row mutations commit before notifying clients. */
 export class MessagingStore {
@@ -60,6 +71,14 @@ export class MessagingStore {
       );
       CREATE TABLE IF NOT EXISTS im_sessions (
         hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES im_users(id), expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS im_account_crypto (
+        user_id TEXT PRIMARY KEY REFERENCES im_users(id), vault TEXT NOT NULL,
+        recovery_hash TEXT NOT NULL, revision INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS im_vault_items (
+        user_id TEXT NOT NULL REFERENCES im_users(id), id TEXT NOT NULL,
+        revision INTEGER NOT NULL, ciphertext TEXT, PRIMARY KEY(user_id,id)
       );
       CREATE INDEX IF NOT EXISTS im_sessions_user ON im_sessions(user_id);
       CREATE TABLE IF NOT EXISTS im_invites (
@@ -117,6 +136,15 @@ export class MessagingStore {
         created_at INTEGER NOT NULL, UNIQUE(user_id,source_id)
       );
     `);
+    for (const table of ['im_files', 'im_stickers']) {
+      if (
+        !this.db
+          .prepare(`PRAGMA table_info(${table})`)
+          .all()
+          .some((r) => r.name === 'encrypted')
+      )
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN encrypted TEXT`);
+    }
   }
   close() {
     this.db.close();
@@ -138,6 +166,7 @@ export class MessagingStore {
     const avatar = this.db.prepare('SELECT id FROM im_avatars WHERE user_id=?').get(id);
     return {
       ...user,
+      encrypted: !!this.db.prepare('SELECT 1 FROM im_account_crypto WHERE user_id=?').get(id),
       address: `${id}@${this.authority}`,
       ...(avatar ? { avatarUrl: `/api/im/users/${id}/avatar/${avatar.id}` } : {}),
     } as unknown as ChatUser;
@@ -213,7 +242,7 @@ export class MessagingStore {
     this.db.prepare('INSERT INTO im_invites VALUES (?,?,?)').run(digest(invitation), ownerId, expiresAt);
     return { invitation, expiresAt };
   }
-  registerAgent(invitation: string, username: string, displayName: string) {
+  registerAgent(invitation: string, username: string, displayName: string, vault?: AccountVault) {
     const result = this.transaction(() => {
       const invite = this.db
         .prepare('SELECT owner_id FROM im_invites WHERE hash=? AND expires_at>?')
@@ -221,10 +250,14 @@ export class MessagingStore {
       if (!invite) throw new ChatError(400, '邀请无效、已使用或已过期');
       const ownerId = String(invite.owner_id);
       const user = this.createUser('agent', username, displayName, null, ownerId);
+      if (vault)
+        this.db
+          .prepare('INSERT INTO im_account_crypto VALUES (?,?,?,1)')
+          .run(user.id, JSON.stringify(vault), 'disabled');
       this.db.prepare('DELETE FROM im_invites WHERE hash=?').run(digest(invitation));
       this.link(ownerId, user.id);
       this.link(user.id, ownerId);
-      return { user, owner: this.user(ownerId), ...this.issueSession(user.id) };
+      return { user: this.user(user.id), owner: this.user(ownerId), ...this.issueSession(user.id) };
     });
     this.changes.emit(result.owner.id);
     return result;
@@ -300,10 +333,12 @@ export class MessagingStore {
     this.changes.emit(id);
   }
   changePassword(id: string, passwordHash: string, keepToken: string) {
-    this.transaction(() => {
+    const change = () => {
       this.db.prepare('UPDATE im_users SET password_hash=? WHERE id=?').run(passwordHash, id);
       this.db.prepare('DELETE FROM im_sessions WHERE user_id=? AND hash<>?').run(id, digest(keepToken));
-    });
+    };
+    if (this.db.isTransaction) change();
+    else this.transaction(change);
     this.changes.emit(id);
   }
   logoutOthers(id: string, keepToken: string) {
@@ -359,6 +394,7 @@ export class MessagingStore {
   }
   private attachment(row: Record<string, unknown>): ChatAttachment {
     return {
+      ...(row.encrypted ? { encrypted: String(row.encrypted) } : {}),
       id: String(row.id),
       name: String(row.name),
       size: Number(row.size),
@@ -377,7 +413,9 @@ export class MessagingStore {
       sender: this.user(String(row.senderId)),
       mentions: JSON.parse(String(row.mentions)),
       attachments: this.db
-        .prepare('SELECT id,conversation_id,name,size,mime FROM im_files WHERE message_id=? ORDER BY rowid')
+        .prepare(
+          'SELECT id,conversation_id,name,size,mime,encrypted FROM im_files WHERE message_id=? ORDER BY rowid',
+        )
         .all(String(row.id))
         .map((r) => this.attachment(r)),
     } as unknown as ChatMessage;
@@ -389,6 +427,15 @@ export class MessagingStore {
       .get(messageId, conversationId);
     if (!row) throw new ChatError(404, '消息不存在');
     return this.decodeMessage(row);
+  }
+  byClient(id: string, cid: string, clientId: string) {
+    this.member(id, cid);
+    const row = this.db
+      .prepare(
+        `SELECT ${messageColumns} FROM im_messages WHERE conversation_id=? AND sender_id=? AND client_id=?`,
+      )
+      .get(cid, id, clientId);
+    return row ? this.decodeMessage(row) : null;
   }
   conversation(id: string, conversationId: string): ChatConversation {
     const readSequence = this.member(id, conversationId);
@@ -565,6 +612,17 @@ export class MessagingStore {
   }
   send(id: string, cid: string, clientId: string, text: string, options: SendMessageOptions = {}) {
     this.assertWritable(id, cid);
+    this.validateEncryption(id, cid, text, `message:${cid}:${clientId}:0`);
+    if (
+      text.startsWith(SEALED_PREFIX) &&
+      options.interaction &&
+      (options.interaction.title !== '加密请求' ||
+        options.interaction.description !== '请使用支持加密的客户端读取' ||
+        (options.interaction.questions &&
+          canonical(options.interaction.questions) !==
+            canonical([{ id: 'encrypted', header: '', question: '加密问题', options: [] }])))
+    )
+      throw new ChatError(400, '加密请求不能包含明文卡片');
     const state = options.state ?? 'complete',
       attachmentIds = [...new Set(options.attachmentIds ?? [])],
       mentions = [...new Set(options.mentions ?? [])];
@@ -579,16 +637,18 @@ export class MessagingStore {
     )
       throw new ChatError(400, '请输入消息或添加附件');
     const fingerprint = digest(
-      JSON.stringify({
-        cid,
-        text,
-        state,
-        attachmentIds: [...attachmentIds].sort(),
-        mentions: [...mentions].sort(),
-        replyTo: options.replyTo ?? null,
-        ...(options.interaction ? { interaction: options.interaction } : {}),
-        ...(options.stickerId ? { stickerId: options.stickerId } : {}),
-      }),
+      JSON.stringify(
+        logical({
+          cid,
+          text,
+          state,
+          attachmentIds: [...attachmentIds].sort(),
+          mentions: [...mentions].sort(),
+          replyTo: options.replyTo ?? null,
+          ...(options.interaction ? { interaction: options.interaction } : {}),
+          ...(options.stickerId ? { stickerId: options.stickerId } : {}),
+        }),
+      ),
     );
     const previous = this.db
       .prepare(
@@ -695,8 +755,14 @@ export class MessagingStore {
   ) {
     this.assertWritable(id, cid);
     const old = this.message(id, cid, messageId);
+    this.validateEncryption(id, cid, text, `message:${cid}:${old.clientId}:${revision}`);
     if (old.senderId !== id) throw new ChatError(403, '只能更新自己发出的回复');
-    if (revision === old.revision && text === old.text && state === old.state) return old;
+    if (
+      revision === old.revision &&
+      canonical(logical(text)) === canonical(logical(old.text)) &&
+      state === old.state
+    )
+      return old;
     if (old.state !== 'streaming' || revision !== old.revision + 1)
       throw new ChatError(409, '回复已结束或版本冲突，请读取最新消息');
     const members = this.members(cid);
@@ -740,19 +806,53 @@ export class MessagingStore {
       this.notify(ids);
     }
   }
-  upload(id: string, cid: string, name: string, data: Buffer) {
+  validateEncryption(id: string, cid: string, text: string, context?: string) {
+    const members = this.members(cid);
+    if (!text.startsWith(SEALED_PREFIX)) throw new ChatError(409, '此会话要求端到端加密');
+    try {
+      const envelope = parseEnvelope(text);
+      if (
+        envelope.sender !== id ||
+        (context && envelope.context !== context) ||
+        canonical(Object.keys(envelope.recipients).sort()) !== canonical([...members].sort()) ||
+        members.some((uid) => !this.user(uid).encrypted)
+      )
+        throw Error();
+    } catch {
+      throw new ChatError(409, '加密身份或成员列表已变化，请刷新后重试');
+    }
+  }
+  upload(id: string, cid: string, name: string, data: Buffer, encrypted?: string) {
     this.assertWritable(id, cid);
-    if (!data.length || data.length > 10 * 1024 * 1024) throw new ChatError(400, '附件需要为 1 字节至 10 MB');
+    this.validateEncryption(id, cid, encrypted ?? '');
+    if (encrypted || this.user(id).encrypted) {
+      this.validateEncryption(id, cid, encrypted ?? '');
+      if (
+        !encrypted ||
+        !parseEnvelope(encrypted).context.startsWith(`attachment:${cid}:`) ||
+        name !== 'encrypted.pocket'
+      )
+        throw new ChatError(400, '加密附件格式无效');
+    }
+    if (data.length > 10 * 1024 * 1024 + (encrypted ? 16 : 0)) throw new ChatError(413, '附件不能超过 10 MB');
+    if (!data.length) throw new ChatError(400, '附件至少需要 1 字节');
     this.db.prepare('DELETE FROM im_files WHERE message_id IS NULL AND created_at<?').run(Date.now() - DAY);
     this.checkFileQuota(id, data.length);
-    const mime = attachmentMime(name, data);
-    const fileId = randomUUID();
+    const mime = encrypted ? 'application/octet-stream' : attachmentMime(name, data);
+    const fileId = encrypted
+      ? parseEnvelope(encrypted).context.slice(`attachment:${cid}:`.length)
+      : randomUUID();
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(fileId))
+      throw new ChatError(400, '附件身份格式无效');
+    if (this.db.prepare('SELECT 1 FROM im_files WHERE id=?').get(fileId))
+      throw new ChatError(409, '附件身份已使用，请重试上传');
     this.db
       .prepare(
         'INSERT INTO im_files(id,conversation_id,user_id,name,mime,size,data,created_at) VALUES (?,?,?,?,?,?,?,?)',
       )
       .run(fileId, cid, id, name, mime, data.length, data, Date.now());
-    return this.attachment({ id: fileId, conversation_id: cid, name, mime, size: data.length });
+    if (encrypted) this.db.prepare('UPDATE im_files SET encrypted=? WHERE id=?').run(encrypted, fileId);
+    return this.attachment({ id: fileId, conversation_id: cid, name, mime, size: data.length, encrypted });
   }
   file(id: string, cid: string, fileId: string) {
     this.member(id, cid);
@@ -787,20 +887,21 @@ export class MessagingStore {
   }
   stickers(id: string): ChatSticker[] {
     return this.db
-      .prepare('SELECT id,name,mime,size FROM im_stickers WHERE user_id=? ORDER BY created_at DESC')
+      .prepare('SELECT id,name,mime,size,encrypted FROM im_stickers WHERE user_id=? ORDER BY created_at DESC')
       .all(id)
       .map((row) => ({ ...row, url: `/api/im/stickers/${row.id}/file` }) as unknown as ChatSticker);
   }
   sticker(id: string, stickerId: string) {
     const row = this.db
-      .prepare('SELECT id,name,mime,size,data FROM im_stickers WHERE user_id=? AND id=?')
+      .prepare('SELECT id,name,mime,size,data,encrypted FROM im_stickers WHERE user_id=? AND id=?')
       .get(id, stickerId);
     if (!row) throw new ChatError(404, '表情包不存在');
     return { ...row, data: Buffer.from(row.data as Uint8Array) } as unknown as ChatSticker & { data: Buffer };
   }
   saveSticker(id: string, cid: string, fileId: string) {
     const file = this.file(id, cid, fileId);
-    if (!file.mime.startsWith('image/')) throw new ChatError(400, '只能收藏 PNG、JPEG、GIF 或 WebP 图片');
+    if (!file.encrypted && !file.mime.startsWith('image/'))
+      throw new ChatError(400, '只能收藏 PNG、JPEG、GIF 或 WebP 图片');
     if (file.size > 2 * 1024 * 1024) throw new ChatError(400, '每个表情包不能超过 2 MB');
     this.transaction(() => {
       if (this.db.prepare('SELECT 1 FROM im_stickers WHERE user_id=? AND source_id=?').get(id, fileId))
@@ -813,6 +914,8 @@ export class MessagingStore {
           'INSERT INTO im_stickers(id,user_id,name,mime,size,data,source_id,created_at) VALUES (?,?,?,?,?,?,?,?)',
         )
         .run(stickerId, id, file.name, file.mime, file.size, file.data, fileId, Date.now());
+      if (file.encrypted)
+        this.db.prepare('UPDATE im_stickers SET encrypted=? WHERE id=?').run(file.encrypted, stickerId);
       this.copyMedia('file', fileId, 'sticker', stickerId);
     });
     return this.stickers(id);
@@ -878,11 +981,18 @@ export class MessagingStore {
       const message = this.message(id, cid, messageId),
         interaction = message.interaction;
       if (!interaction) throw new ChatError(400, '此消息不是交互请求');
+      if (message.text.startsWith(SEALED_PREFIX)) {
+        const encrypted = 'decision' in parsed ? parsed.comment : parsed.answers.encrypted?.[0];
+        this.validateEncryption(id, cid, encrypted ?? '', `response:${cid}:${messageId}:${interaction.id}`);
+      }
       if (this.user(id).kind !== 'human' || interaction.recipientId !== id)
         throw new ChatError(403, '只有指定的个人用户可以回答或授权');
       this.member(message.senderId, cid);
       if (interaction.status !== 'pending') {
-        if (interaction.respondedBy === id && JSON.stringify(interaction.response) === JSON.stringify(parsed))
+        if (
+          interaction.respondedBy === id &&
+          canonical(logical(interaction.response)) === canonical(logical(parsed))
+        )
           return;
         throw new ChatError(409, '请求已处理或已失效，请刷新消息');
       }

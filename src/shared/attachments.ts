@@ -73,8 +73,9 @@ const formatsByExtension = new Map(
 );
 
 // File formats are data, not separate renderers. Messages, drafts and details use this same model.
-export function attachmentInfo(path: string) {
-  const name = attachmentName(path);
+export function attachmentInfo(path: string, displayName?: string) {
+  // Encrypted transport URLs intentionally hide the filename; use the decrypted name for presentation.
+  const name = displayName || attachmentName(path);
   const extension = /(?:\.)(tar\.(?:gz|xz|bz2)|[a-z0-9]{1,10})$/i.exec(name)?.[1].toLowerCase() ?? '';
   const format = path.startsWith('dsh-image:') ? imageFormat : formatsByExtension.get(extension);
   return {

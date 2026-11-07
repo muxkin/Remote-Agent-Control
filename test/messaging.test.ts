@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,11 +7,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { nextUserId } from '../src/shared/account-identity.js';
-import { MessagingStore } from '../src/server/messaging/store.js';
+import { MessagingStore } from './messaging-fixtures.js';
+import { EncryptedMessagingClient } from '../src/client/encrypted-messaging.js';
+import { AccountClient } from '../src/client/account.js';
+import { protectAccount } from '../src/shared/account-crypto.js';
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  vi.unstubAllGlobals();
 });
 async function fixture(registrationCode?: string) {
   const origin = 'https://chat.test';
@@ -24,33 +28,156 @@ async function fixture(registrationCode?: string) {
     messaging: { registrationCode },
   });
   cleanups.push(() => relay.app.close());
+  vi.stubGlobal('fetch', async (input: string, init: RequestInit = {}) => {
+    const url = new URL(input),
+      headers = new Headers(init.headers);
+    const result = await relay.app.inject({
+      method: (init.method ?? 'GET') as 'GET',
+      url: url.pathname + url.search,
+      headers: { host: 'chat.test', origin, ...Object.fromEntries(headers) },
+      payload:
+        typeof init.body === 'string'
+          ? init.body
+          : init.body
+            ? Buffer.from(init.body as Uint8Array)
+            : undefined,
+    });
+    return new Response(new Uint8Array(result.rawPayload), {
+      status: result.statusCode,
+      headers: result.headers as Record<string, string>,
+    });
+  });
+  const clients = new Map<string, InjectClient>();
+  type Result = { status: number; body: any; cookie: string; headers: any };
+  class InjectClient extends EncryptedMessagingClient {
+    override readonly account = new AccountClient(<T>(path: string, method?: string, body?: unknown) =>
+      this.raw<T>(path, method, body),
+    );
+    extra: Record<string, string> = {};
+    last: Result = { status: 200, body: {}, cookie: '', headers: {} };
+    authResponse?: Result;
+    constructor(public auth = '') {
+      super();
+    }
+    override async raw<T>(path: string, method = 'GET', payload?: unknown): Promise<T> {
+      const response = await relay.app.inject({
+        method: method as 'GET',
+        url: `/api/im${path}`,
+        headers: {
+          host: 'chat.test',
+          origin,
+          ...(this.auth.startsWith('Bearer ') ? { authorization: this.auth } : { cookie: this.auth }),
+          ...this.extra,
+        },
+        payload: payload as object,
+      });
+      this.last = {
+        status: response.statusCode,
+        body: response.json(),
+        cookie: response.cookies.map((c) => `${c.name}=${c.value}`).join('; '),
+        headers: response.headers,
+      };
+      if (this.last.cookie) {
+        this.auth = this.last.cookie;
+        clients.set(this.auth, this);
+        this.authResponse = this.last;
+      }
+      if (response.statusCode >= 400)
+        throw Object.assign(Error(this.last.body.error), { status: response.statusCode });
+      return this.last.body as T;
+    }
+    media() {
+      const client = new EncryptedMessagingClient(
+        origin,
+        this.auth.startsWith('Bearer ') ? this.auth.slice(7) : this.auth.split('=')[1],
+      );
+      client.account.activate(
+        this.account.user!,
+        this.account.secrets!,
+        this.account.vault,
+        this.account.revision,
+      );
+      return client;
+    }
+    override upload(id: string, name: string, data: Blob | Uint8Array, signal?: AbortSignal) {
+      return this.media().upload(id, name, data, signal);
+    }
+    override download(path: string, signal?: AbortSignal) {
+      return this.media().download(path, signal);
+    }
+    override async request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+      return (this as any).decode(await this.raw(path, method, body));
+    }
+  }
+  // This test adapter translates human-readable test inputs through the production encrypted client.
   const request = async (
     path: string,
     method = 'GET',
-    payload?: object,
+    payload?: any,
     credential = '',
     extra: Record<string, string> = {},
-  ) => {
-    const response = await relay.app.inject({
-      method: method as 'GET',
-      url: `/api/im${path}`,
-      headers: {
-        host: 'chat.test',
-        origin,
-        ...(credential.startsWith('Bearer ') ? { authorization: credential } : { cookie: credential }),
-        ...extra,
-      },
-      payload,
-    });
-    return {
-      status: response.statusCode,
-      body: response.json(),
-      cookie: response.cookies.map((c) => `${c.name}=${c.value}`).join('; '),
-      headers: response.headers,
-    };
+  ): Promise<Result> => {
+    const client = clients.get(credential) ?? new InjectClient(credential);
+    client.extra = extra;
+    client.last = { status: 200, body: {}, cookie: '', headers: {} };
+    client.authResponse = undefined;
+    try {
+      let body: any;
+      if (path === '/crypto/register' && payload?.password)
+        body = await client.account.register(
+          payload.username,
+          payload.displayName,
+          payload.password,
+          payload.registrationCode,
+        );
+      else if (path === '/crypto/login' && payload?.password && typeof payload.identifier === 'string')
+        body = await client.account.login(payload.identifier, payload.password);
+      else if (path === '/crypto/password') {
+        try {
+          await client.account.changePassword(payload.currentPassword, payload.newPassword);
+          body = { ok: true };
+        } catch (error) {
+          throw Object.assign(error as object, { status: (error as any).status ?? 403 });
+        }
+      } else if (path === '/agents/register') {
+        const protectedAccount = await protectAccount('test-agent-password-123');
+        body = await client.raw(path, method, { ...payload, vault: protectedAccount.vault });
+        const agent = new InjectClient(`Bearer ${body.token}`);
+        agent.account.activate(body.user, protectedAccount.secrets);
+        clients.set(agent.auth, agent);
+      } else {
+        const message = /^\/conversations\/([^/]+)\/messages(?:\/([^/]+))?(\/respond)?$/.exec(path);
+        if (message && method === 'POST' && message[3])
+          body = await client.respond(message[1], message[2], payload);
+        else if (message && method === 'POST' && !message[2]) {
+          const { text = '', clientId, ...options } = payload;
+          body = await client.send(message[1], text, clientId, options);
+        } else if (message && method === 'PATCH')
+          body = await client.updateMessage(
+            message[1],
+            message[2],
+            payload.revision,
+            payload.text,
+            payload.state,
+          );
+        else if (path === '/stickers' && method === 'POST')
+          body = await client.saveSticker(payload.conversationId, payload.fileId);
+        else body = await client.request(path, method, payload);
+      }
+      return { ...(client.authResponse ?? client.last), body };
+    } catch (error) {
+      const detail = error as { status?: number; message: string };
+      return {
+        ...client.last,
+        status:
+          detail.status ??
+          (/请求标识/.test(detail.message) ? 409 : /表情包不存在/.test(detail.message) ? 404 : 400),
+        body: { error: detail.message },
+      };
+    }
   };
   async function human(username: string) {
-    const result = await request('/register', 'POST', {
+    const result = await request('/crypto/register', 'POST', {
       username,
       displayName: username,
       password: 'test-password-123',
@@ -59,7 +186,7 @@ async function fixture(registrationCode?: string) {
     expect(result.status).toBe(201);
     return { ...result.body.user, cookie: result.cookie };
   }
-  return { request, human, app: relay.app };
+  return { request, human, app: relay.app, client: (cookie: string) => clients.get(cookie)! };
 }
 
 it('registers real human accounts, restores sessions, persists profile and enforces login/logout', async () => {
@@ -68,10 +195,13 @@ it('registers real human accounts, restores sessions, persists profile and enfor
   expect((await request('/me', 'GET', undefined, alice.cookie)).body.user.id).toBe(alice.id);
   const profile = await request('/me', 'PATCH', { displayName: 'Alice 新名字' }, alice.cookie);
   expect(profile.body.user.displayName).toBe('Alice 新名字');
-  expect((await request('/login', 'POST', { identifier: 'alice', password: 'wrong-password' })).status).toBe(
-    401,
-  );
-  const login = await request('/login', 'POST', { identifier: 'ALICE', password: 'test-password-123' });
+  expect(
+    (await request('/crypto/login', 'POST', { identifier: 'alice', password: 'wrong-password' })).status,
+  ).toBe(401);
+  const login = await request('/crypto/login', 'POST', {
+    identifier: 'ALICE',
+    password: 'test-password-123',
+  });
   expect(login.status).toBe(200);
   expect(login.headers['set-cookie']).toContain('HttpOnly');
   expect(login.headers['set-cookie']).toContain('Secure');
@@ -195,7 +325,7 @@ it('supports human contacts, validates input, CSRF, private registration and rat
   const { request, human } = await fixture('private-registration-code');
   expect(
     (
-      await request('/register', 'POST', {
+      await request('/crypto/register', 'POST', {
         username: 'blocked',
         displayName: 'Blocked',
         password: 'valid-pass-123',
@@ -226,8 +356,8 @@ it('supports human contacts, validates input, CSRF, private registration and rat
     (await request(`/conversations/${convo.id}/read`, 'POST', { sequence: 5000 }, alice.cookie)).status,
   ).toBe(400);
   expect((await request('/contacts', 'POST', { identifier: 'alice' }, alice.cookie)).status).toBe(400);
-  for (let i = 0; i < 15; i++) await request('/login', 'POST', {});
-  expect((await request('/login', 'POST', {})).status).toBe(429);
+  for (let i = 0; i < 15; i++) await request('/crypto/login', 'POST', {});
+  expect((await request('/crypto/login', 'POST', {})).status).toBe(429);
 });
 
 it('persists history, pages without gaps and keeps unread cursors monotonic after restart', () => {
@@ -288,8 +418,8 @@ it('enforces auth limits even with query parameters and rejects untrusted cookie
   expect(
     (await request('/contacts', 'GET', undefined, alice.cookie, { 'sec-fetch-site': 'cross-site' })).status,
   ).toBe(403);
-  for (let i = 0; i < 15; i++) await request(`/login?attempt=${i}`, 'POST', {});
-  expect((await request('/login?attempt=16', 'POST', {})).status).toBe(429);
+  for (let i = 0; i < 15; i++) await request(`/crypto/login?attempt=${i}`, 'POST', {});
+  expect((await request('/crypto/login?attempt=16', 'POST', {})).status).toBe(429);
 });
 
 function groupFixture() {
@@ -447,11 +577,14 @@ it('keeps a contact block effective until explicitly lifted, without deleting hi
 it('changes passwords safely, revokes other sessions and rejects the previous password', async () => {
   const { request, human } = await fixture();
   const owner = await human('owner');
-  const other = await request('/login', 'POST', { identifier: 'owner', password: 'test-password-123' });
+  const other = await request('/crypto/login', 'POST', {
+    identifier: 'owner',
+    password: 'test-password-123',
+  });
   expect(
     (
       await request(
-        '/password',
+        '/crypto/password',
         'POST',
         { currentPassword: 'incorrect-pass', newPassword: 'new-password-123' },
         owner.cookie,
@@ -461,7 +594,7 @@ it('changes passwords safely, revokes other sessions and rejects the previous pa
   expect(
     (
       await request(
-        '/password',
+        '/crypto/password',
         'POST',
         { currentPassword: 'test-password-123', newPassword: 'new-password-123' },
         owner.cookie,
@@ -471,15 +604,15 @@ it('changes passwords safely, revokes other sessions and rejects the previous pa
   expect((await request('/contacts', 'GET', undefined, other.cookie)).status).toBe(401);
   expect((await request('/contacts', 'GET', undefined, owner.cookie)).status).toBe(200);
   expect(
-    (await request('/login', 'POST', { identifier: 'owner', password: 'test-password-123' })).status,
+    (await request('/crypto/login', 'POST', { identifier: 'owner', password: 'test-password-123' })).status,
   ).toBe(401);
   expect(
-    (await request('/login', 'POST', { identifier: 'owner', password: 'new-password-123' })).status,
+    (await request('/crypto/login', 'POST', { identifier: 'owner', password: 'new-password-123' })).status,
   ).toBe(200);
 });
 
 it('serves authorized binary attachments with safe headers and rejects active content and oversized bodies', async () => {
-  const { request, human, app } = await fixture();
+  const { request, human, app, client } = await fixture();
   const owner = await human('owner'),
     member = await human('member');
   await request('/contacts', 'POST', { identifier: 'member' }, owner.cookie);
@@ -499,8 +632,8 @@ it('serves authorized binary attachments with safe headers and rejects active co
     headers,
     payload,
   });
-  expect(uploaded.statusCode).toBe(200);
-  const file = uploaded.json().file;
+  expect(uploaded.statusCode).toBe(409); // Plaintext uploads have no compatibility path.
+  const { file } = await client(owner.cookie).upload(group.id, '测试.html', payload);
   expect(file.mime).toBe('application/octet-stream');
   await request(
     `/conversations/${group.id}/messages`,
@@ -513,7 +646,8 @@ it('serves authorized binary attachments with safe headers and rejects active co
     headers: { host: 'chat.test', cookie: member.cookie },
   });
   expect(downloaded.statusCode).toBe(200);
-  expect(downloaded.rawPayload.equals(payload)).toBe(true);
+  expect(downloaded.rawPayload.equals(payload)).toBe(false);
+  expect(Buffer.from((await client(member.cookie).download(file.url)).data)).toEqual(payload);
   expect(downloaded.headers['content-disposition']).toContain('attachment');
   expect(downloaded.headers['content-security-policy']).toContain("default-src 'none'");
   const invalid = await app.inject({
@@ -527,7 +661,7 @@ it('serves authorized binary attachments with safe headers and rejects active co
     method: 'POST',
     url: `/api/im/conversations/${group.id}/files`,
     headers,
-    payload: Buffer.alloc(10 * 1024 * 1024 + 1),
+    payload: Buffer.alloc(10 * 1024 * 1024 + 17),
   });
   expect(large.statusCode).toBe(413);
   await request(`/groups/${group.id}`, 'PATCH', { remove: member.id }, owner.cookie);
@@ -610,20 +744,20 @@ it('accepts UID, username and local qualified identity for login and contacts, w
   expect(alice.id).toBe('10000000');
   expect(bob.id).toBe('10000001');
   for (const identifier of [alice.id, '@ALICE', alice.address]) {
-    const login = await request('/login', 'POST', { identifier, password: 'test-password-123' });
+    const login = await request('/crypto/login', 'POST', { identifier, password: 'test-password-123' });
     expect(login.status).toBe(200);
     expect(login.body.user.id).toBe(alice.id);
   }
   expect(
     (
-      await request('/login', 'POST', {
+      await request('/crypto/login', 'POST', {
         identifier: alice.id + '@elsewhere.test',
         password: 'test-password-123',
       })
     ).status,
   ).toBe(401);
   expect(
-    (await request('/login', 'POST', { identifier: 10000000, password: 'test-password-123' })).status,
+    (await request('/crypto/login', 'POST', { identifier: 10000000, password: 'test-password-123' })).status,
   ).toBe(400);
   for (const identifier of [bob.id, '@BOB', bob.address]) {
     const added = await request('/contacts', 'POST', { identifier }, alice.cookie);
@@ -638,7 +772,7 @@ it('accepts UID, username and local qualified identity for login and contacts, w
   expect((await request('/conversations', 'POST', { userId: '010000001' }, alice.cookie)).status).toBe(400);
   expect(
     (
-      await request('/register', 'POST', {
+      await request('/crypto/register', 'POST', {
         username: '12345678',
         displayName: 'invalid',
         password: 'test-password-123',
@@ -803,7 +937,7 @@ it('expires and withdraws requests, and invalidates requests when group membersh
 });
 
 it('keeps private sticker collections, copies sent bytes, and detects audio from content', async () => {
-  const { request, human, app } = await fixture();
+  const { request, human, app, client } = await fixture();
   const alice = await human('alice'),
     bob = await human('bob');
   await request('/contacts', 'POST', { identifier: bob.id }, alice.cookie);
@@ -812,20 +946,7 @@ it('keeps private sticker collections, copies sent bytes, and detects audio from
   const path = `/conversations/${cid}`;
   const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
   async function upload(name: string, data: Buffer) {
-    const r = await app.inject({
-      method: 'POST',
-      url: `/api/im${path}/files`,
-      headers: {
-        host: 'chat.test',
-        origin: 'https://chat.test',
-        cookie: alice.cookie,
-        'content-type': 'application/octet-stream',
-        'x-file-name': encodeURIComponent(name),
-      },
-      payload: data,
-    });
-    expect(r.statusCode).toBe(200);
-    return r.json().file;
+    return (await client(alice.cookie).upload(cid, name, data)).file;
   }
   const image = await upload('hello.gif', gif);
   expect(
@@ -880,7 +1001,8 @@ it('keeps private sticker collections, copies sent bytes, and detects audio from
     url: file.url,
     headers: { host: 'chat.test', cookie: bob.cookie },
   });
-  expect(bytes.rawPayload).toEqual(gif);
+  expect(bytes.rawPayload).not.toEqual(gif);
+  expect(Buffer.from((await client(bob.cookie).download(file.url)).data)).toEqual(gif);
   const wav = Buffer.alloc(48);
   wav.write('RIFF');
   wav.writeUInt32LE(40, 4);
@@ -908,8 +1030,9 @@ it('keeps private sticker collections, copies sent bytes, and detects audio from
     url: voice.url,
     headers: { host: 'chat.test', cookie: bob.cookie },
   });
-  expect(audio.headers['content-type']).toBe('audio/wav');
-  expect(audio.rawPayload).toEqual(wav);
+  expect(audio.headers['content-type']).toBe('application/octet-stream');
+  expect(audio.rawPayload).not.toEqual(wav);
+  expect(Buffer.from((await client(bob.cookie).download(voice.url)).data)).toEqual(wav);
 });
 
 it('adds feature tables without changing existing accounts, IDs, messages or committed responses', () => {
