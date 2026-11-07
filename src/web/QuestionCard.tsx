@@ -9,8 +9,16 @@ type Props = {
   disabled: boolean;
   onRespond: (response: RequestResponse) => void;
   response?: Operation;
+  receiptLabel?: string;
 };
-export function QuestionCard({ request, disabled, onRespond, response, onDraftChange }: Props) {
+export function QuestionCard({
+  request,
+  disabled,
+  onRespond,
+  response,
+  onDraftChange,
+  receiptLabel = '桌面',
+}: Props) {
   const questions = request.questions!;
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [multiple, setMultiple] = useState<Record<string, string[]>>({});
@@ -35,7 +43,7 @@ export function QuestionCard({ request, disabled, onRespond, response, onDraftCh
       : response?.state === 'uncertain'
         ? '结果待确认，请勿重复提交。重新连接后会核对桌面状态。'
         : ['accepted', 'completed'].includes(response?.state ?? '')
-          ? '桌面已收到回答，正在同步…'
+          ? `${receiptLabel}已收到回答，正在同步…`
           : '正在提交回答…';
   const update = (value: string) => setAnswers((old) => ({ ...old, [question.id]: value }));
   function submit() {

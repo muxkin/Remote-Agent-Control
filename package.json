@@ -7,6 +7,7 @@
     "node": ">=24.15.0"
   },
   "scripts": {
+    "instance": "node --import ./scripts/env.mjs --import tsx src/server/backends/appearance-cli.ts",
     "dev": "node --import ./scripts/env.mjs --import tsx src/server/main.ts",
     "build": "npm run build:adapters && npm run build:server && npm run build:web && npm run package:adapters",
     "start": "node --import ./scripts/env.mjs dist/server/main.js",
@@ -53,7 +54,11 @@
     "package:adapters": "node scripts/package-adapters.mjs",
     "build:server": "node scripts/build-server.mjs",
     "build:web": "vite build",
-    "test:packages": "vitest run --config vitest.packages.config.ts"
+    "test:packages": "vitest run --config vitest.packages.config.ts",
+    "im": "node --import tsx scripts/im-agent.ts",
+    "test:messaging": "node --import tsx scripts/im-smoke.mjs",
+    "test:messaging-design": "node --import tsx scripts/im-design-smoke.mjs",
+    "test:delivery": "node --import tsx scripts/delivery-feedback-smoke.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -89,6 +94,7 @@
     "remark-math": "^6.0.0",
     "remark-parse": "^11.0.0",
     "rimraf": "6.1.4",
+    "sharp": "^0.35.5",
     "shiki": "^4.6.0",
     "smol-toml": "^1.9.1",
     "uint8arraylist": "3.0.2",

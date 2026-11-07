@@ -1,4 +1,6 @@
 import Fastify from 'fastify';
+import type { StorageAdapter } from './object-storage.js';
+import { registerMessaging } from './messaging/service.js';
 import staticFiles from '@fastify/static';
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -27,6 +29,7 @@ export interface RelayConfig {
   assetOrigin: string | null;
   uploadOrigins: string[];
   trustedProxies?: string[];
+  messaging?: { database?: string; registrationCode?: string; storage?: StorageAdapter };
 }
 const safeEqual = (a: string, b: string) =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -42,7 +45,7 @@ interface Client {
   identity: string;
 }
 
-/** Public edge: authenticates routing only. Never imports Gateway, Desktop or file keys. */
+/** Public edge: encrypted desktop routing plus an independent account/IM service. Never imports Desktop or file keys. */
 export async function buildRelay(config: RelayConfig) {
   if (config.enrollmentSecret.length < 32)
     throw Error('Relay enrollment secret must contain at least 32 characters');
@@ -68,6 +71,13 @@ export async function buildRelay(config: RelayConfig) {
       `default-src 'self'; script-src 'self'${cspAsset}; style-src 'self' 'unsafe-inline'${cspAsset}; font-src 'self'${cspAsset}; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self'${cspAsset}${allowedOrigins.map((v) => ` ${v}`).join('')}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
     );
     if (req.headers.host !== origin.host) return reply.code(403).send({ error: 'Host 不匹配' });
+  });
+  await registerMessaging(app, {
+    database: config.messaging?.database ?? (config.database ? `${config.database}.im.sqlite` : ':memory:'),
+    origin: config.origin,
+    registrationCode: config.messaging?.registrationCode,
+    clientAddress,
+    storage: config.messaging?.storage,
   });
   app.get('/health', async () => ({ ok: true, protocol: 2 }));
   // Version 1 cookies confer no authority and are deliberately retired at the new edge.

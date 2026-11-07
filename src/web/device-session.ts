@@ -1,3 +1,4 @@
+import { browserId } from './browser-id';
 import { DEFAULT_BACKEND, conversationKey } from '../shared/backends';
 import { CipherWire, SecureChannel, type Identity, type Lane } from '../shared/secure-channel';
 import { DeviceLink, type DeviceAuth } from '../shared/device-link';
@@ -20,7 +21,7 @@ export class DeviceSession {
   host?: PairedHost;
   status?: GatewayStatus;
   private identity?: Identity;
-  private sessionId = crypto.randomUUID();
+  private sessionId = browserId();
   private links = new Map<string, DeviceLink>();
   private opening = new Map<string, Promise<DeviceLink>>();
   private retry?: ReturnType<typeof setTimeout>;
@@ -552,7 +553,7 @@ export class DeviceSession {
     this.views.clear();
     this.status = undefined;
     this.statuses.clear();
-    this.sessionId = crypto.randomUUID();
+    this.sessionId = browserId();
     this.changed();
   }
 }

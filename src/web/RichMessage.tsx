@@ -1,3 +1,4 @@
+import { browserId } from './browser-id';
 import { Icon } from './Icon';
 import { memo, useEffect, useMemo, useState } from 'react';
 import Markdown, { defaultUrlTransform, type Components } from 'react-markdown';
@@ -52,7 +53,7 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
               tertiaryColor: diagramPalette!['--surface-active'],
             },
           });
-          result = DOMPurify.sanitize((await mermaid.render(`diagram-${crypto.randomUUID()}`, text)).svg, {
+          result = DOMPurify.sanitize((await mermaid.render(`diagram-${browserId()}`, text)).svg, {
             USE_PROFILES: { svg: true, svgFilters: true },
           });
         } else {
@@ -92,7 +93,20 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
     <div ref={ref} className={`code-block ${language === 'mermaid' ? 'diagram' : ''}`}>
       <div className="code-toolbar">
         <span>{language || '代码'}</span>
-        <button onClick={() => void navigator.clipboard.writeText(text)}>复制</button>
+        <button
+          onClick={() => {
+            void (async () => {
+              try {
+                await navigator.clipboard.writeText(text);
+                setError('已复制');
+              } catch {
+                setError('请选中代码手动复制');
+              }
+            })();
+          }}
+        >
+          复制
+        </button>
       </div>
       {html && !streaming ? (
         <div dangerouslySetInnerHTML={{ __html: html }} />

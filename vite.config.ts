@@ -18,17 +18,32 @@ export default defineConfig(() => {
     }
   };
   addFiles('src/web');
+  addFiles('src/client');
   addFiles('src/shared');
   addFiles('packages/adapter-sdk/src');
   hash.update(readFileSync('package-lock.json')).update(readFileSync('vite.config.ts'));
   const buildId = hash.digest('hex').slice(0, 16);
   const themeBoot = readFileSync('src/web/theme/boot.js', 'utf8');
+  const startup = readFileSync('src/web/startup.js', 'utf8');
+  const startupFile = `assets/startup-${createHash('sha256').update(startup).digest('hex').slice(0, 12)}.js`;
   const themeBootFile = `assets/theme-boot-${createHash('sha256').update(themeBoot).digest('hex').slice(0, 12)}.js`;
   return {
     define: { __POCKET_WEB_BUILD_ID__: JSON.stringify(buildId) },
     root: 'src/web',
     base: assets.base,
-    build: { outDir: '../../dist/web', emptyOutDir: true },
+    build: {
+      outDir: '../../dist/web',
+      emptyOutDir: true,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            // Stable foundations keep their cache across application-only releases.
+            if (/\/node_modules\/(react|react-dom|scheduler)\//.test(id)) return 'react-vendor';
+            if (id.includes('/node_modules/@material/material-color-utilities/')) return 'theme-vendor';
+          },
+        },
+      },
+    },
     plugins: [
       {
         name: 'theme-prepaint',
@@ -36,13 +51,25 @@ export default defineConfig(() => {
           order: 'post',
           handler(html, context) {
             // A classic, blocking script paints saved colors before the CSS/React bundles.
-            // Its content hash also makes it safe for the existing immutable asset CDN.
-            const src = context.server ? '/theme/boot.js' : `${assets.base}${themeBootFile}`;
-            return html.replace('</title>', `</title>\n    <script src="${src}"></script>`);
+            // Keep the small boot scripts and initial stylesheet independent of CDN failures.
+            const src = context.server ? '/theme/boot.js' : `/${themeBootFile}`;
+            const recoverySrc = context.server ? '/startup.js' : `/${startupFile}`;
+            if (!context.server && assets.origin) {
+              // Public icons are shipped with the HTML, not the hashed CDN asset manifest.
+              html = html.replace(`src="${assets.base}app-icon-192.png"`, 'src="/app-icon-192.png"');
+              html = html.replace(/<link\b[^>]*rel="stylesheet"[^>]*>/g, (tag) =>
+                tag.replace(/href="[^"]+"/, (href) => href.replace(assets.base, '/')),
+              );
+            }
+            return html.replace(
+              '</title>',
+              `</title>\n    <script src="${src}"></script>\n    <script src="${recoverySrc}"></script>${assets.origin ? `\n    <link rel="preconnect" href="${assets.origin}" crossorigin>` : ''}`,
+            );
           },
         },
         generateBundle() {
           this.emitFile({ type: 'asset', fileName: themeBootFile, source: themeBoot });
+          this.emitFile({ type: 'asset', fileName: startupFile, source: startup });
         },
       },
       {

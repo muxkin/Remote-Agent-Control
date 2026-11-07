@@ -12,9 +12,11 @@ export function RequestCards({
   onRespond,
   response,
   onDraftChange,
+  receiptLabel,
 }: {
   onDraftChange?: (id: string, dirty: boolean) => void;
   response?: Operation;
+  receiptLabel?: string;
   requests: ConversationRequest[];
   threadId?: string;
   disabled: boolean;
@@ -35,6 +37,7 @@ export function RequestCards({
           />
         ) : ['question', 'async-question'].includes(request.kind) && request.questions?.length ? (
           <QuestionCard
+            receiptLabel={receiptLabel}
             key={`${request.id}:${request.fingerprint}`}
             request={request}
             disabled={disabled}

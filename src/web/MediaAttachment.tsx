@@ -1,3 +1,4 @@
+import { useAttachmentAccess } from './AttachmentAccess';
 import { useEffect, useRef, useState } from 'react';
 import { remoteFetch } from './device-session';
 import { ImagePreview } from './ImagePreview';
@@ -13,13 +14,16 @@ export function Media({
   threadId,
   compact = false,
   onRemove,
+  mediaType,
 }: {
   src: string;
   label: string;
   threadId: string;
   compact?: boolean;
   onRemove?: () => void;
+  mediaType?: 'image' | 'video' | 'audio';
 }) {
+  const access = useAttachmentAccess();
   const { ref, visible } = useVisible();
   // Start external media only after visibility initialization, too. Otherwise a
   // fast failed load can be cleared by the first visibility effect.
@@ -27,6 +31,7 @@ export function Media({
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [preview, setPreview] = useState(false);
+  const [original, setOriginal] = useState('');
   const expiresAt = useRef(0);
   const refreshing = useRef(false);
   const recovery = useRef<{ time: number; playing: boolean } | null>(null);
@@ -53,6 +58,25 @@ export function Media({
   }
   useEffect(() => {
     if (!visible) return;
+    if (access) {
+      const controller = new AbortController();
+      void access
+        .load(threadId, src, controller.signal)
+        .then((file) => {
+          if (controller.signal.aborted) return;
+          if (!/^(image|audio|video)\//.test(file.mime)) throw Error('此附件不支持媒体预览');
+          expiresAt.current = file.expiresAt;
+          setUrl(file.url);
+          setError('');
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) setError(error.message);
+        })
+        .finally(() => {
+          refreshing.current = false;
+        });
+      return () => controller.abort();
+    }
     if (!localReference(src)) {
       expiresAt.current = 0;
       setUrl(src);
@@ -81,8 +105,12 @@ export function Media({
         refreshing.current = false;
       });
     return () => controller.abort();
-  }, [src, threadId, visible, refresh]);
+  }, [src, threadId, visible, refresh, access]);
   async function download() {
+    if (access) {
+      const file = await access.load(threadId, src, undefined, true);
+      return downloadFile({ ...file, url: file.downloadUrl ?? file.url });
+    }
     if (localReference(src)) return downloadFile(await mediaContent(threadId, src));
     const response = await fetch(src, { credentials: 'omit', referrerPolicy: 'no-referrer' });
     if (!response.ok) throw Error('图片下载失败，请重试');
@@ -91,6 +119,7 @@ export function Media({
     setTimeout(() => URL.revokeObjectURL(temporary), 60000);
   }
   const info = attachmentInfo(src.split(/[?#]/)[0]);
+  const media = mediaType ?? info.media;
   const name = label || info.name;
   return (
     <AttachmentActions
@@ -100,9 +129,9 @@ export function Media({
       surface={compact ? 'compact' : 'media'}
       onRemove={onRemove}
     >
-      <div className="media" ref={ref}>
+      <div className="media" ref={ref} data-media-type={media}>
         {url ? (
-          info.media === 'video' ? (
+          media === 'video' ? (
             <video
               key={`${url}:${localReference(src) ? '' : refresh}`}
               controls
@@ -114,7 +143,7 @@ export function Media({
               onError={(e) => failed(e.currentTarget)}
               onLoadedMetadata={(e) => restore(e.currentTarget)}
             />
-          ) : info.media === 'audio' ? (
+          ) : media === 'audio' ? (
             <audio
               key={`${url}:${localReference(src) ? '' : refresh}`}
               controls
@@ -137,6 +166,11 @@ export function Media({
                 event.stopPropagation();
                 if (expiresAt.current && Date.now() + 10000 >= expiresAt.current) renew();
                 setPreview(true);
+                if (access)
+                  void access
+                    .load(threadId, src, undefined, true)
+                    .then((file) => setOriginal(file.url))
+                    .catch(() => setError('原图加载失败，可重试'));
               }}
             >
               {compact ? (
@@ -147,6 +181,7 @@ export function Media({
                     <img
                       key={`${url}:${localReference(src) ? '' : refresh}`}
                       loading="lazy"
+                      decoding="async"
                       src={url}
                       alt=""
                       referrerPolicy="no-referrer"
@@ -158,6 +193,7 @@ export function Media({
                 <img
                   key={`${url}:${localReference(src) ? '' : refresh}`}
                   loading="lazy"
+                  decoding="async"
                   src={url}
                   alt={label}
                   referrerPolicy="no-referrer"
@@ -175,7 +211,7 @@ export function Media({
             {error ? '附件不可用' : '正在加载附件…'}
           </span>
         )}
-        {!compact && url && label && info.media !== 'audio' && (
+        {!compact && url && label && media !== 'audio' && (
           <span className="attachment-caption" title={label}>
             {label}
           </span>
@@ -191,7 +227,7 @@ export function Media({
         {preview && url && (
           <ImagePreview
             key={src}
-            src={url}
+            src={original || url}
             label={label}
             error={error}
             reload={refresh}

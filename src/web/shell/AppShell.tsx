@@ -1,6 +1,7 @@
+import { useMessaging } from '../messaging/context';
 import { BackendChooser } from '../BackendChooser';
 import { DEFAULT_BACKEND } from '../../shared/backends';
-import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
@@ -8,31 +9,19 @@ import { modules, workspaceTools } from './modules';
 import { parentRoute, readRoute, routeURL, type AppRoute } from './routes';
 import { useAppViewport } from './viewport';
 const AgentWorkspace = lazy(workspaceTools[0].load);
-const MePages = lazy(() => import('./MePages'));
+const MessagingPages = lazy(() => import('../messaging/MessagingPages'));
+import MePages from './MePages';
+import { PageBoundary, PageLoading } from './PageBoundary';
 
-export function PageHeader({
-  title,
-  back,
-  children,
-}: {
-  title: string;
-  back?: () => void;
-  children?: ReactNode;
-}) {
-  return (
-    <header className="page-header">
-      {back && (
-        <button className="icon-button" aria-label="返回" onClick={back}>
-          <Icon name="back" />
-        </button>
-      )}
-      <h1>{title}</h1>
-      {children}
-    </header>
-  );
-}
+export { PageHeader } from './PageHeader';
+
 export function AppShell() {
   useAppViewport();
+  useEffect(() => {
+    window.dispatchEvent(new Event('pocket:app-ready'));
+  }, []);
+  const { conversations } = useMessaging();
+  const unread = conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
   const [route, setRoute] = useState(() => readRoute(new URL(location.href)));
   const workbenchRoute = useRef<AppRoute>(route.page === 'workbench' ? route : { page: 'workbench' });
   const [ready, setReady] = useState(false);
@@ -87,9 +76,16 @@ export function AppShell() {
     setSelectedBackend(backendId);
   }, [backendId]);
   const activeWorkspace = route.page === 'workbench' || route.page === 'pair';
-  const root = ['messages', 'workbench', 'me'].includes(route.page) && !route.thread;
+  const root =
+    ['messages', 'contacts', 'workbench', 'me'].includes(route.page) && !route.thread && !route.conversation;
+  const messagingPage = ['messages', 'contacts', 'profile', 'integrations'].includes(route.page);
   const showNavigation = route.page !== 'pair';
-  const activeModule = route.page === 'messages' || route.page === 'workbench' ? route.page : 'me';
+  const activeModule =
+    route.page === 'messages' || route.page === 'contacts' || route.page === 'workbench'
+      ? route.page
+      : route.page === 'integrations'
+        ? 'contacts'
+        : 'me';
   const back = () => navigate(parentRoute(route));
   return (
     <div
@@ -99,19 +95,19 @@ export function AppShell() {
         {chooser && <BackendChooser navigate={navigate} />}
         {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
           <section className="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
-            <Suspense
-              fallback={
-                <div className="page-loading" role="status">
-                  正在打开工作台…
-                </div>
-              }
-            >
-              <AgentWorkspace
-                key={`${hostId || 'unpaired'}:${backendId}`}
-                route={workspaceRoute}
-                navigate={navigate}
-                onBusy={setBusy}
-              />
+            <Suspense fallback={<PageLoading label="正在打开工作台…" />}>
+              <PageBoundary
+                page="workbench"
+                backLabel="返回消息"
+                onBack={() => navigate({ page: 'messages' })}
+              >
+                <AgentWorkspace
+                  key={`${hostId || 'unpaired'}:${backendId}`}
+                  route={workspaceRoute}
+                  navigate={navigate}
+                  onBusy={setBusy}
+                />
+              </PageBoundary>
             </Suspense>
           </section>
         )}
@@ -125,32 +121,26 @@ export function AppShell() {
             <Icon name="back" />
           </button>
         )}
-        {route.page === 'messages' && (
-          <main className="module-page messages-page">
-            <PageHeader title="消息">
-              <button
-                className="icon-button"
-                aria-label="Agent 联系人"
-                onClick={() => navigate({ page: 'integrations' })}
-              >
-                <Icon name="user" />
-              </button>
-            </PageHeader>
-            <section className="module-empty">
-              <span className="empty-symbol">
-                <Icon name="chat" size={38} />
-              </span>
-              <h2>和 Agent 保持联系</h2>
-              <p>接入即时聊天后，消息会出现在这里。</p>
-              <button className="secondary" onClick={() => navigate({ page: 'integrations' })}>
-                查看 Agent 接入
-              </button>
-            </section>
-          </main>
+        {messagingPage && (
+          <Suspense fallback={<PageLoading />}>
+            <PageBoundary
+              key={route.page}
+              page={route.page}
+              backLabel="返回工作台"
+              onBack={() => navigate({ page: 'workbench' })}
+            >
+              <MessagingPages route={route} navigate={navigate} />
+            </PageBoundary>
+          </Suspense>
         )}
-        {!activeWorkspace && route.page !== 'messages' && (
-          <Suspense fallback={<div className="page-loading">正在打开…</div>}>
-            <PageBoundary key={route.page} onBack={() => navigate({ page: 'workbench' })}>
+        {!activeWorkspace && !messagingPage && (
+          <Suspense fallback={<PageLoading />}>
+            <PageBoundary
+              key={route.page}
+              page={route.page}
+              backLabel="返回工作台"
+              onBack={() => navigate({ page: 'workbench' })}
+            >
               <MePages
                 route={route}
                 navigate={navigate}
@@ -163,7 +153,7 @@ export function AppShell() {
             </PageBoundary>
           </Suspense>
         )}
-        {error && (
+        {error && (activeWorkspace || route.page === 'devices') && (
           <p className="shell-error" role="alert">
             {error}
           </p>
@@ -171,6 +161,9 @@ export function AppShell() {
       </div>
       {showNavigation && (
         <nav className="bottom-navigation" aria-label="主要功能">
+          <div className="shell-brand">
+            <img src="/app-icon-32.png" alt="Agent 空间" />
+          </div>
           {modules.map((module) => (
             <button
               key={module.id}
@@ -181,30 +174,15 @@ export function AppShell() {
             >
               <Icon name={module.icon} size={24} />
               <span>{module.title}</span>
+              {module.id === 'messages' && unread > 0 && (
+                <b className="navigation-unread" aria-hidden="true">
+                  {unread > 99 ? '99+' : unread}
+                </b>
+              )}
             </button>
           ))}
         </nav>
       )}
     </div>
   );
-}
-
-class PageBoundary extends Component<{ children: ReactNode; onBack: () => void }, { failed: boolean }> {
-  state = { failed: false };
-  static getDerivedStateFromError() {
-    return { failed: true };
-  }
-  render() {
-    return this.state.failed ? (
-      <section className="module-empty">
-        <h2>暂时无法打开此页面</h2>
-        <p>请检查网络后重试。</p>
-        <button className="secondary" onClick={this.props.onBack}>
-          返回工作台
-        </button>
-      </section>
-    ) : (
-      this.props.children
-    );
-  }
 }

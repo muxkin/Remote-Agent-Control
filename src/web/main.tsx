@@ -1,5 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { MessagingProvider } from './messaging/context';
 import { AppShell } from './shell/AppShell';
 import './style.css';
 import './mobile-design.css';
@@ -8,6 +9,7 @@ import './shell/shell.css';
 import './composer-controls.css';
 import './attachments.css';
 import './theme/theme.css';
+import './shell/surfaces.css';
 import { initializeAppearance } from './theme/store';
 
 initializeAppearance();
@@ -25,4 +27,8 @@ for (const [rel, href, type, sizes] of [
 }
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {});
 
-createRoot(document.getElementById('root')!).render(<AppShell />);
+createRoot(document.getElementById('root')!).render(
+  <MessagingProvider>
+    <AppShell />
+  </MessagingProvider>,
+);

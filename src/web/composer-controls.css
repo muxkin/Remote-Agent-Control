@@ -1,4 +1,29 @@
 /* Composer settings stay beside the draft; native popovers never dim the chat. */
+.sending-spinner {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: sending-spin .8s linear infinite;
+}
+@keyframes sending-spin { to { transform: rotate(360deg); } }
+.send-button[aria-busy='true']:disabled { opacity: 1; background: var(--accent); color: var(--on-accent); }
+.delivery-feedback { display: flex; align-items: center; gap: 9px; padding: 7px 10px; margin: 0 0 7px; border-radius: 12px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.delivery-feedback .sending-spinner { width: 14px; height: 14px; }
+.delivery-indicator { display: flex; flex: 0 0 16px; align-items: center; justify-content: center; }
+.delivery-copy { display: grid; gap: 2px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.delivery-copy small { font-size: 11px; color: var(--muted); }
+.delivery-feedback.waiting { background: var(--surface-subtle); }
+.delivery-feedback.waiting .delivery-indicator { color: var(--accent); }
+.delivery-feedback.confirmed { color: var(--accent); }
+.delivery-feedback.failed { background: var(--danger-soft); color: var(--danger); }
+.delivery-feedback.failed small { color: inherit; }
+.delivery-feedback > button { flex-shrink: 0; font: inherit; color: inherit; padding: 8px 9px; border-radius: 9px; min-height: 36px; background: var(--surface); }
+@media (prefers-reduced-motion: reduce) { .sending-spinner { animation: none; } }
+.composer-box { container: chat-composer / inline-size; }
 .composer-control-trigger {
   display: inline-flex;
   align-items: center;
@@ -272,4 +297,20 @@
   .composer-model {
     flex: 1;
   }
+}
+
+/* Use the actual input width, including a narrow desktop chat pane. */
+@container chat-composer (max-width: 520px) {
+  .composer-actions :is(.permission-trigger, .composer-tool-trigger) {
+    flex: 0 0 44px;
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+  }
+  .composer-actions :is(.permission-trigger, .composer-tool-trigger) > span,
+  .composer-actions .permission-trigger > svg:last-child { display: none; }
+  .composer-actions :is(.permission-trigger, .composer-tool-trigger) > svg:first-child { width: 20px; height: 20px; }
+  .composer-actions .composer-model { flex: 1; min-width: 0; }
 }

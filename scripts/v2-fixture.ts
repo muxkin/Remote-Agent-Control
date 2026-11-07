@@ -97,6 +97,7 @@ await relay.app.listen({ port: config.port, host: bind });
 await registry.start();
 host.start();
 const pair = store.mintPairing();
+await mkdir('.implementation', { recursive: true });
 await writeFile(
   '.implementation/fixture.json',
   JSON.stringify({

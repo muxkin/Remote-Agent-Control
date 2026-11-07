@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { buildRelay } from './relay.js';
+import { loadStorage } from './object-storage.js';
 import { assetSettings } from '../shared/assets.js';
 process.umask(0o077);
 const state = resolve(process.env.POCKET_RELAY_STATE ?? './relay-state');
@@ -10,8 +11,26 @@ const app = await buildRelay({
   webRoot: resolve(process.env.POCKET_WEB_ROOT ?? './dist/web'),
   database: join(state, 'relay.sqlite'),
   enrollmentSecret: process.env.POCKET_RELAY_ENROLLMENT ?? '',
+  messaging: {
+    database: join(state, 'messaging.sqlite'),
+    registrationCode: process.env.POCKET_IM_REGISTRATION_CODE,
+    storage: process.env.POCKET_IM_MEDIA_ADAPTER
+      ? await loadStorage(
+          { adapterPath: resolve(process.env.POCKET_IM_MEDIA_ADAPTER) },
+          'media',
+          new URL(process.env.POCKET_PUBLIC_ORIGIN!).origin,
+        )
+      : undefined,
+  },
   assetOrigin: assetSettings(process.env.POCKET_ASSET_BASE).origin,
-  uploadOrigins: (process.env.POCKET_UPLOAD_ORIGINS ?? '').split(',').filter(Boolean),
+  uploadOrigins: [
+    ...new Set(
+      [
+        ...(process.env.POCKET_UPLOAD_ORIGINS ?? '').split(','),
+        process.env.POCKET_IM_MEDIA_ORIGIN ?? '',
+      ].filter(Boolean),
+    ),
+  ],
   trustedProxies: (process.env.POCKET_RELAY_TRUSTED_PROXIES ?? '')
     .split(',')
     .map((v) => v.trim())

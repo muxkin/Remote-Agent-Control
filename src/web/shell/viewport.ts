@@ -4,11 +4,23 @@ import { useLayoutEffect } from 'react';
 export function useAppViewport() {
   useLayoutEffect(() => {
     const viewport = window.visualViewport;
+    // Keep application chrome fixed; ImagePreview owns its own image transforms.
+    const preventPinch = (event: TouchEvent) => { if (event.touches.length > 1) event.preventDefault(); };
+    const preventGesture = (event: Event) => event.preventDefault();
+    const preventWheelZoom = (event: WheelEvent) => { if (event.ctrlKey || event.metaKey) event.preventDefault(); };
+    const preventKeyZoom = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && ['+', '-', '=', '0'].includes(event.key)) event.preventDefault();
+    };
+    document.addEventListener('touchmove', preventPinch, { passive: false });
+    document.addEventListener('gesturestart', preventGesture, { passive: false });
+    document.addEventListener('gesturechange', preventGesture, { passive: false });
+    document.addEventListener('wheel', preventWheelZoom, { passive: false });
+    document.addEventListener('keydown', preventKeyZoom);
     let frame = 0;
     const update = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        // Preserve native pinch zoom rather than shrinking the interface while zoomed.
+        // Browser-level accessibility overrides must not corrupt the layout geometry.
         if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
         const height = viewport?.height ?? window.innerHeight;
         document.documentElement.style.setProperty('--app-visible-height', `${height}px`);
@@ -20,6 +32,11 @@ export function useAppViewport() {
     viewport?.addEventListener('resize', update);
     viewport?.addEventListener('scroll', update);
     return () => {
+      document.removeEventListener('touchmove', preventPinch);
+      document.removeEventListener('gesturestart', preventGesture);
+      document.removeEventListener('gesturechange', preventGesture);
+      document.removeEventListener('wheel', preventWheelZoom);
+      document.removeEventListener('keydown', preventKeyZoom);
       cancelAnimationFrame(frame);
       window.removeEventListener('resize', update);
       viewport?.removeEventListener('resize', update);

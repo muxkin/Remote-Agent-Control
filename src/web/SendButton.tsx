@@ -9,6 +9,8 @@ export function SendButton({
   onInterrupt,
   onQueue,
   hintId = 'send-queue-hint',
+  labels,
+  activity,
 }: {
   running: boolean;
   hasDraft: boolean;
@@ -17,6 +19,8 @@ export function SendButton({
   onInterrupt: () => void;
   onQueue: () => void;
   hintId?: string;
+  labels?: { send: string; stop: string; running: string };
+  activity?: string;
 }) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined),
     handled = useRef(false);
@@ -30,16 +34,24 @@ export function SendButton({
   };
   useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(() => {
-    if (disabled || !canQueue) cancel();
-  }, [disabled, canQueue]);
+    if (disabled || activity || !canQueue) cancel();
+  }, [disabled, activity, canQueue]);
   return (
     <button
       type="submit"
       className={`primary send-button ${pause ? 'pause-button' : ''} ${holding ? 'holding' : ''}`}
-      aria-label={pause ? '中断任务' : running ? '追加指令 ↑' : '发送 ↑'}
-      title={pause ? '中断当前任务' : canQueue ? '点击直接发送；长按排队下一轮' : '发送'}
+      aria-busy={!!activity}
+      aria-label={
+        activity ??
+        (pause
+          ? (labels?.stop ?? '中断任务')
+          : running
+            ? (labels?.running ?? '追加指令 ↑')
+            : (labels?.send ?? '发送 ↑'))
+      }
+      title={pause ? (labels?.stop ?? '中断当前任务') : canQueue ? '点击直接发送；长按排队下一轮' : '发送'}
       aria-describedby={canQueue ? hintId : undefined}
-      disabled={disabled}
+      disabled={disabled || !!activity}
       onPointerDown={(e) => {
         handled.current = false;
         origin.current = { x: e.clientX, y: e.clientY };
@@ -94,7 +106,11 @@ export function SendButton({
         }
       }}
     >
-      <Icon name={pause ? 'pause' : 'up'} size={23} />
+      {activity ? (
+        <span className="sending-spinner" aria-hidden="true" />
+      ) : (
+        <Icon name={pause ? 'pause' : 'up'} size={23} />
+      )}
     </button>
   );
 }

@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { DEFAULT_BACKEND } from '../shared/backends.js';
+import { DEFAULT_BACKEND, type BackendAppearance, type BackendAppearancePatch } from '../shared/backends.js';
 import type { Operation, OperationState } from '../shared/types.js';
 import { platformRuntime, type PlatformRuntime } from './platform.js';
 
@@ -22,7 +22,9 @@ export class Store {
         kind TEXT NOT NULL, fingerprint TEXT NOT NULL, state TEXT NOT NULL, turn_id TEXT, error TEXT,
         created INTEGER NOT NULL, updated INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS device_keys (peer_id TEXT PRIMARY KEY, device_id TEXT NOT NULL,
-        route_ticket TEXT UNIQUE NOT NULL);`);
+        route_ticket TEXT UNIQUE NOT NULL);
+      CREATE TABLE IF NOT EXISTS backend_appearance (backend_id TEXT PRIMARY KEY,
+        overrides TEXT NOT NULL, revision INTEGER NOT NULL);`);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const columns = this.db.prepare('PRAGMA table_info(operations)').all();
@@ -46,6 +48,31 @@ export class Store {
         CREATE INDEX operations_by_conversation ON operations(backend_id,thread_id,device_id,created);
       `);
       this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  backendAppearance(id: string): { overrides: Partial<BackendAppearance>; revision: number } {
+    const row = this.db.prepare('SELECT overrides,revision FROM backend_appearance WHERE backend_id=?').get(id);
+    return row ? { overrides: JSON.parse(String(row.overrides)), revision: Number(row.revision) } : { overrides: {}, revision: 0 };
+  }
+  updateBackendAppearance(id: string, patch: BackendAppearancePatch, expectedRevision?: number) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.backendAppearance(id);
+      if (expectedRevision !== undefined && expectedRevision !== current.revision)
+        throw new ConflictError('设置已在其他设备或工具中更新，请重新打开编辑后再保存');
+      const overrides: Partial<BackendAppearance> = { ...current.overrides };
+      for (const field of ['name', 'description', 'icon'] as const) {
+        if (patch[field] === null) delete overrides[field];
+        else if (patch[field] !== undefined) Object.assign(overrides, { [field]: patch[field] });
+      }
+      const revision = current.revision + 1;
+      this.db.prepare('INSERT INTO backend_appearance VALUES (?,?,?) ON CONFLICT(backend_id) DO UPDATE SET overrides=excluded.overrides,revision=excluded.revision')
+        .run(id, JSON.stringify(overrides), revision);
+      this.db.exec('COMMIT');
+      return { overrides, revision };
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;

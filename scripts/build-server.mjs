@@ -5,9 +5,11 @@ await build({
   entryPoints: [
     'src/server/main.ts',
     'src/server/relay-main.ts',
+    'src/server/messaging-migrate.ts',
     'src/server/cli.ts',
     'src/server/adapters/host.ts',
     'src/server/adapters/cli.ts',
+    'src/server/backends/appearance-cli.ts',
   ],
   outbase: 'src',
   outdir: 'dist',

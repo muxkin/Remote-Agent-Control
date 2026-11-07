@@ -1,3 +1,4 @@
+import { ConversationHeader } from './shell/ConversationHeader';
 import { ConversationControls, type ControlSection } from './ConversationControls';
 import type { ControlAction } from '../shared/controls';
 import { DEFAULT_BACKEND, type BackendInfo } from '../shared/backends';
@@ -34,6 +35,7 @@ import { ThreadTools } from './ThreadTools';
 import { SkillPicker } from './SkillPicker';
 import { Icon } from './Icon';
 import { ChatComposer } from './ChatComposer';
+import { OperationFeedback, operationActivity } from './OperationFeedback';
 import { ThreadNavigation } from './ThreadNavigation';
 import { useChatDrafts } from './chat-drafts';
 import type { AppRoute } from './shell/routes';
@@ -236,7 +238,15 @@ export default function AgentWorkspace({
   const transcriptRef = useRef<HTMLElement>(null);
   const followBottom = useRef(true);
   const viewRef = useRef<ThreadView | null>(null);
+  const operationSnapshots = useRef(new Map<string, Operation>());
   function receiveOperation(operation: Operation) {
+    const previous = operationSnapshots.current.get(operation.id);
+    // Apply the same ordering rule before journal writes and draft side effects.
+    // Otherwise a late receipt could resurrect a confirmed request after reload.
+    if (previous && mergeOperation([previous], operation)[0] !== operation) return;
+    operationSnapshots.current.set(operation.id, operation);
+    if (operationSnapshots.current.size > 256)
+      operationSnapshots.current.delete(operationSnapshots.current.keys().next().value!);
     rememberOperation(deviceId, operation);
     if (
       operation.kind === 'queue' &&
@@ -482,10 +492,8 @@ export default function AgentWorkspace({
     } catch (e) {
       if (e instanceof ApiError && e.status >= 400 && e.status < 500) {
         receiveOperation({ ...pendingOperation, state: 'rejected', error: e.message, updatedAt: Date.now() });
-        setError(e.message);
         return;
       }
-      setError(`请求未获得确认，正在核对状态。请勿重复发送。${(e as Error).message}`);
       try {
         receiveOperation(await api<Operation>(`/operations/${requestId}`));
       } catch {
@@ -546,6 +554,8 @@ export default function AgentWorkspace({
     }
   }
   const pending = operations.some((x) => ['received', 'dispatching', 'uncertain'].includes(x.state));
+  const delivery =
+    operations.find((x) => ['received', 'dispatching', 'uncertain'].includes(x.state)) ?? operations[0];
   const canCompose = stream && !!view && (view.canSend || (view.canInterrupt && view.pendingRequests === 0));
   const currentIds = new Set(view?.messages.map((x) => x.id));
   const messages = [...older.filter((x) => !currentIds.has(x.id)), ...(view?.messages ?? [])];
@@ -690,25 +700,27 @@ export default function AgentWorkspace({
         }}
       />
       <main className="chat">
-        <header className="chat-head">
-          <button className="back icon-button" onClick={() => setSelected(null)} aria-label="返回会话列表">
-            <Icon name="back" />
-          </button>
-          <div>
-            <h2>
-              {selected?.title || '选择一个会话'}
-              {selected && (
-                <span
-                  title={stream && view?.synchronized ? '已连接' : '正在恢复连接'}
-                  className={`dot ${stream && view?.synchronized ? 'online' : ''}`}
-                />
-              )}
-            </h2>
-            <p className="chat-subtitle">
-              <Icon name="folder" size={17} />
+        <ConversationHeader
+          className="chat-head"
+          level={2}
+          title={selected?.title || '选择一个会话'}
+          backLabel="返回会话列表"
+          onBack={() => setSelected(null)}
+          subtitle={
+            <>
+              <Icon name="folder" size={14} />
               <span>{selected?.projectName ?? '未分类'}</span>
-            </p>
-          </div>
+            </>
+          }
+          status={
+            selected ? (
+              <span
+                title={stream && view?.synchronized ? '已连接' : '正在恢复连接'}
+                className={`dot ${stream && view?.synchronized ? 'online' : ''}`}
+              />
+            ) : undefined
+          }
+        >
           {selected && (
             <button
               className="icon-button more-tools"
@@ -718,7 +730,7 @@ export default function AgentWorkspace({
               <Icon name="more" />
             </button>
           )}
-        </header>
+        </ConversationHeader>
         {!selected ? (
           <section className="empty">
             <div className="brand-icon">C</div>
@@ -806,21 +818,29 @@ export default function AgentWorkspace({
                   {error || threadError}
                 </p>
               )}
-              {operations.slice(0, 2).map((op) => (
-                <p
-                  className={`operation ${['accepted', 'completed', 'interrupted'].includes(op.state) ? 'sr-only' : ''} ${op.state === 'uncertain' ? 'error' : ''}`}
-                  key={op.id}
-                  data-operation-id={op.id}
-                  role="status"
-                >
-                  {operationNames[op.kind] ?? '操作'} · {labels[op.state]}
-                  {op.error ? `：${op.error}` : ''}
-                </p>
-              ))}
+              <OperationFeedback
+                operation={delivery}
+                onCheck={
+                  delivery
+                    ? async () => receiveOperation(await api<Operation>(`/operations/${delivery.id}`))
+                    : undefined
+                }
+                onRetry={
+                  delivery?.state === 'rejected' &&
+                  ['send', 'steer'].includes(delivery.kind) &&
+                  (draft.trim() || uploads.length) &&
+                  canCompose &&
+                  !busy &&
+                  !pending
+                    ? () => void act(view?.activeTurnId ? 'steer' : 'send')
+                    : undefined
+                }
+              />
               {(!!selectedSkills.length || !!selectedPlugins.length) && !!view?.activeTurnId && (
                 <p className="hint">已选插件和技能将在下一轮使用，请等当前任务结束后发送。</p>
               )}
               <ChatComposer
+                activity={operationActivity(delivery)}
                 threadId={selected.id}
                 value={drafts.draft}
                 onChange={(change) => drafts.update(selected.id, change)}
@@ -1017,12 +1037,13 @@ export default function AgentWorkspace({
                   !status.capabilities.newThread
                 }
                 feedback={
-                  error ||
-                  (operations[0]?.kind === 'create'
-                    ? labels[operations[0].state]
-                    : !status?.writesEnabled
-                      ? '电脑连接暂不可用，消息草稿会保留。'
-                      : undefined)
+                  error || (!status?.writesEnabled ? '电脑连接暂不可用，消息草稿会保留。' : undefined)
+                }
+                operation={delivery?.kind === 'create' ? delivery : undefined}
+                onCheck={
+                  delivery
+                    ? async () => receiveOperation(await api<Operation>(`/operations/${delivery.id}`))
+                    : undefined
                 }
                 onCreate={(input) => void act('create', input)}
               />
@@ -1058,10 +1079,12 @@ export default function AgentWorkspace({
                 {!stream ? '连接中断，正在恢复' : (view?.reason ?? '与原实例共享同一个会话')}
               </p>
               {operations[0]?.kind === 'settings' && (
-                <p className="tools-feedback" role="status">
-                  设置 · {labels[operations[0].state]}
-                  {operations[0].error ? `：${operations[0].error}` : ''}
-                </p>
+                <OperationFeedback
+                  operation={operations[0]}
+                  onCheck={async () =>
+                    receiveOperation(await api<Operation>(`/operations/${operations[0].id}`))
+                  }
+                />
               )}
               {view && (
                 <button

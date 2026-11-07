@@ -5,7 +5,7 @@
 ## 组件
 
 - **Web 客户端**：复用 React/Vite 界面及共享输入框；SyncStore 管理本地缓存，DeviceSession 管理跨聊天复用的加密 WSS/WebRTC 连接。
-- **云端协调与中继**：独立静态入口、设备注册、信令和密文转发；不提供桌面 HTTP 代理，不保存聊天正文或文件密钥。
+- **云端协调与中继**：独立静态入口、设备注册、信令和密文转发；不提供桌面 HTTP 代理，不保存桌面会话正文或文件密钥。另有独立的账户与 IM 服务保存即时聊天正文，数据边界见 [即时消息架构](MESSAGING.md)。
 - **GatewayCore**：电脑上的统一业务校验、鉴权与分发入口，复用既有控制、请求去重和媒体授权。HostService 主动连接云端，无入站业务端口。
 - **Desktop Adapter**：连接桌面 IPC，发现会话 owner，订阅状态并执行已适配的 follower 方法。
 - **History Index**：只读查询 Codex SQLite 元数据和 JSONL 历史，不接管桌面持久化。

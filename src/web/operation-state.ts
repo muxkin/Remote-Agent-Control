@@ -5,8 +5,14 @@ const unresolved = new Set(['received', 'dispatching', 'uncertain']);
 
 export function mergeOperation(previous: Operation[], incoming: Operation): Operation[] {
   const current = previous.find((item) => item.id === incoming.id);
+  if (current?.state === 'accepted' && unresolved.has(incoming.state)) return previous;
   // A slower HTTP acknowledgement must not regress a completed WebSocket result.
-  if (current && terminal.has(current.state) && !terminal.has(incoming.state)) return previous;
+  if (
+    current &&
+    terminal.has(current.state) &&
+    (!terminal.has(incoming.state) || current.updatedAt > incoming.updatedAt)
+  )
+    return previous;
   return [incoming, ...previous.filter((item) => item.id !== incoming.id)].sort(
     (a, b) => b.createdAt - a.createdAt,
   );

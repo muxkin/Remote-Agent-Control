@@ -1,3 +1,4 @@
+import { useAttachmentAccess } from './AttachmentAccess';
 import { useState, type ReactNode } from 'react';
 import { attachmentInfo, attachmentPath } from '../shared/attachments';
 import { mediaContent, downloadFile } from './file-client';
@@ -23,6 +24,8 @@ export function FileAttachment({
   name?: string;
   onRemove?: () => void;
 }) {
+  const access = useAttachmentAccess();
+  const load = access ? access.load : mediaContent;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof mediaContent>> | null>(null);
@@ -30,7 +33,11 @@ export function FileAttachment({
   const info = attachmentInfo(href);
   const name = displayName || info.name;
   async function download() {
-    downloadFile(await mediaContent(threadId, href));
+    const file = await load(threadId, href);
+    downloadFile({
+      ...file,
+      url: 'downloadUrl' in file && typeof file.downloadUrl === 'string' ? file.downloadUrl : file.url,
+    });
   }
   async function open() {
     if (busy) return;
@@ -41,7 +48,7 @@ export function FileAttachment({
     setBusy(true);
     setError('');
     try {
-      const file = await mediaContent(threadId, href);
+      const file = await load(threadId, href);
       if (file.mime.startsWith('image/')) {
         tab?.close();
         setPreview(file);

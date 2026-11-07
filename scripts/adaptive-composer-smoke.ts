@@ -3,7 +3,10 @@ import { chromium, expect } from '@playwright/test';
 import { PNG } from 'pngjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { config, host, store, native, close } from './v2-fixture.js';
-const browser = await chromium.launch({ channel: 'chrome' });
+const browser = await chromium.launch({
+  channel: 'chrome',
+  args: [`--unsafely-treat-insecure-origin-as-secure=${config.origin}`],
+});
 const context = await browser.newContext({
   viewport: { width: 1920, height: 1080 },
   permissions: ['clipboard-read', 'clipboard-write'],
@@ -40,6 +43,7 @@ try {
     { width: 1440, height: 900 },
     { width: 800, height: 600 },
     { width: 390, height: 844 },
+    { width: 430, height: 844 },
     { width: 320, height: 500 },
     { width: 844, height: 390 },
   ]) {
@@ -54,6 +58,14 @@ try {
     const chat = await page.locator('.chat').boundingBox();
     const composer = await page.locator('.composer').boundingBox();
     const send = await page.locator('.composer .send-button').boundingBox();
+    const compact = await page.locator('.composer-box').evaluate((el) => el.clientWidth - parseFloat(getComputedStyle(el).paddingLeft) - parseFloat(getComputedStyle(el).paddingRight) <= 520);
+    for (const selector of ['.permission-trigger > span', '.composer-tool-trigger > span']) {
+      if (compact) await expect(page.locator(selector)).toBeHidden();
+      else await expect(page.locator(selector)).toBeVisible();
+    }
+    for (const name of ['会话权限', '工具']) await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
+    const model = await page.getByRole('button', { name: '模型设置', exact: true }).boundingBox();
+    expect(model!.x + model!.width).toBeLessThanOrEqual(send!.x);
     if (size.width > 700) {
       for (const name of ['消息', '工作台', '我的']) await expect(tab(name)).toBeVisible();
       expect(nav!.x).toBe(0);
@@ -82,6 +94,7 @@ try {
     ).toBe(true);
   }
   checks.adaptiveNavigationAndIndependentPanels = true;
+  checks.compactComposerIconsAndModelSpace = true;
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.getByLabel('消息', { exact: true }).fill('draft with image');
   await pasteImage();

@@ -1,0 +1,45 @@
+.im-dialog {
+  margin: auto;
+  padding: 0;
+  width: min(560px, calc(100% - 28px));
+  max-height: min(82dvh, 800px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 24px 100px #0002;
+}
+.im-dialog::backdrop {
+  background: #0005;
+}
+.im-dialog > header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.im-dialog h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+.im-dialog-body {
+  padding: 22px;
+  overflow: auto;
+  max-height: calc(82dvh - 72px);
+}
+.im-dialog-body > p {
+  font-size: 14px;
+  line-height: 1.8;
+}
+.im-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 22px;
+}
+
+.im-dialog {
+  overflow: hidden;
+}

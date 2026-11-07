@@ -19,6 +19,7 @@ jobs:
             package-lock.json
             packages/*/package-lock.json
       - run: npm ci --ignore-scripts
+      - run: npm run check:public
       - run: npm run typecheck
       - run: npm run build:adapters
       - run: npm run build:server
@@ -62,3 +63,24 @@ jobs:
       - run: npx vitest run test/platform-connectors.test.ts packages/adapter-dsh/test/backend.test.ts packages/adapter-dsh/test/connection.test.ts test/adapter-host.test.ts test/adapter-manager.test.ts test/conversation-controls.test.ts test/store.test.ts
         if: runner.os != 'Linux'
       - run: npm run test:packages
+  browser-contracts:
+    needs: build-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-build
+          path: .
+      - run: npx playwright install --with-deps chrome
+      - run: npm run test:delivery
+      - run: npm run test:messaging
+      - run: npm run test:messaging-design
+      - run: npm run test:composer
+      - run: npm run test:frontend

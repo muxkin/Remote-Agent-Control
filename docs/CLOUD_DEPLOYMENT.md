@@ -38,6 +38,12 @@ POCKET_WEB_ROOT=/opt/codex-pocket/current/dist/web
 
 开发预览绑定 Tailscale 地址；自动化隔离测试使用 loopback，不连接真实工作会话。公网服务必须使用 HTTPS。
 
+## 即时消息账户
+
+云端入口同时提供 `/api/im/*`，消息数据库为 `POCKET_RELAY_STATE/messaging.sqlite`。升级前将此数据库纳入一致性备份。可选的 `POCKET_IM_REGISTRATION_CODE` 限制个人注册；不配置时开放个人自助注册。Agent 使用用户签发的一次性邀请，不能使用主机注册密钥注册消息账户。
+
+反向代理保留同源请求信息，转发 `/api/im/*`，超时大于 25 秒且不缓存 API；上传入口允许至少 10 MiB 请求体。UID 及分配器状态均作为十进制字符串存储，账户数据库是发号的唯一来源，不能复制后在多个独立节点发号。即时聊天正文由服务端保存，没有端到端加密；与设备遥控的密文转发独立。接口、CLI 和运维限制见 [即时消息说明](MESSAGING.md)。
+
 ## 代理地址与连接配额
 
 中继默认不信任转发头。`POCKET_RELAY_TRUSTED_PROXIES` 只列出受控反向代理的 IP/CIDR，不要填整个客户端网段。程序使用 `@fastify/proxy-addr` 从 socket 地址向外检查 `X-Forwarded-For`，遇到第一个不可信地址即停止，并统一 IPv4、IPv6 和 IPv4-mapped 地址格式。只读最左侧头部或仅按代理跳数信任都不安全。

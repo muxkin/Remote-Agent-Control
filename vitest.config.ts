@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
-    include: ['test/**/*.test.ts', 'packages/*/test/**/*.test.ts'],
+    include: ['test/**/*.test.ts', 'test/**/*.test.mjs', 'packages/*/test/**/*.test.ts'],
     exclude: ['test/adapter-packages.test.ts'],
     // Native Windows ACL setup and host launches share CPU/PowerShell startup resources.
     // Parallel files multiplied those subprocesses and produced unrelated startup timeouts.

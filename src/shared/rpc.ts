@@ -5,6 +5,8 @@ export const RPC_ROUTES = {
   'log.export': ['POST', '/api/threads/:id/export'],
   'references.list': ['GET', '/api/threads/:id/references'],
   'backends.list': ['GET', '/api/backends'],
+  'backends.appearance.read': ['GET', '/api/backends/:id/appearance'],
+  'backends.appearance.update': ['POST', '/api/backends/:id/appearance'],
   'session.read': ['GET', '/api/session'],
   'device.revoke': ['POST', '/api/logout'],
   'status.read': ['GET', '/api/status'],

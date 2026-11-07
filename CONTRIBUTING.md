@@ -32,9 +32,14 @@ npm run test:browser
 npm run test:frontend
 npm run test:layout
 npm run test:composer
+npm run test:delivery
+npm run test:messaging
+npm run test:messaging-design
 ```
 
-`test:browser` 与 `test:v2` 为同一套测试。它启动 loopback 上的临时中继和模拟桌面，不操作真实桌面会话，覆盖连接复用、直连/中继切换、文件和缓存。不要把测试夹具作为外部预览服务。
+`test:browser` 与 `test:v2` 为同一套测试。它启动 loopback 上的临时中继和模拟桌面，不操作真实桌面会话，覆盖连接复用、直连/中继切换、文件和缓存。不要把测试夹具作为外部预览服务。`TEST_WEB_ROOT` 指定本次验收的构建目录，`TEST_PORT` 可指定隔离端口；需要跨设备预览时将 `TEST_BIND` 设为本机 Tailscale 地址。
+
+`test:delivery` 注入慢响应、结果未知、明确拒绝和迟到回执，验证发送提示、草稿保留及刷新后的请求日志；`test:messaging-design` 使用合成图片验证头像同步、表情面板和窄屏布局，不依赖个人素材。ACP 附件与流式辅助模块测试包含在默认 `npm test` 中。
 
 以下测试读取私有部署配置：
 

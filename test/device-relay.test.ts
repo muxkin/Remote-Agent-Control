@@ -570,3 +570,36 @@ it('routes Codex and two DSH instances with colliding native conversation and re
   expect((await link.rpc<any>(apiCall('/threads'))).threads[0].title).toBe('测试会话');
   link.close();
 });
+
+it('shares persistent instance appearance through authenticated RPC without changing routing', async () => {
+  const { config, identity, pairing, store } = await setup(false, true);
+  const phone = await createIdentity();
+  const link = await connect(config.origin, identity.peerId, phone,
+    createHash('sha256').update(pairing.code).digest('hex'),
+    { type: 'pair', protocol: 2, sessionId: crypto.randomUUID(), code: pairing.code, name: 'appearance-phone' });
+  try {
+    const path = '/backends/dsh-one/appearance';
+    const original = await link.rpc<any>(apiCall(path));
+    expect(original).toMatchObject({ id: 'dsh-one', revision: 0, overrides: {} });
+    const changed = await link.rpc<any>(apiCall(path, 'POST', { revision: 0, patch: {
+      name: '测试助手', description: '日常助手', icon: { kind: 'emoji', value: '🦄' },
+    } }));
+    expect(changed).toMatchObject({ revision: 1, values: { name: '测试助手', description: '日常助手' } });
+    const listed = await link.rpc<any>(apiCall('/backends'));
+    expect(listed.backends.find((b: any) => b.id === 'dsh-one')).toMatchObject({
+      name: '测试助手', product: 'dsh', appearance: { icon: { kind: 'emoji', value: '🦄' } },
+    });
+    expect(listed.backends.find((b: any) => b.id === 'dsh-two').name).toBe('dsh-two');
+    expect((await link.rpc<any>({ ...apiCall('/threads'), backendId: 'dsh-one' })).threads[0].title).toBe('dsh-one');
+    // A tool writes through a separate Store connection, just as the CLI does.
+    const second = new Store(config.stateDir, temporaryRuntime);
+    try { second.updateBackendAppearance('dsh-one', { description: '工具更新' }); } finally { second.close(); }
+    await expect(link.rpc(apiCall(path, 'POST', { revision: 1, patch: { name: 'stale' } }))).rejects.toMatchObject({ status: 409 });
+    expect((await link.rpc<any>(apiCall(path))).values.description).toBe('工具更新');
+    await expect(link.rpc(apiCall('/backends/missing/appearance', 'POST', { revision: 0, patch: { name: 'x' } }))).rejects.toMatchObject({ status: 404 });
+    await expect(link.rpc(apiCall(path, 'POST', { revision: 2, patch: { connected: true } }))).rejects.toMatchObject({ status: 400 });
+    await link.rpc(apiCall(path, 'POST', { revision: 2, patch: { name: null, description: null, icon: null } }));
+    expect(store.backendAppearance('dsh-one')).toEqual({ revision: 3, overrides: {} });
+    expect((await link.rpc<any>(apiCall(path))).values).toEqual(original.defaults);
+  } finally { link.close(); }
+});

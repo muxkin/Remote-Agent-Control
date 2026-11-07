@@ -22,6 +22,8 @@ import { checkpoint, contentVersion, type SyncCheckpoint } from '../shared/sync.
 import { SyncJournal } from './sync-journal.js';
 import type { ThreadView, Operation } from '../shared/types.js';
 import { DevicePeer } from './device-peer.js';
+import { backendAppearanceDefaults } from '../shared/backend-appearance.js';
+import { appearanceUpdateSchema, normalizeAppearancePatch } from './backends/appearance.js';
 
 type Path = 'relay' | 'direct';
 interface Subscription {
@@ -57,6 +59,12 @@ export class HostService {
   readonly core;
   readonly journal = new SyncJournal();
   readonly registry: BackendRegistry;
+  private appearance(id: string) {
+    const info = this.registry.get(id).info();
+    const defaults = backendAppearanceDefaults(info);
+    const saved = this.deps.store.backendAppearance(id);
+    return { id, ...saved, defaults, values: { ...defaults, ...saved.overrides } };
+  }
   private cores = new Map<string, ReturnType<typeof createGatewayCore>>();
   private journals = new Map<string, SyncJournal>();
   private detach: (() => void)[] = [];
@@ -104,7 +112,17 @@ export class HostService {
       'registry' in deps ? deps.registry : new BackendRegistry().register(resolveBackend(config, deps));
     for (const backend of this.registry.all()) {
       const core = createGatewayCore(config, { store: deps.store, backend });
-      core.router.get('/api/backends', () => ({ backends: this.registry.list() }));
+      core.router.get('/api/backends', () => ({ backends: this.registry.list().map((info) => {
+        const appearance = this.appearance(info.id).values;
+        return { ...info, name: appearance.name, appearance };
+      }) }));
+      core.router.get('/api/backends/:id/appearance', (req) => this.appearance(req.params.id));
+      core.router.post('/api/backends/:id/appearance', async (req) => {
+        this.registry.get(req.params.id);
+        const { revision, patch } = appearanceUpdateSchema.parse(req.body);
+        this.deps.store.updateBackendAppearance(req.params.id, await normalizeAppearancePatch(patch), revision);
+        return this.appearance(req.params.id);
+      });
       this.cores.set(backend.id, core);
       this.journals.set(backend.id, backend.id === DEFAULT_BACKEND ? this.journal : new SyncJournal());
       const thread = (view: ThreadView) => this.onThread(view, backend.id);

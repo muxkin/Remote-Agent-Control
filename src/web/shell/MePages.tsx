@@ -1,18 +1,13 @@
 import { lazy, Suspense, useEffect, useState, type ComponentProps, type ReactNode } from 'react';
+import { useMessaging } from '../messaging/context';
+import { Avatar } from '../messaging/ui';
 import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
-import { PageHeader } from './AppShell';
+import { PageHeader } from './PageHeader';
 import type { AppRoute } from './routes';
 const AppearanceSettings = lazy(() => import('../theme/AppearanceSettings'));
 
-function readName() {
-  try {
-    return localStorage.getItem('pocket-profile-name') || '我的 Agent 空间';
-  } catch {
-    return '我的 Agent 空间';
-  }
-}
 function Row({
   icon,
   title,
@@ -28,7 +23,9 @@ function Row({
 }) {
   return (
     <button className="settings-row" onClick={onClick} disabled={disabled}>
-      <Icon name={icon} />
+      <span className="surface-icon">
+        <Icon name={icon} size={21} />
+      </span>
       <span>{title}</span>
       <small>{detail}</small>
       <Icon name="chevron" size={17} />
@@ -52,8 +49,8 @@ export default function MePages({
   busy: boolean;
   refreshHosts: () => Promise<void>;
 }) {
-  const [name, setName] = useState(readName);
-  const [draftName, setDraftName] = useState(name);
+  const { user } = useMessaging();
+  const name = user?.displayName ?? '登录或创建账户';
   const [usage, setUsage] = useState<string>();
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState('');
@@ -103,12 +100,15 @@ export default function MePages({
       {route.page === 'me' && (
         <>
           <button className="profile-card" onClick={() => navigate({ page: 'profile' })}>
-            <span className="profile-avatar">{name.slice(0, 1)}</span>
+            <Avatar user={user ?? { displayName: '我', kind: 'human' }} large />
             <span>
               <strong>{name}</strong>
-              <small>个人资料</small>
+              <small>{user ? `UID ${user.id}` : '与 Agent 和朋友聊天'}</small>
             </span>
-            <Icon name="chevron" size={19} />
+            <span className="profile-link">
+              {user ? '个人资料' : '登录'}
+              <Icon name="chevron" size={16} />
+            </span>
           </button>
           <section className="settings-group">
             <Row icon="puzzle" title="Agent 接入" onClick={() => navigate({ page: 'integrations' })} />
@@ -149,38 +149,6 @@ export default function MePages({
         <Suspense fallback={<div className="page-loading">正在打开外观设置…</div>}>
           <AppearanceSettings />
         </Suspense>
-      )}
-      {route.page === 'profile' && (
-        <form
-          className="profile-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const value = draftName.trim();
-            if (!value) return;
-            try {
-              localStorage.setItem('pocket-profile-name', value);
-              setName(value);
-              setNotice('已保存');
-            } catch {
-              setNotice('无法保存，请检查浏览器存储权限');
-            }
-          }}
-        >
-          <span className="profile-avatar">{draftName.trim().slice(0, 1) || '我'}</span>
-          <label>
-            昵称
-            <input
-              maxLength={40}
-              required
-              value={draftName}
-              onChange={(e) => setDraftName(e.target.value)}
-              autoComplete="nickname"
-            />
-          </label>
-          <button className="primary" disabled={!draftName.trim()}>
-            保存
-          </button>
-        </form>
       )}
       {route.page === 'devices' && (
         <>
@@ -253,22 +221,6 @@ export default function MePages({
           )}
         </>
       )}
-      {route.page === 'integrations' && (
-        <section className="module-empty">
-          <span className="empty-symbol">
-            <Icon name="puzzle" size={38} />
-          </span>
-          <h2>还没有接入聊天 Agent</h2>
-          <p>
-            Dot 等即时聊天接入将在后续开放。
-            <br />
-            当前可在工作台使用 Codex。
-          </p>
-          <button className="secondary" onClick={() => navigate({ page: 'workbench' })}>
-            打开工作台
-          </button>
-        </section>
-      )}
       {route.page === 'about' && (
         <section className="about-content">
           <img
@@ -280,7 +232,7 @@ export default function MePages({
           />
           <h2>Agent 空间</h2>
           <p>即时聊天与 Agent 工作台</p>
-          <p>连接电脑后，可继续已有会话、发送任务、处理审批。消息模块的 Agent 接入将陆续开放。</p>
+          <p>注册账户后，可以与 Agent 和朋友聊天。连接电脑后，可继续已有会话、发送任务、处理审批。</p>
           <small>
             网页版本{' '}
             {typeof __POCKET_WEB_BUILD_ID__ === 'string' ? __POCKET_WEB_BUILD_ID__.slice(0, 8) : '开发版'}

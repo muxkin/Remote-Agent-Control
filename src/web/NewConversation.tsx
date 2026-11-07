@@ -2,7 +2,8 @@ import type { BackendPresentation } from '../shared/backends';
 import type { ControlCatalog } from '../shared/controls';
 import { remoteFetch, deviceSession } from './device-session';
 import { useEffect, useState } from 'react';
-import type { ProjectSummary, ThreadView } from '../shared/types';
+import type { Operation, ProjectSummary, ThreadView } from '../shared/types';
+import { OperationFeedback, operationActivity } from './OperationFeedback';
 import { ChatComposer } from './ChatComposer';
 import type { ChatDraft } from './chat-drafts';
 import { ModelSettings, modelLabel, type ModelUpdate } from './ModelSettings';
@@ -29,6 +30,8 @@ export function NewConversation({
   knownProjects,
   onDirtyChange,
   feedback,
+  operation,
+  onCheck,
 }: {
   anchor: string;
   creation?: BackendPresentation['creation'];
@@ -39,6 +42,8 @@ export function NewConversation({
   knownProjects: ProjectSummary[];
   onDirtyChange: (dirty: boolean) => void;
   feedback?: string;
+  operation?: Operation;
+  onCheck?: () => Promise<void>;
 }) {
   const [catalog, setCatalog] = useState<ControlCatalog>();
   const [permission, setPermission] = useState('');
@@ -256,12 +261,14 @@ export function NewConversation({
         </div>
       </div>
       <section className="composer new-conversation-composer">
+        <OperationFeedback operation={operation} onCheck={onCheck} />
         {feedback && (
           <p className="hint" role="status">
             {feedback}
           </p>
         )}
         <ChatComposer
+          activity={operationActivity(operation)}
           value={draft}
           onChange={(change) =>
             setDraft((old) => (typeof change === 'function' ? change(old) : { ...old, ...change }))

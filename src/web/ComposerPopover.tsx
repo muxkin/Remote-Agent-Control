@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, type ReactNode } from 'react';
 /** A light-dismiss surface anchored to the composer, without a modal backdrop. */
 export function ComposerPopover({
   label,
+  title,
   trigger,
   className = '',
   menu = false,
@@ -11,6 +12,7 @@ export function ComposerPopover({
   children,
 }: {
   label: string;
+  title?: string;
   trigger: ReactNode;
   className?: string;
   menu?: boolean;
@@ -89,6 +91,7 @@ export function ComposerPopover({
         className={`composer-control-trigger ${className}`}
         popoverTarget={id}
         aria-label={label}
+        title={title ?? label}
         aria-haspopup={menu ? 'menu' : 'dialog'}
         aria-expanded="false"
       >

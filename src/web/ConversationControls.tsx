@@ -125,6 +125,7 @@ export function ConversationControls({
     <>
       <ComposerPopover
         label="会话权限"
+        title={`会话权限：${permissionName}`}
         menu
         className="permission-trigger"
         openRequest={request?.target === 'permission' ? request.sequence : 0}

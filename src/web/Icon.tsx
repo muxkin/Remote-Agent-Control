@@ -1,5 +1,12 @@
 import type { CSSProperties } from 'react';
 const paths = {
+  code: 'm8 6-6 6 6 6m8-12 6 6-6 6M14 3l-4 18',
+  terminal: 'm4 5 7 7-7 7M13 19h7',
+  smile: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM8 9h.01M16 9h.01M8 14c2 3 6 3 8 0',
+  mic: 'M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8',
+  sticker:
+    'M4 3h16a1 1 0 0 1 1 1v10l-7 7H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM14 21v-7h7M8 8h.01M16 8h.01M8 12c1 2 3 3 5 2',
+
   sun: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M5 19l1.5-1.5M17.5 6.5 19 5',
   moon: 'M20.9 13a9 9 0 1 1-9.9-9.9A7 7 0 0 0 20.9 13Z',
   palette:
@@ -11,6 +18,8 @@ const paths = {
   target: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 4h.01',
   download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
   chat: 'M21 11a8 8 0 0 1-8 8H7l-4 3V11a9 9 0 0 1 18 0Z',
+  contacts:
+    'M9 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM2 21v-3a7 7 0 0 1 14 0v3M17 3a3 3 0 0 1 0 6M19 12a6 6 0 0 1 3 5v4',
   user: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21v-2a8 8 0 0 1 16 0v2',
   trash: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7',
 

@@ -23,3 +23,17 @@ it('round-trips opaque native IDs and preserves the selected backend', () => {
   expect(readRoute(new URL(routeURL(route), 'https://example.com'))).toEqual(route);
   expect(apiCall(`/threads/${encodeURIComponent(thread)}/history`).params.id).toBe(thread);
 });
+
+it('keeps messaging conversation identities separate from desktop thread routes', () => {
+  const conversation = '12345678-1234-1234-1234-123456789abc';
+  const route = { page: 'messages' as const, conversation };
+  expect(readRoute(new URL(routeURL(route), 'https://app.invalid'))).toEqual(route);
+  expect(parentRoute(route)).toEqual({ page: 'messages' });
+  expect(readRoute(new URL('https://app.invalid/?page=contacts&conversation=' + conversation))).toEqual({
+    page: 'contacts',
+  });
+  expect(
+    readRoute(new URL('https://app.invalid/?page=messages&conversation=invalid&thread=private')),
+  ).toEqual({ page: 'messages' });
+  expect(parentRoute({ page: 'integrations' })).toEqual({ page: 'contacts' });
+});

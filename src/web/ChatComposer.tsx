@@ -73,6 +73,12 @@ export function ChatComposer({
   onInterrupt = () => {},
   onQueue = () => {},
   actions,
+  attachmentPreview,
+  messageLabel = '消息',
+  maxLength = 16000,
+  sendLabels,
+  activity,
+  insertText,
 }: {
   value: ChatDraft;
   threadId?: string;
@@ -90,6 +96,12 @@ export function ChatComposer({
   onInterrupt?: () => void;
   onQueue?: () => void;
   actions?: ReactNode;
+  attachmentPreview?: ReactNode;
+  messageLabel?: string;
+  maxLength?: number;
+  sendLabels?: { send: string; stop: string; running: string };
+  activity?: string;
+  insertText?: { key: string; text: string };
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const desktopKeyboard = useDesktopKeyboard();
@@ -104,6 +116,20 @@ export function ChatComposer({
       el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
     }
   }, [text]);
+  useEffect(() => {
+    const input = textareaRef.current;
+    if (!insertText || !input || disabled) return;
+    const start = input.selectionStart,
+      end = input.selectionEnd;
+    const next = input.value.slice(0, start) + insertText.text + input.value.slice(end);
+    if (next.length > maxLength) return;
+    onChange({ text: next });
+    requestAnimationFrame(() => {
+      if (!input.isConnected) return;
+      input.focus();
+      input.setSelectionRange(start + insertText.text.length, start + insertText.text.length);
+    });
+  }, [insertText]);
   return (
     <form
       className="composer-box"
@@ -112,7 +138,8 @@ export function ChatComposer({
         if (!disabled && !sendDisabled && hasDraft) onSubmit();
       }}
     >
-      {!!uploads.length && (
+      {attachmentPreview}
+      {attachmentPreview === undefined && !!uploads.length && (
         <div className="composer-attachments" aria-label="待发送的附件">
           {uploads.map((file) => (
             <div className="upload-chip" key={file.id}>
@@ -212,16 +239,19 @@ export function ChatComposer({
           if (pastedText) {
             const { selectionStart, selectionEnd } = event.currentTarget;
             onChange({
-              text: (text.slice(0, selectionStart) + pastedText + text.slice(selectionEnd)).slice(0, 16000),
+              text: (text.slice(0, selectionStart) + pastedText + text.slice(selectionEnd)).slice(
+                0,
+                maxLength,
+              ),
             });
           }
           onUpload(files);
         }}
         placeholder={placeholder}
-        aria-label="消息"
+        aria-label={messageLabel}
         aria-description={desktopKeyboard ? 'Enter 发送，Ctrl+Enter 换行' : '回车换行，点击发送按钮发送'}
         enterKeyHint={desktopKeyboard ? 'send' : 'enter'}
-        maxLength={16000}
+        maxLength={maxLength}
         disabled={disabled}
       />
       <div className="composer-actions">
@@ -244,6 +274,8 @@ export function ChatComposer({
         {actions}
         <div className="composer-send">
           <SendButton
+            activity={activity}
+            labels={sendLabels}
             running={running}
             hasDraft={hasDraft}
             disabled={sendDisabled}
@@ -252,9 +284,11 @@ export function ChatComposer({
             onQueue={onQueue}
             hintId={hintId}
           />
-          <span id={hintId} className="sr-only">
-            点击直接追加到当前任务；长按或按 Alt 加 Enter 排队下一轮。
-          </span>
+          {canQueue && (
+            <span id={hintId} className="sr-only">
+              点击直接追加到当前任务；长按或按 Alt 加 Enter 排队下一轮。
+            </span>
+          )}
         </div>
       </div>
     </form>

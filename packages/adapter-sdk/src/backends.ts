@@ -22,11 +22,33 @@ export interface BackendInfo {
   product: string;
   presentation?: BackendPresentation;
   name: string;
+  /** Host-owned display settings; never changes instance identity or capabilities. */
+  appearance?: BackendAppearance;
   connected: boolean;
   version: string | null;
   profile: string;
   capabilities: Record<CapabilityName, Capability>;
 }
+export const backendIconNames = ['code', 'terminal', 'puzzle', 'chat', 'monitor', 'book', 'folder', 'sun'] as const;
+export type BackendIcon =
+  | { kind: 'builtin'; value: (typeof backendIconNames)[number] }
+  | { kind: 'emoji'; value: string }
+  | { kind: 'image'; value: string };
+export interface BackendAppearance {
+  name: string;
+  description: string;
+  icon: BackendIcon;
+}
+export interface BackendAppearanceDocument {
+  id: string;
+  revision: number;
+  defaults: BackendAppearance;
+  overrides: Partial<BackendAppearance>;
+  values: BackendAppearance;
+}
+export type BackendAppearancePatch = {
+  [K in keyof BackendAppearance]?: BackendAppearance[K] | null;
+};
 /** JSON tuple prevents collisions even when native conversation IDs contain separators. */
 export const conversationKey = (backendId: string, conversationId: string) =>
   JSON.stringify([backendId, conversationId]);
