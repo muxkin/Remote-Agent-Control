@@ -1,6 +1,7 @@
 import { useLayoutEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './Icon';
+import { copyImage } from './image-clipboard';
 
 export function ImagePreview({
   src,
@@ -10,6 +11,7 @@ export function ImagePreview({
   onClose,
   onError,
   onRetry,
+  onCopy,
 }: {
   src: string;
   label: string;
@@ -18,11 +20,14 @@ export function ImagePreview({
   onClose: () => void;
   onError: () => void;
   onRetry: () => void;
+  onCopy?: () => Promise<void>;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const stage = useRef<HTMLDivElement>(null),
     image = useRef<HTMLImageElement>(null);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  const [copyState, setCopyState] = useState('');
+  const [copying, setCopying] = useState(false);
   const current = useRef(view);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ view: typeof view; x: number; y: number; distance: number } | null>(null);
@@ -153,6 +158,7 @@ export function ImagePreview({
       ref={ref}
       className="image-preview"
       aria-labelledby={titleId}
+      onContextMenu={(event) => event.stopPropagation()}
       onCancel={(event) => {
         event.preventDefault();
         onClose();
@@ -163,10 +169,30 @@ export function ImagePreview({
     >
       <header>
         <h2 id={titleId}>{label || '图片预览'}</h2>
+        <button
+          className="image-preview-copy"
+          disabled={copying || !!error}
+          onClick={() => {
+            setCopying(true);
+            setCopyState('');
+            void (onCopy ? onCopy() : copyImage(src))
+              .then(() => setCopyState('图片已复制'))
+              .catch(() => setCopyState('复制失败，请在图片上右键复制，或下载保存'))
+              .finally(() => setCopying(false));
+          }}
+        >
+          <Icon name="copy" size={18} />
+          {copying ? '正在复制…' : '复制图片'}
+        </button>
         <button className="icon-button" aria-label="关闭图片预览" onClick={onClose}>
           <Icon name="close" />
         </button>
       </header>
+      {copyState && (
+        <p className="image-preview-copy-status" role="status">
+          {copyState}
+        </p>
+      )}
       <div
         ref={stage}
         className="image-preview-stage"

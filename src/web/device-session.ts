@@ -173,8 +173,8 @@ export class DeviceSession {
       await this.relay('control');
       this.attempt = 0;
       this.schedulePeer();
-    } catch {
-      this.metrics.fallback = '电脑离线或中继暂不可用';
+    } catch (error) {
+      this.metrics.fallback = error instanceof Error ? error.message : '电脑离线或中继暂不可用';
     } finally {
       clearTimeout(this.retry);
       if (this.running && !this.links.get('relay:control'))
@@ -208,16 +208,45 @@ export class DeviceSession {
           return;
         }
         const msg = JSON.parse(e.data);
-        if (msg.type === 'challenge') ws.send(JSON.stringify({ type: 'join', hostId, lane, ticket }));
+        if (msg.type === 'challenge') {
+          void (async () => {
+            let resourceToken: string | undefined;
+            if (msg.resources) {
+              const response = await fetch('/api/im/resources/relay-ticket', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hostId, lane, ticket }),
+              });
+              const result = await response.json();
+              if (!response.ok) throw new RpcError(result.error ?? '请先登录后使用中转', response.status);
+              resourceToken = result.token;
+            }
+            if (ws.readyState === WebSocket.OPEN)
+              ws.send(
+                JSON.stringify({
+                  type: 'join',
+                  hostId,
+                  lane,
+                  ticket,
+                  ...(resourceToken ? { resourceToken } : {}),
+                }),
+              );
+          })().catch((error) => {
+            clearTimeout(timer);
+            reject(error);
+            ws.close();
+          });
+        }
         if (msg.type === 'joined') {
           clearTimeout(timer);
           resolve();
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         clearTimeout(timer);
         wire.onTransportClosed();
-        reject(new RpcError('电脑离线或配对失效', 0));
+        reject(new RpcError(event.reason || '电脑离线或配对失效', 0));
       };
       ws.onerror = () => ws.close();
     });

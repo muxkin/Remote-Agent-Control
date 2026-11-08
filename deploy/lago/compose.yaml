@@ -1,0 +1,181 @@
+name: pocket-lago
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+x-backend-env: &backend-env
+  RAILS_ENV: production
+  RAILS_LOG_TO_STDOUT: 'true'
+  DATABASE_URL: postgresql://lago:${POSTGRES_PASSWORD:?required}@db:5432/lago
+  DATABASE_POOL: '8'
+  REDIS_URL: redis://redis:6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?required}
+  LAGO_REDIS_CACHE_URL: redis://redis:6379
+  LAGO_REDIS_CACHE_PASSWORD: ${REDIS_PASSWORD:?required}
+  SECRET_KEY_BASE: ${SECRET_KEY_BASE:?required}
+  LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY:?required}
+  LAGO_ENCRYPTION_PRIMARY_KEY: ${LAGO_ENCRYPTION_PRIMARY_KEY:?required}
+  LAGO_ENCRYPTION_DETERMINISTIC_KEY: ${LAGO_ENCRYPTION_DETERMINISTIC_KEY:?required}
+  LAGO_ENCRYPTION_KEY_DERIVATION_SALT: ${LAGO_ENCRYPTION_KEY_DERIVATION_SALT:?required}
+  LAGO_API_URL: ${LAGO_API_URL:-https://billing-api.example.com}
+  LAGO_FRONT_URL: ${LAGO_FRONT_URL:-https://billing.example.com}
+  LAGO_PDF_URL: http://pdf:3000
+  LAGO_DISABLE_PDF_GENERATION: 'false'
+  LAGO_DISABLE_SIGNUP: 'true'
+  LAGO_SIDEKIQ_WEB: 'false'
+  LAGO_DISABLE_SEGMENT: 'true'
+  LAGO_WEBHOOK_ALLOW_PRIVATE_URLS: 'false'
+  LAGO_LICENSE: ${LAGO_LICENSE:-}
+  LAGO_USE_AWS_S3: 'false'
+  LAGO_USE_GCS: 'false'
+  WEB_CONCURRENCY: '0'
+  RAILS_MAX_THREADS: '3'
+  SIDEKIQ_CONCURRENCY: '3'
+  MALLOC_ARENA_MAX: '2'
+  LAGO_FROM_EMAIL: ${LAGO_FROM_EMAIL:-}
+  LAGO_SMTP_ADDRESS: ${LAGO_SMTP_ADDRESS:-}
+  LAGO_SMTP_PORT: ${LAGO_SMTP_PORT:-587}
+  LAGO_SMTP_USERNAME: ${LAGO_SMTP_USERNAME:-}
+  LAGO_SMTP_PASSWORD: ${LAGO_SMTP_PASSWORD:-}
+
+x-backend: &backend
+  image: getlago/api:v1.57.0
+  restart: unless-stopped
+  environment: *backend-env
+  logging: *logging
+  stop_grace_period: 60s
+
+services:
+  db:
+    image: getlago/postgres-partman:15.0-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lago
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: lago
+      PGDATA: /data/postgres
+    command: [postgres, -c, shared_buffers=128MB, -c, max_connections=60]
+    volumes:
+      - postgres_data:/data/postgres
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U lago -d lago']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 512m
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?required}
+    command:
+      [
+        sh,
+        -c,
+        'exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes --appendfsync everysec --maxmemory 192mb --maxmemory-policy noeviction',
+      ]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+    logging: *logging
+
+  migrate:
+    <<: *backend
+    restart: 'no'
+    command: ['./scripts/migrate.sh']
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      <<: *backend-env
+      LAGO_CREATE_ORG: 'true'
+      LAGO_ORG_NAME: ${LAGO_ORG_NAME:-Pocket Remote}
+      LAGO_ORG_USER_EMAIL: ${LAGO_ORG_USER_EMAIL:?required}
+      LAGO_ORG_USER_PASSWORD: ${LAGO_ORG_USER_PASSWORD:?required}
+      LAGO_ORG_API_KEY: ${LAGO_ORG_API_KEY:?required}
+    mem_limit: 1536m
+
+  api:
+    <<: *backend
+    command: ['./scripts/start.api.sh']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    ports:
+      - '127.0.0.1:13000:3000'
+    volumes:
+      - storage_data:/app/storage
+    healthcheck:
+      test: [CMD-SHELL, 'curl -fsS http://localhost:3000/health >/dev/null']
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    mem_limit: 1024m
+
+  worker:
+    <<: *backend
+    command: ['./scripts/start.worker.sh']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    volumes:
+      - storage_data:/app/storage
+    healthcheck:
+      test: [CMD-SHELL, 'curl -fsS http://localhost:8080 >/dev/null']
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    mem_limit: 1024m
+
+  clock:
+    <<: *backend
+    command: ['./scripts/start.clock.sh']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    mem_limit: 768m
+
+  front:
+    image: getlago/front:v1.57.0
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      api: { condition: service_healthy }
+    environment:
+      API_URL: ${LAGO_API_URL:-https://billing-api.example.com}
+      LAGO_API_URL: ${LAGO_API_URL:-https://billing-api.example.com}
+      LAGO_FRONT_URL: ${LAGO_FRONT_URL:-https://billing.example.com}
+      APP_ENV: production
+      LAGO_DISABLE_PDF_GENERATION: 'false'
+    ports:
+      - '127.0.0.1:18080:8080'
+    mem_limit: 128m
+    logging: *logging
+
+  pdf:
+    image: ghcr.io/getlago/lago-gotenberg:8.39
+    restart: unless-stopped
+    mem_limit: 768m
+    logging: *logging
+
+volumes:
+  postgres_data:
+    name: pocket-lago-postgres-data
+  redis_data:
+    name: pocket-lago-redis-data
+  storage_data:
+    name: pocket-lago-storage-data

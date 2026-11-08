@@ -1,3 +1,5 @@
+import { uploadRequest } from './upload-request.js';
+import type { UploadProgress } from '../shared/upload-progress.js';
 import { HttpMessagingClient } from './messaging.js';
 import { AccountClient } from './account.js';
 import { attachmentMime } from '../shared/attachment-mime.js';
@@ -350,8 +352,16 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
     if (!/^image\/(png|jpeg|gif|webp)$/.test(file.mime)) throw Error('表情包需要图片');
     return super.saveSticker(conversationId, fileId);
   }
-  override async upload(id: string, name: string, data: Blob | Uint8Array, signal?: AbortSignal) {
+  override async upload(
+    id: string,
+    name: string,
+    data: Blob | Uint8Array,
+    signal?: AbortSignal,
+    progress?: (value: UploadProgress) => void,
+  ) {
     if (!this.account.secrets) throw Error('请先启用并解锁账号加密');
+    signal?.throwIfAborted();
+    progress?.({ phase: 'preparing', loaded: 0, total: data instanceof Blob ? data.size : data.length });
     const original = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : data;
     if (!original.length || original.length > 10 * 1024 * 1024) throw Error('附件需要为 1 字节至 10 MB');
     const key = crypto.getRandomValues(new Uint8Array(32)),
@@ -365,18 +375,32 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
       context,
       { key: encode64(key), name, mime, size: original.length, context, iv: sealed.iv },
     );
-    const response = await fetch(`${this.baseURL}/api/im/conversations/${encodeURIComponent(id)}/files`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      signal,
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-File-Name': 'encrypted.pocket',
-        'X-Encrypted-Header': encrypted,
-        ...(this.credential ? { Authorization: `Bearer ${this.credential}` } : {}),
+    signal?.throwIfAborted();
+    progress?.({ phase: 'uploading', loaded: 0, total: original.length });
+    const response = await uploadRequest(
+      `${this.baseURL}/api/im/conversations/${encodeURIComponent(id)}/files`,
+      {
+        method: 'POST',
+        credentials: 'same-origin',
+        signal,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-File-Name': 'encrypted.pocket',
+          'X-Encrypted-Header': encrypted,
+          ...(this.credential ? { Authorization: `Bearer ${this.credential}` } : {}),
+        },
+        body: decode64(sealed.data),
       },
-      body: decode64(sealed.data),
-    });
+      progress
+        ? (loaded, total) =>
+            progress({
+              phase: loaded === total ? 'finalizing' : 'uploading',
+              loaded: Math.round((loaded / total) * original.length),
+              total: original.length,
+            })
+        : undefined,
+    );
+    progress?.({ phase: 'finalizing', loaded: original.length, total: original.length });
     const body = await response.json();
     if (!response.ok) throw Error(body.error ?? '上传失败');
     const file = await this.decodeFile(body.file as ChatAttachment);
@@ -410,9 +434,16 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
       return { data, name: meta.name, mime: meta.mime, size: data.length };
     }
     const fileLocation = /\/conversations\/([^/]+)\/files\/([^/]+)\//.exec(url.pathname);
+    const resourceFile = /\/resources\/files\/file\/([^/]+)$/.exec(url.pathname);
+    if (resourceFile && (typeof meta.context !== 'string' || !meta.context.endsWith(`:${resourceFile[1]}`)))
+      throw Error('附件身份校验失败');
     const secret = (await this.fileSecret(
       meta.encrypted,
-      fileLocation ? `attachment:${fileLocation[1]}:${fileLocation[2]}` : undefined,
+      fileLocation
+        ? `attachment:${fileLocation[1]}:${fileLocation[2]}`
+        : resourceFile
+          ? meta.context
+          : undefined,
     )) as FileSecret & { iv: string };
     const plain = await unseal(decode64(secret.key), { iv: secret.iv, data: encode64(data) }, secret.context);
     if (plain.length !== secret.size) throw Error('附件长度校验失败');

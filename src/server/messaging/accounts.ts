@@ -1,7 +1,7 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { MessagingHttp, MessagingReply, MessagingRequest } from './http.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { ChatError, type MessagingStore } from './store.js';
+import { ChatError, type MessagingStore } from './store-core.js';
 import { USER_ID_PATTERN, USERNAME_PATTERN } from '../../shared/account-identity.js';
 import { canonical, fingerprint, type AccountVault } from '../../shared/account-crypto.js';
 import type { ChatUser } from '../../shared/messaging.js';
@@ -33,15 +33,15 @@ const credential = b64.length(44);
 const protectSchema = z.object({ vault: vaultSchema, auth: credential, recoveryAuth: credential });
 type Dependencies = {
   store: MessagingStore;
-  identity: (req: FastifyRequest) => ChatUser;
-  human: (req: FastifyRequest) => ChatUser;
-  token: (req: FastifyRequest) => string;
-  session: (reply: FastifyReply, user: ChatUser) => { user: ChatUser };
+  identity: (req: MessagingRequest) => ChatUser;
+  human: (req: MessagingRequest) => ChatUser;
+  token: (req: MessagingRequest) => string;
+  session: (reply: MessagingReply, user: ChatUser) => { user: ChatUser };
   hash: (value: string, salt: string) => Promise<Buffer>;
   take: (key: string, max: number) => void;
   registrationCode?: string;
 };
-export async function registerAccounts(app: FastifyInstance, d: Dependencies) {
+export async function registerAccounts(app: MessagingHttp, d: Dependencies) {
   const { store, identity, human, token, session, hash, take } = d;
   const account = (id: string) => store.db.prepare('SELECT * FROM im_account_crypto WHERE user_id=?').get(id);
   const hashed = async (value: string) => {

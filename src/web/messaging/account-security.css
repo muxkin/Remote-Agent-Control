@@ -1,0 +1,136 @@
+.account-security-page {
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  padding: 48px 24px max(24px, env(safe-area-inset-bottom));
+}
+.im-account.account-security-panel {
+  width: 100%;
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 24px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.account-security-symbol {
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+}
+.account-security-panel h2 {
+  text-align: center;
+  font-size: 26px;
+  letter-spacing: -0.6px;
+}
+.account-security-panel > p {
+  font-size: 14px;
+  line-height: 1.8;
+}
+.recovery-backup {
+  display: grid;
+  gap: 18px;
+}
+.recovery-code-box {
+  padding: 16px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.recovery-code-box label {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.recovery-code-box textarea {
+  display: block;
+  padding: 0;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  width: 100%;
+  min-height: 58px;
+  font:
+    16px/1.8 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  color: var(--ink);
+}
+.recovery-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.recovery-actions button {
+  min-height: 44px;
+  display: inline-flex;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+}
+.recovery-confirm {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  margin: 4px 0 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--surface-subtle);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+}
+.recovery-confirm input[type='checkbox'] {
+  appearance: auto;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  border-radius: 4px;
+}
+.recovery-confirm:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.recovery-continue {
+  min-height: 46px;
+}
+.recovery-private,
+.recovery-feedback {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
+}
+.recovery-feedback {
+  color: var(--accent);
+}
+.account-security-logout {
+  align-self: center;
+  padding: 8px 16px;
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+@media (max-width: 600px) {
+  .account-security-page {
+    padding-top: 24px;
+  }
+  .im-account.account-security-panel {
+    gap: 20px;
+    padding-top: 16px;
+  }
+  .account-security-panel h2 {
+    font-size: 24px;
+  }
+}

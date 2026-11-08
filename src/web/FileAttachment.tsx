@@ -6,6 +6,7 @@ import { AttachmentActions } from './AttachmentActions';
 import { ImagePreview } from './ImagePreview';
 import { Icon } from './Icon';
 import { AttachmentIdentity } from './AttachmentIdentity';
+import { copyImage, imageBlob } from './image-clipboard';
 
 export function FileAttachment({
   href,
@@ -32,6 +33,13 @@ export function FileAttachment({
   const [reload, setReload] = useState(0);
   const info = attachmentInfo(href, displayName);
   const name = displayName || info.name;
+  const copyOriginal = () =>
+    copyImage(async () => {
+      const file = access
+        ? await access.load(threadId, href, undefined, true)
+        : await mediaContent(threadId, href);
+      return imageBlob(file.url);
+    });
   async function download() {
     const file = await load(threadId, href);
     downloadFile({
@@ -71,6 +79,7 @@ export function FileAttachment({
         path={href}
         name={name}
         onDownload={download}
+        onCopyImage={info.media === 'image' ? copyOriginal : undefined}
         onPreview={info.previewable ? open : undefined}
         onRemove={onRemove}
         surface={compact ? 'compact' : card ? 'card' : 'inline'}
@@ -117,6 +126,7 @@ export function FileAttachment({
           error={error}
           reload={reload}
           onClose={() => setPreview(null)}
+          onCopy={copyOriginal}
           onError={() => setError('图片加载失败，请重试')}
           onRetry={() => {
             setReload((value) => value + 1);

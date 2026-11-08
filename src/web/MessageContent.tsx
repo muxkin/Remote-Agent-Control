@@ -72,7 +72,12 @@ export function MessageContent({
       <div className="message-text">
         {displayed.role !== 'tool' || displayed.id.includes(':media:') ? (
           <Suspense fallback={displayed.text}>
-            <RichMessage text={displayed.text} threadId={threadId} streaming={streaming} />
+            <RichMessage
+              preserveLineBreaks={displayed.role === 'user'}
+              text={displayed.text}
+              threadId={threadId}
+              streaming={streaming}
+            />
           </Suspense>
         ) : (
           displayed.text

@@ -1,9 +1,11 @@
+import { remarkUserBreaks } from '../shared/remark-user-breaks';
+import './code-block.css';
 import { remarkChemicalFormulas } from '../shared/chemical-formulas';
 import './math-typography.css';
 import { markdownSource } from '../shared/markdown-source';
 import { browserId } from './browser-id';
 import { Icon } from './Icon';
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import DOMPurify from 'dompurify';
@@ -17,7 +19,14 @@ import { selectedTheme, themeTokens } from './theme/palette';
 const htmlCache = new Map<string, string>();
 function CodeBlock({ text, language, streaming }: { text: string; language: string; streaming: boolean }) {
   const { settings, resolved } = useAppearance();
-  const diagramPalette = language === 'mermaid' ? themeTokens(selectedTheme(settings, resolved)) : null;
+  const diagramPalette = useMemo(
+    () => (language === 'mermaid' ? themeTokens(selectedTheme(settings, resolved)) : null),
+    [language, settings, resolved],
+  );
+  const [wrap, setWrap] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
   const { ref, visible } = useVisible();
   const [html, setHtml] = useState('');
   const [error, setError] = useState('');
@@ -93,32 +102,63 @@ function CodeBlock({ text, language, streaming }: { text: string; language: stri
     };
   }, [text, language, streaming, visible, diagramPalette]);
   return (
-    <div ref={ref} className={`code-block ${language === 'mermaid' ? 'diagram' : ''}`}>
+    <div
+      ref={ref}
+      className={`code-block ${language === 'mermaid' ? 'diagram' : ''} ${wrap ? 'code-wrap' : ''}`}
+    >
       <div className="code-toolbar">
-        <span>{language || '代码'}</span>
-        <button
-          onClick={() => {
-            void (async () => {
-              try {
-                await navigator.clipboard.writeText(text);
-                setError('已复制');
-              } catch {
-                setError('请选中代码手动复制');
-              }
-            })();
-          }}
-        >
-          复制
-        </button>
+        <span className="code-language">
+          <Icon name="code" size={15} />
+          {language || '纯文本'}
+        </span>
+        <span className="code-line-count">{text.split('\n').length} 行</span>
+        <div className="code-actions">
+          {language !== 'mermaid' && (
+            <button
+              type="button"
+              aria-label="代码自动换行"
+              aria-pressed={wrap}
+              onClick={() => setWrap(!wrap)}
+            >
+              换行
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label={copied ? '代码已复制' : '复制代码'}
+            onClick={() => {
+              void (async () => {
+                try {
+                  await navigator.clipboard.writeText(text);
+                  setCopied(true);
+                  setError('');
+                  clearTimeout(copyTimer.current);
+                  copyTimer.current = setTimeout(() => setCopied(false), 2000);
+                } catch {
+                  setError('请选中代码手动复制');
+                }
+              })();
+            }}
+          >
+            <Icon name={copied ? 'check' : 'copy'} size={14} />
+            {copied ? '已复制' : '复制'}
+          </button>
+        </div>
       </div>
-      {html && !streaming ? (
-        <div dangerouslySetInnerHTML={{ __html: html }} />
-      ) : (
-        <pre>
-          <code>{text}</code>
-        </pre>
+      <div className="code-content" tabIndex={0} role="region" aria-label="代码内容">
+        {html && !streaming ? (
+          <div dangerouslySetInnerHTML={{ __html: html }} />
+        ) : (
+          <pre>
+            <code>{text}</code>
+          </pre>
+        )}
+      </div>
+      {error && (
+        <div className="code-copy-status" role="status">
+          {error}
+        </div>
       )}
-      {error && <small>{error}</small>}
     </div>
   );
 }
@@ -128,10 +168,12 @@ export default memo(function RichMessage({
   text,
   threadId,
   streaming = false,
+  preserveLineBreaks = false,
 }: {
   text: string;
   threadId: string;
   streaming?: boolean;
+  preserveLineBreaks?: boolean;
 }) {
   const [math, setMath] = useState<typeof import('./math-plugins').default | null>(null);
   useEffect(() => {
@@ -147,7 +189,10 @@ export default memo(function RichMessage({
       ),
       code: ({ className, children }) => {
         const value = String(children ?? '');
-        const language = /language-(\S+)/.exec(className ?? '')?.[1] ?? '';
+        const declared = /language-(\S+)/.exec(className ?? '')?.[1] ?? '';
+        const language =
+          declared ||
+          (value.includes('\n') && /^\s*(?:curl\s|#!.*\b(?:bash|sh)\b)/.test(value) ? 'bash' : '');
         return language || value.includes('\n') ? (
           <CodeBlock text={value.replace(/\n$/, '')} language={language} streaming={streaming} />
         ) : (
@@ -182,11 +227,12 @@ export default memo(function RichMessage({
   return (
     <div className="markdown">
       <Markdown
-        remarkPlugins={
-          math
+        remarkPlugins={[
+          ...(preserveLineBreaks ? [remarkUserBreaks] : []),
+          ...(math
             ? [remarkFileCitations, remarkGfm, remarkChemicalFormulas, math.remarkMath]
-            : [remarkFileCitations, remarkGfm, remarkChemicalFormulas]
-        }
+            : [remarkFileCitations, remarkGfm, remarkChemicalFormulas]),
+        ]}
         rehypePlugins={
           math ? [[math.rehypeKatex, { throwOnError: false, strict: 'ignore', trust: false }]] : []
         }

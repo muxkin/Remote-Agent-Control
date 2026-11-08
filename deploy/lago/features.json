@@ -1,0 +1,23 @@
+{
+  "features": [
+    {
+      "code": "storage",
+      "name": "存储空间",
+      "description": "Encrypted attachment storage. The application must enforce actual occupancy and atomic upload reservations.",
+      "privileges": [
+        { "code": "max_bytes", "name": "总空间上限（字节）", "value_type": "integer" },
+        { "code": "max_file_bytes", "name": "单文件上限（字节）", "value_type": "integer" }
+      ]
+    },
+    {
+      "code": "gateways",
+      "name": "Gateway 数量",
+      "privileges": [{ "code": "max_count", "name": "数量上限", "value_type": "integer" }]
+    },
+    {
+      "code": "agents",
+      "name": "Agent 数量",
+      "privileges": [{ "code": "max_count", "name": "数量上限", "value_type": "integer" }]
+    }
+  ]
+}

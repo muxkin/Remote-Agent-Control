@@ -40,7 +40,7 @@ export function readRoute(url: URL): AppRoute {
     ...(url.searchParams.get('backend') && /^[a-zA-Z0-9_-]{1,80}$/.test(url.searchParams.get('backend')!)
       ? { backend: url.searchParams.get('backend')! }
       : {}),
-    page: pages.includes(page) ? page : 'workbench',
+    page: pages.includes(page) ? page : 'messages',
     ...(page === 'messages' && conversation && /^[a-f0-9-]{36}$/.test(conversation) ? { conversation } : {}),
     ...(page === 'workbench' && thread && /^[^\x00-\x1f/\\]{1,200}$/.test(thread)
       ? { thread, ...(host && /^[a-zA-Z0-9]{1,200}$/.test(host) ? { host } : {}) }

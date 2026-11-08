@@ -4,6 +4,7 @@ import { PageHeader } from '../shell/AppShell';
 import { Icon } from '../Icon';
 import { messaging, useMessaging } from './context';
 import { Avatar, UserIdentity, Notice as ErrorNotice, Confirm, errorText, time, type Navigate } from './ui';
+import ResourceSettings from './ResourceSettings';
 export function AccountForm() {
   const { setUser } = useMessaging();
   const [mode, setMode] = useState<'register' | 'login' | 'recovery'>('register');
@@ -338,6 +339,7 @@ export function Profile({ navigate }: { navigate: Navigate }) {
           </div>
         </div>
         <UserIdentity user={user!} />
+        <ResourceSettings key={user!.id} />
         <section className="im-settings-section">
           <h3>个人资料</h3>
           <div className="im-avatar-controls">

@@ -1,3 +1,4 @@
+import { uploadItems, type UploadItem } from './UploadProgress';
 import { ConversationHeader } from './shell/ConversationHeader';
 import { ConversationControls, type ControlSection } from './ConversationControls';
 import type { ControlAction } from '../shared/controls';
@@ -71,10 +72,12 @@ export default function AgentWorkspace({
   route,
   navigate,
   onBusy,
+  active = true,
 }: {
   route: AppRoute;
   navigate: (route: AppRoute, replace?: boolean) => void;
   onBusy: (busy: boolean) => void;
+  active?: boolean;
 }) {
   const backendId = route.backend ?? DEFAULT_BACKEND;
   const [backend, setBackend] = useState<BackendInfo>();
@@ -136,9 +139,22 @@ export default function AgentWorkspace({
   projectRef.current = project;
   const listRequest = useRef(0);
   const [listLoading, setListLoading] = useState(false);
-  const [selected, updateSelected] = useState<ThreadSummary | null>(null);
+  const [selectedState, updateSelected] = useState<ThreadSummary | null>(null);
+  // Replayed operation history is not a new navigation request.
+  const creationRequest = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    creationRequest.current = undefined;
+  }, [route.thread, route.host, backendId, active]);
+  // The URL is the selection authority; previous cached metadata must never win a click.
+  const selected =
+    route.thread && (!route.host || route.host === deviceSession.host?.hostId)
+      ? selectedState?.id === route.thread
+        ? selectedState
+        : (threads.find((thread) => thread.id === route.thread) ?? null)
+      : null;
   useEffect(() => setControlRequest(undefined), [selected?.id]);
   function setSelected(thread: ThreadSummary | null) {
+    creationRequest.current = undefined;
     updateSelected(thread);
     navigate({ page: 'workbench', backend: backendId, ...(thread ? { thread: thread.id } : {}) });
   }
@@ -156,7 +172,7 @@ export default function AgentWorkspace({
       updateSelected(null);
       return;
     }
-    if (selected?.id === route.thread) return;
+    if (selectedState?.id === route.thread) return;
     let alive = true;
     const known = threads.find((t) => t.id === route.thread);
     if (known) updateSelected(known);
@@ -171,7 +187,7 @@ export default function AgentWorkspace({
             ),
         )
         .then((thread) => {
-          if (alive) updateSelected(thread);
+          if (alive && thread.id === route.thread) updateSelected(thread);
         })
         .catch(() => {
           if (alive) navigate({ page: 'workbench', backend: backendId }, true);
@@ -179,11 +195,12 @@ export default function AgentWorkspace({
     return () => {
       alive = false;
     };
-  }, [route.page, route.thread, route.host, paired, emptyCreation]);
+  }, [route.page, route.thread, route.host, backendId, paired, emptyCreation, threads, selectedState?.id]);
   const selectedId = useRef<string | null>(null);
   const openedCreations = useRef(new Set<string>());
   selectedId.current = selected?.id ?? null;
-  const [view, setView] = useState<ThreadView | null>(null);
+  const [receivedView, setView] = useState<ThreadView | null>(null);
+  const view = receivedView?.id === selected?.id ? receivedView : null;
   const stream = useSyncExternalStore(subscribeConnection, connectionSnapshot);
   const [hostId, setHostId] = useState(() => new URLSearchParams(location.hash.slice(1)).get('host') ?? '');
   const drafts = useChatDrafts(deviceId, selected?.id ?? null);
@@ -205,7 +222,9 @@ export default function AgentWorkspace({
   }
 
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState('');
+  const [uploadJobs, setUploadJobs] = useState<UploadItem[]>([]);
+  const [uploadThread, setUploadThread] = useState('');
+  const uploadLock = useRef(false);
 
   useEffect(() => {
     setToolsOpen(false);
@@ -225,12 +244,6 @@ export default function AgentWorkspace({
   }, []);
   const [error, setError] = useState('');
   const [threadError, setThreadError] = useState('');
-  const [toast, setToast] = useState('');
-  useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => setToast(''), 2800);
-    return () => clearTimeout(timer);
-  }, [toast]);
   const [busy, setBusy] = useState(false);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
@@ -249,15 +262,11 @@ export default function AgentWorkspace({
     // Otherwise a late receipt could resurrect a confirmed request after reload.
     if (previous && mergeOperation([previous], operation)[0] !== operation) return;
     operationSnapshots.current.set(operation.id, operation);
+    if (creationRequest.current === operation.id && ['failed', 'rejected'].includes(operation.state))
+      creationRequest.current = undefined;
     if (operationSnapshots.current.size > 256)
       operationSnapshots.current.delete(operationSnapshots.current.keys().next().value!);
     rememberOperation(deviceId, operation);
-    if (
-      operation.kind === 'queue' &&
-      operation.state === 'completed' &&
-      selectedId.current === operation.threadId
-    )
-      setToast('已排队，下一轮执行');
     const submission = submittedDrafts.current.get(operation.id);
     if (submission && ['accepted', 'completed', 'interrupted'].includes(operation.state)) {
       drafts.update(submission.thread, (current) =>
@@ -265,10 +274,12 @@ export default function AgentWorkspace({
           ? { text: '', uploads: [], skills: [], plugins: [] }
           : current,
       );
+      if (selectedId.current === submission.thread) setUploadJobs([]);
       submittedDrafts.current.delete(operation.id);
     } else if (['rejected', 'failed'].includes(operation.state)) submittedDrafts.current.delete(operation.id);
     if (
       operation.kind === 'create' &&
+      creationRequest.current === operation.id &&
       operation.state === 'completed' &&
       operation.resultThreadId &&
       selectedId.current === operation.threadId &&
@@ -282,13 +293,15 @@ export default function AgentWorkspace({
       }
       void api<{ thread: ThreadSummary }>(`/threads/${encodeURIComponent(operation.resultThreadId)}`)
         .then((result) => {
-          if (selectedId.current === operation.threadId) {
+          if (creationRequest.current === operation.id && selectedId.current === operation.threadId) {
             setSelected(result.thread);
             setNewOpen(false);
           }
           void loadThreads();
         })
-        .catch(() => setError('新会话已建立，请刷新会话列表查看。'));
+        .catch(() => {
+          if (creationRequest.current === operation.id) setError('新会话已建立，请刷新会话列表查看。');
+        });
     }
     if (selectedId.current === operation.threadId) setOperations((old) => mergeOperation(old, operation));
   }
@@ -385,9 +398,9 @@ export default function AgentWorkspace({
     const unsubscribe = deviceSession.subscribe(
       id,
       (data) => {
-        if (disposed) return;
+        if (disposed || selectedId.current !== id) return;
         if (data.type === 'status') setStatus(data.status);
-        else if (data.type === 'thread') {
+        else if (data.type === 'thread' && data.thread.id === id) {
           viewRef.current = data.thread;
           setView(data.thread);
           setThreadError('');
@@ -479,10 +492,12 @@ export default function AgentWorkspace({
       updatedAt: Date.now(),
     };
     try {
+      if (kind === 'create') creationRequest.current = requestId;
       if (['send', 'steer', 'queue'].includes(kind))
         submittedDrafts.current.set(requestId, { thread: selected.id, draft: drafts.draft });
       receiveOperation(pendingOperation);
     } catch {
+      if (creationRequest.current === requestId) creationRequest.current = undefined;
       setError('浏览器无法保存请求标识，本次消息未发送');
       setBusy(false);
       return;
@@ -514,23 +529,36 @@ export default function AgentWorkspace({
     return requestId;
   }
   async function uploadFiles(files: FileList | File[] | null) {
-    if (!selected || !files) return;
-    const threadId = selected.id;
+    if (!selected || !files || uploadLock.current) return;
+    const threadId = selected.id,
+      list = Array.from(files);
+    if (!list.length) return;
+    if (uploads.length + list.length > 10) {
+      setError('每条消息最多 10 个附件');
+      return;
+    }
+    const jobs = uploadItems(list);
+    uploadLock.current = true;
+    setUploadThread(threadId);
+    setUploadJobs(jobs);
     setUploading(true);
     setError('');
+    const update = (index: number, value: Partial<UploadItem>) =>
+      setUploadJobs((old) => old.map((job) => (job.id === jobs[index].id ? { ...job, ...value } : job)));
     try {
-      if (uploads.length + files.length > 10) throw Error('每条消息最多 10 个附件');
-      for (const file of Array.from(files)) {
-        if (file.size > 256 * 1024 * 1024) throw Error('单个附件暂时支持至 256 MiB');
-        setUploadProgress(`准备 ${file.name}`);
-        const done = await uploadFile(threadId, file, setUploadProgress);
-        drafts.update(threadId, (d) => ({ ...d, uploads: [...d.uploads, done] }));
+      for (let i = 0; i < list.length; i++) {
+        update(i, { state: 'active' });
+        try {
+          const done = await uploadFile(threadId, list[i], (progress) => update(i, progress));
+          drafts.update(threadId, (d) => ({ ...d, uploads: [...d.uploads, done] }));
+          update(i, { state: 'done' });
+        } catch (e) {
+          update(i, { state: 'failed', error: (e as Error).message });
+        }
       }
-    } catch (e) {
-      setError((e as Error).message);
     } finally {
+      uploadLock.current = false;
       setUploading(false);
-      setUploadProgress('');
     }
   }
   async function loadOlder() {
@@ -557,12 +585,14 @@ export default function AgentWorkspace({
       if (generation === historyGeneration.current) setHistoryLoading(false);
     }
   }
-  const pending = operations.some((x) => ['received', 'dispatching', 'uncertain'].includes(x.state));
+  const currentOperations = operations.filter((operation) => operation.threadId === selected?.id);
+  const pending = currentOperations.some((x) => ['received', 'dispatching', 'uncertain'].includes(x.state));
   const delivery =
-    operations.find((x) => ['received', 'dispatching', 'uncertain'].includes(x.state)) ?? operations[0];
+    currentOperations.find((x) => ['received', 'dispatching', 'uncertain'].includes(x.state)) ??
+    currentOperations[0];
   const canCompose = stream && !!view && (view.canSend || (view.canInterrupt && view.pendingRequests === 0));
   const currentIds = new Set(view?.messages.map((x) => x.id));
-  const messages = [...older.filter((x) => !currentIds.has(x.id)), ...(view?.messages ?? [])];
+  const messages = view ? [...older.filter((x) => !currentIds.has(x.id)), ...view.messages] : [];
   useEffect(() => {
     onBusy(busy || uploading || pending);
   }, [busy, uploading, pending, onBusy]);
@@ -688,6 +718,7 @@ export default function AgentWorkspace({
         busy={busy || uploading}
       />
       <ThreadNavigation
+        backend={backend}
         agentName={agentName}
         onWorkbench={() => navigate({ page: 'workbench' })}
         canCreate={!!status?.capabilities.newThread && !busy && !uploading}
@@ -820,11 +851,6 @@ export default function AgentWorkspace({
               />
             </div>
             <section className="composer">
-              {toast && (
-                <p className="composer-toast" role="status">
-                  {toast}
-                </p>
-              )}
               <div
                 className={`connection-note ${stream && view?.synchronized && view.owner && view.runtimeStatus !== 'notLoaded' && status?.writesEnabled ? 'sr-only' : ''}`}
               >
@@ -845,29 +871,31 @@ export default function AgentWorkspace({
                   {error || threadError}
                 </p>
               )}
-              <OperationFeedback
-                operation={delivery}
-                onCheck={
-                  delivery
-                    ? async () => receiveOperation(await api<Operation>(`/operations/${delivery.id}`))
-                    : undefined
-                }
-                onRetry={
-                  delivery?.state === 'rejected' &&
-                  ['send', 'steer'].includes(delivery.kind) &&
-                  (draft.trim() || uploads.length) &&
-                  canCompose &&
-                  !busy &&
-                  !pending
-                    ? () => void act(view?.activeTurnId ? 'steer' : 'send')
-                    : undefined
-                }
-              />
               {(!!selectedSkills.length || !!selectedPlugins.length) && !!view?.activeTurnId && (
                 <p className="hint">已选插件和技能将在下一轮使用，请等当前任务结束后发送。</p>
               )}
               <ChatComposer
                 activity={operationActivity(delivery)}
+                feedback={
+                  <OperationFeedback
+                    operation={delivery}
+                    onCheck={
+                      delivery
+                        ? async () => receiveOperation(await api<Operation>(`/operations/${delivery.id}`))
+                        : undefined
+                    }
+                    onRetry={
+                      delivery?.state === 'rejected' &&
+                      ['send', 'steer'].includes(delivery.kind) &&
+                      (draft.trim() || uploads.length) &&
+                      canCompose &&
+                      !busy &&
+                      !pending
+                        ? () => void act(view?.activeTurnId ? 'steer' : 'send')
+                        : undefined
+                    }
+                  />
+                }
                 threadId={selected.id}
                 value={drafts.draft}
                 onChange={(change) => drafts.update(selected.id, change)}
@@ -880,7 +908,8 @@ export default function AgentWorkspace({
                     : '当前只读；请查看上方连接状态'
                 }
                 uploading={uploading}
-                uploadProgress={uploadProgress}
+                uploadItems={uploadThread === selected.id ? uploadJobs : []}
+                onDismissUploads={() => setUploadJobs([])}
                 uploadDisabled={busy || uploading || pending || !canCompose}
                 onUpload={uploadFiles}
                 running={!!view?.activeTurnId}
@@ -1044,7 +1073,10 @@ export default function AgentWorkspace({
             <ThreadTools
               open={newOpen}
               className="new-conversation-sheet"
-              onClose={() => setNewOpen(false)}
+              onClose={() => {
+                creationRequest.current = undefined;
+                setNewOpen(false);
+              }}
               title="选择项目，发送第一条消息即可开始"
               heading="新会话"
             >

@@ -1,3 +1,6 @@
+import { clipboardFiles } from './clipboard-files';
+import { UploadProgress, type UploadItem } from './UploadProgress';
+import './composer-progress.css';
 import { lazy, Suspense, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { ChatDraft } from './chat-drafts';
 import { Icon } from './Icon';
@@ -63,7 +66,8 @@ export function ChatComposer({
   disabled,
   placeholder = '给 Codex 发消息…',
   uploading = false,
-  uploadProgress = '',
+  uploadItems = [],
+  onDismissUploads,
   uploadDisabled = false,
   onUpload,
   running = false,
@@ -78,6 +82,7 @@ export function ChatComposer({
   maxLength = 16000,
   sendLabels,
   activity,
+  feedback,
   insertText,
   mobileSendLabel,
 }: {
@@ -87,7 +92,8 @@ export function ChatComposer({
   disabled: boolean;
   placeholder?: string;
   uploading?: boolean;
-  uploadProgress?: string;
+  uploadItems?: UploadItem[];
+  onDismissUploads?: () => void;
   uploadDisabled?: boolean;
   onUpload?: (files: FileList | File[] | null) => void;
   running?: boolean;
@@ -102,6 +108,7 @@ export function ChatComposer({
   maxLength?: number;
   sendLabels?: { send: string; stop: string; running: string };
   activity?: string;
+  feedback?: ReactNode;
   mobileSendLabel?: string;
   insertText?: { key: string; text: string; focus?: boolean };
 }) {
@@ -158,7 +165,7 @@ export function ChatComposer({
           ))}
         </div>
       )}
-      {uploadProgress && <p role="status">{uploadProgress}</p>}
+      <UploadProgress items={uploadItems} onDismiss={onDismissUploads} />
       {!!skills.length && (
         <div className="selected-skills">
           {skills.map((skill) => (
@@ -233,12 +240,10 @@ export function ChatComposer({
             event.currentTarget.form?.requestSubmit();
         }}
         onPaste={(event) => {
-          const files = Array.from(event.clipboardData.files).filter((file) =>
-            file.type.startsWith('image/'),
-          );
+          const files = clipboardFiles(event.clipboardData);
           if (!files.length || !onUpload || disabled || uploadDisabled || uploading) return;
           event.preventDefault();
-          // Mixed text and images stay together in the same unsent draft.
+          // Preserve text with pasted files. Plain-text-only pastes retain native behavior.
           const pastedText = event.clipboardData.getData('text/plain');
           if (pastedText) {
             const { selectionStart, selectionEnd } = event.currentTarget;
@@ -258,6 +263,7 @@ export function ChatComposer({
         maxLength={maxLength}
         disabled={disabled}
       />
+      {feedback}
       <div className="composer-actions">
         {onUpload && (
           <label className="upload-button">
@@ -267,7 +273,7 @@ export function ChatComposer({
               aria-label="添加附件"
               type="file"
               multiple
-              disabled={uploadDisabled || uploading}
+              disabled={disabled || uploadDisabled || uploading}
               onChange={(event) => {
                 onUpload(event.target.files);
                 event.target.value = '';

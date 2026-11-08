@@ -1,0 +1,17 @@
+# Optional shared reverse-proxy network. Database and Redis stay on the private network.
+services:
+  api:
+    networks:
+      default:
+      edge:
+        aliases: [pocket-lago-api]
+  front:
+    networks:
+      default:
+      edge:
+        aliases: [pocket-lago-front]
+
+networks:
+  edge:
+    external: true
+    name: ${LAGO_PROXY_NETWORK:?Set the existing reverse-proxy network name}

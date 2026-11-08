@@ -16,6 +16,8 @@ export interface ChatContact extends ChatUser {
   blocked: boolean;
 }
 export interface ChatAttachment {
+  /** Ciphertext metadata remains signed even after the owner releases the file bytes. */
+  removed?: boolean;
   encrypted?: string;
   id: string;
   name: string;

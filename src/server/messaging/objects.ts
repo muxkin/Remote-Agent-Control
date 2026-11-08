@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { signedDownload, type StorageAdapter } from '../object-storage.js';
-import type { MessagingStore } from './store.js';
+import type { MessagingStore } from './store-core.js';
+import { MediaGarbage } from './object-gc.js';
 
 export type MediaKind = 'file' | 'sticker' | 'avatar';
 export interface MediaObject {
@@ -21,11 +22,21 @@ const hash = (data: Buffer) => createHash('sha256').update(data).digest('hex');
 const tables = { file: 'im_files', sticker: 'im_stickers', avatar: 'im_avatars' } as const;
 /** Immutable private objects, shared by saved stickers and every message referencing them. */
 export class MessagingObjects {
+  readonly redirects = true;
+  private garbage: MediaGarbage;
   constructor(
     readonly store: MessagingStore,
     readonly adapter: StorageAdapter | undefined,
     readonly origin: string,
-  ) {}
+  ) {
+    this.garbage = new MediaGarbage(store, async (key) => {
+      if (!adapter?.remove) throw Error('Object storage deletion is not configured');
+      await adapter.remove(key);
+    });
+  }
+  collectGarbage() {
+    return this.garbage.collect();
+  }
   metadata(kind: MediaKind, id: string): MediaObject | undefined {
     const row = this.store.db
       .prepare('SELECT metadata FROM im_media_objects WHERE kind=? AND id=?')
@@ -35,11 +46,7 @@ export class MessagingObjects {
   async put(data: Buffer, mime: string): Promise<MediaObject> {
     if (!this.adapter) throw Error('Object storage is not configured');
     const sha = hash(data),
-      key = `im-media-v1/${sha.slice(0, 2)}/${sha}`;
-    const existing = this.store.db
-      .prepare("SELECT metadata FROM im_media_objects WHERE json_extract(metadata,'$.hash')=? LIMIT 1")
-      .get(sha);
-    if (existing) return JSON.parse(String(existing.metadata)) as MediaObject;
+      key = `im-media-v1/${sha.slice(0, 2)}/${sha}-${randomUUID()}`;
     let preview = data,
       previewMime = mime,
       width: number | undefined,
@@ -66,7 +73,8 @@ export class MessagingObjects {
       }
     }
     const previewHash = hash(preview),
-      previewKey = previewHash === sha ? key : `im-media-v1/${previewHash.slice(0, 2)}/${previewHash}`;
+      previewKey = previewHash === sha ? key : `${key}-preview`;
+    this.garbage.pending([key, previewKey]);
     const folder = await mkdtemp(join(tmpdir(), 'im-object-'));
     try {
       const upload = async (key: string, bytes: Buffer, contentType: string) => {
@@ -82,6 +90,9 @@ export class MessagingObjects {
       };
       await upload(key, data, mime);
       if (previewKey !== key) await upload(previewKey, preview, previewMime);
+    } catch (error) {
+      this.garbage.pending([key, previewKey], 0);
+      throw error;
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
@@ -98,11 +109,17 @@ export class MessagingObjects {
   }
   commit(kind: MediaKind, id: string, object: MediaObject) {
     this.store.transaction(() => {
-      if (!this.store.db.prepare(`SELECT 1 FROM ${tables[kind]} WHERE id=?`).get(id)) return;
+      if (
+        !this.store.db
+          .prepare(`SELECT 1 FROM ${tables[kind]} WHERE id=?${kind === 'file' ? ' AND removed=0' : ''}`)
+          .get(id)
+      )
+        return;
       this.store.db
         .prepare('INSERT OR REPLACE INTO im_media_objects(kind,id,metadata) VALUES (?,?,?)')
         .run(kind, id, JSON.stringify(object));
       this.store.db.prepare(`UPDATE ${tables[kind]} SET data=x'' WHERE id=?`).run(id);
+      this.garbage.committed(object);
     });
   }
   async resource(
@@ -146,7 +163,11 @@ export class MessagingObjects {
   async restoreLocal() {
     let restored = 0;
     for (const kind of ['file', 'sticker', 'avatar'] as const) {
-      const rows = this.store.db.prepare(`SELECT id FROM ${tables[kind]} WHERE length(data)=0`).all();
+      const rows = this.store.db
+        .prepare(
+          `SELECT id FROM ${tables[kind]} WHERE length(data)=0${kind === 'file' ? ' AND removed=0' : ''}`,
+        )
+        .all();
       for (const row of rows) {
         const id = String(row.id);
         const bytes = await this.bytes(kind, id, Buffer.alloc(0));

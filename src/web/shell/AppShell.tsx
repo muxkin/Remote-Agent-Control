@@ -15,6 +15,7 @@ import { PageBoundary, PageLoading } from './PageBoundary';
 import { AccountSecurity } from '../messaging/AccountSecurity';
 import { onAccountSessionChange, syncAccountHosts, accountSyncError } from '../account-session';
 import { messaging } from '../messaging/context';
+import { Avatar } from '../messaging/ui';
 
 export { PageHeader } from './PageHeader';
 
@@ -113,7 +114,7 @@ export function AppShell() {
         className={`app-shell ${root ? 'shell-root' : 'shell-detail'} ${showNavigation ? 'has-navigation' : ''}`}
       >
         <div className="shell-content">
-          {chooser && <BackendChooser navigate={navigate} />}
+          {chooser && <BackendChooser key={hostId} navigate={navigate} />}
           {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
             <section className="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
               <Suspense fallback={<PageLoading label="正在打开工作台…" />}>
@@ -124,6 +125,7 @@ export function AppShell() {
                 >
                   <AgentWorkspace
                     key={`${hostId || 'unpaired'}:${backendId}`}
+                    active={activeWorkspace}
                     route={workspaceRoute}
                     navigate={navigate}
                     onBusy={setBusy}
@@ -187,9 +189,14 @@ export function AppShell() {
         </div>
         {showNavigation && (
           <nav className="bottom-navigation" aria-label="主要功能">
-            <div className="shell-brand">
-              <img src="/app-icon-32.png" alt="Agent 空间" />
-            </div>
+            <button
+              className="shell-account"
+              aria-label={user ? `我的账号：${user.displayName}` : '登录账号'}
+              title={user?.displayName ?? '登录账号'}
+              onClick={() => navigate({ page: 'me' })}
+            >
+              {user ? <Avatar user={user} /> : <Icon name="user" />}
+            </button>
             {modules.map((module) => (
               <button
                 key={module.id}

@@ -1,3 +1,4 @@
+import { uploadItems, type UploadItem } from '../UploadProgress';
 import { ConversationHeader } from '../shell/ConversationHeader';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type {
@@ -43,7 +44,11 @@ function Files({
   return (
     <div className={`user-attachments im-files ${compact ? 'compact' : ''}`}>
       {files.map((file) =>
-        /^(image|audio|video)\//.test(file.mime) ? (
+        file.removed ? (
+          <span className="im-resource-removed" key={file.id}>
+            {file.name} · 附件已清理
+          </span>
+        ) : /^(image|audio|video)\//.test(file.mime) ? (
           <Media
             key={file.id}
             src={file.url}
@@ -81,7 +86,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
   const specialRequest = useRef<{ key: string; id: string } | undefined>(undefined);
   const [busy, setBusy] = useState(false),
     [uploading, setUploading] = useState(false),
-    [uploadProgress, setUploadProgress] = useState(''),
+    [uploadJobs, setUploadJobs] = useState<UploadItem[]>([]),
     [olderBusy, setOlderBusy] = useState(false);
   const [error, setError] = useState(''),
     [loading, setLoading] = useState(true),
@@ -217,7 +222,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     }
   }
   async function upload(files: FileList | File[] | null) {
-    if (!files) return false;
+    if (!files || uploadAbort.current) return false;
     const list = Array.from(files);
     if (list.length + draftRef.current.files.length > 6) {
       setError('每条消息最多 6 个附件');
@@ -231,21 +236,33 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     uploadAbort.current = abort;
     setUploading(true);
     setError('');
+    const jobs = uploadItems(list);
+    setUploadJobs(jobs);
+    const update = (index: number, value: Partial<UploadItem>) =>
+      setUploadJobs((old) => old.map((job) => (job.id === jobs[index].id ? { ...job, ...value } : job)));
+    let succeeded = true;
     try {
       for (let i = 0; i < list.length; i++) {
-        setUploadProgress(`正在上传 ${i + 1}/${list.length}：${list[i].name}`);
-        const { file } = await messaging.upload(id, list[i].name, list[i], abort.signal);
         if (abort.signal.aborted) return false;
-        change({ files: [...draftRef.current.files, file] });
+        update(i, { state: 'active' });
+        try {
+          const { file } = await messaging.upload(id, list[i].name, list[i], abort.signal, (progress) =>
+            update(i, progress),
+          );
+          if (abort.signal.aborted) return false;
+          change({ files: [...draftRef.current.files, file] });
+          update(i, { state: 'done' });
+        } catch (e) {
+          if (abort.signal.aborted) return false;
+          update(i, { state: 'failed', error: errorText(e) });
+          succeeded = false;
+        }
       }
-    } catch (e) {
-      if (!abort.signal.aborted) setError(errorText(e));
-      return false;
     } finally {
-      setUploading(false);
-      setUploadProgress('');
+      uploadAbort.current = null;
+      if (!abort.signal.aborted) setUploading(false);
     }
-    return true;
+    return succeeded;
   }
   async function remove(file: ChatAttachment) {
     change({ files: draftRef.current.files.filter((f) => f.id !== file.id) });
@@ -275,6 +292,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
       setFollowing(true);
       setMessages((old) => merge(old, [message]));
       change({ text: '', files: [], reply: undefined, pending: undefined });
+      setUploadJobs([]);
     } catch (e) {
       setError(`${errorText(e)}；草稿已保留，可以重试。`);
     } finally {
@@ -439,6 +457,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                       {message.text && !message.interaction && (
                         <Suspense fallback={<div className="im-plain">{message.text}</div>}>
                           <RichMessage
+                            preserveLineBreaks={sender?.kind !== 'agent'}
                             text={message.text}
                             threadId={id}
                             streaming={message.state === 'streaming'}
@@ -580,7 +599,8 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
             onSubmit={() => void send()}
             onUpload={(files) => void upload(files)}
             uploading={uploading}
-            uploadProgress={uploadProgress}
+            uploadItems={uploadJobs}
+            onDismissUploads={() => setUploadJobs([])}
             uploadDisabled={busy || unavailable || !!conversation?.closed}
             running={!!active.length}
             onInterrupt={() => {
@@ -703,7 +723,12 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               {quoted.sender?.displayName} · {new Date(quoted.createdAt).toLocaleString('zh-CN')}
             </p>
             <Suspense fallback={quoted.text}>
-              <RichMessage text={quoted.text} threadId={id} streaming={quoted.state === 'streaming'} />
+              <RichMessage
+                preserveLineBreaks={quoted.sender?.kind !== 'agent'}
+                text={quoted.text}
+                threadId={id}
+                streaming={quoted.state === 'streaming'}
+              />
             </Suspense>
             {quoted.interaction && (
               <InteractionCard

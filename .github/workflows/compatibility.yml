@@ -7,6 +7,21 @@ concurrency:
   group: compatibility-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  cloudflare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck:cf
+      - run: npm run test:cf
+      - run: npm run check:deployments
   build-release:
     runs-on: ubuntu-latest
     steps:
@@ -80,6 +95,7 @@ jobs:
           path: .
       - run: npx playwright install --with-deps chrome
       - run: npm run test:delivery
+      - run: npm run test:conversation-replay
       - run: npm run test:messaging
       - run: npm run test:messaging-design
       - run: npm run test:composer

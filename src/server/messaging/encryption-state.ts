@@ -1,8 +1,8 @@
-import type { DatabaseSync } from 'node:sqlite';
+import type { MessagingDatabase } from './database.js';
 import { SEALED_PREFIX } from '../../shared/account-crypto.js';
 
 /** Refuse mixed data models at startup. Only the offline migration tool can convert old records. */
-export function assertEncryptedDatabase(db: DatabaseSync) {
+export function assertEncryptedDatabase(db: Pick<MessagingDatabase, 'prepare'>) {
   const account = db
     .prepare(
       'SELECT 1 FROM im_users u LEFT JOIN im_account_crypto c ON c.user_id=u.id WHERE c.user_id IS NULL LIMIT 1',

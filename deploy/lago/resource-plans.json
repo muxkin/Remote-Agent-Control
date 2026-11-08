@@ -1,0 +1,9 @@
+{
+  "defaultPlan": "pocket-ordinary",
+  "timeZone": "Asia/Shanghai",
+  "plans": [
+    { "code": "pocket-ordinary", "name": "普通用户", "storageBytes": 100000000, "relayBytes": 1000000000 },
+    { "code": "pocket-premium", "name": "高级用户", "storageBytes": 1000000000, "relayBytes": 10000000000 },
+    { "code": "pocket-max", "name": "Max", "storageBytes": 5000000000, "relayBytes": 100000000000 }
+  ]
+}

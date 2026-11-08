@@ -5,9 +5,9 @@ import { protectAccount, unlockAccount } from '../../src/shared/account-crypto.j
 import type { ChatUser, SendMessageOptions, MessageState } from '../../src/shared/messaging.js';
 
 export async function saveRecoveryCode(page: Page) {
-  await expect(page.getByRole('heading', { name: '保存你的恢复码' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '保存恢复码' })).toBeVisible();
   await page.getByLabel('我已安全保存恢复码').check();
-  await page.getByRole('button', { name: '继续', exact: true }).click();
+  await page.getByRole('button', { name: '保存后继续', exact: true }).click();
 }
 
 export async function registerAgentFixture(

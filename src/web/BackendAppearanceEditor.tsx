@@ -43,10 +43,12 @@ async function readIcon(file: File): Promise<string> {
 
 export default function BackendAppearanceEditor({
   id,
+  product,
   onClose,
   onSaved,
 }: {
   id: string;
+  product?: string;
   onClose: () => void;
   onSaved: (value: BackendAppearanceDocument) => void;
 }) {
@@ -139,7 +141,7 @@ export default function BackendAppearanceEditor({
           }}
         >
           <div className="backend-preview">
-            <BackendIcon icon={draft.icon} />
+            <BackendIcon icon={draft.icon} product={product} />
             <span>
               <strong>{draft.name || '实例名称'}</strong>
               <small>{draft.description || '添加一句说明'}</small>

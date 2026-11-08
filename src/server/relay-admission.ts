@@ -14,14 +14,8 @@ export function relayClientAddress(trustedProxies: string[] = []) {
   };
 }
 
-export const relayLimits = {
-  connections: 1024,
-  pending: 256,
-  pendingPerIp: 64,
-  attemptsPerMinute: 240,
-  failuresPerMinute: 64,
-  trackedIps: 8192,
-};
+import { relayLimits } from './relay-core.js';
+export { relayLimits };
 interface Source {
   pending: number;
   attempts: number;

@@ -2,13 +2,15 @@ import { useEffect, useState, type ReactNode, type FormEvent } from 'react';
 import { messaging, useMessaging } from './context';
 import { rememberAccount } from '../account-session';
 import './messaging.css';
+import { Icon } from '../Icon';
+import { RecoveryCode } from './RecoveryCode';
+import './account-security.css';
 
 export function AccountSecurity({ children }: { children: ReactNode }) {
   const { user, setUser, loading } = useMessaging();
   const [, redraw] = useState(0);
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState(''),
-    [saved, setSaved] = useState(false);
+    [error, setError] = useState('');
   useEffect(() => messaging.account.onChange(() => redraw((v) => v + 1)), []);
   const account = messaging.account;
   async function run(action: () => Promise<void>) {
@@ -52,49 +54,27 @@ export function AccountSecurity({ children }: { children: ReactNode }) {
   const recovery = !!account.recoveryCode && !account.recoveryLogin;
   if (account.secrets && !recovery && !account.recoveryLogin) return children;
   return (
-    <main className="module-page">
-      <section className="im-account">
-        <h2>{recovery ? '保存你的恢复码' : account.recoveryLogin ? '设置新的账号密码' : '解锁账号'}</h2>
+    <main className="module-page account-security-page">
+      <section className="im-account account-security-panel">
+        <span className="account-security-symbol">
+          <Icon name="shield" size={36} />
+        </span>
+        <h2>{recovery ? '保存恢复码' : account.recoveryLogin ? '设置新的账号密码' : '解锁账号'}</h2>
         <p>
           {recovery
-            ? '忘记密码时，恢复码是恢复加密数据的凭证。请保存在密码管理器或其他安全位置；服务器不能代为找回。'
+            ? '忘记密码时，用它找回账号和加密数据。请保存在密码管理器或安全位置，服务器无法代为找回。'
             : '解锁后即可恢复你的电脑和聊天记录。'}
         </p>
         {recovery ? (
-          <div className="im-form">
-            <textarea
-              aria-label="账号恢复码"
-              readOnly
-              value={account.recoveryCode}
-              rows={3}
-              autoComplete="off"
-            />
-            <button
-              className="secondary"
-              onClick={() =>
-                void run(async () => {
-                  await navigator.clipboard.writeText(account.recoveryCode);
-                })
-              }
-            >
-              复制恢复码
-            </button>
-            <label>
-              <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
-              我已安全保存恢复码
-            </label>
-            <button
-              className="primary"
-              disabled={!saved || busy}
-              onClick={() => {
-                account.recoveryCode = '';
-                account.changed();
-                setSaved(false);
-              }}
-            >
-              继续
-            </button>
-          </div>
+          <RecoveryCode
+            key={account.recoveryCode}
+            code={account.recoveryCode}
+            busy={busy}
+            onContinue={() => {
+              account.recoveryCode = '';
+              account.changed();
+            }}
+          />
         ) : (
           <form className="im-form" onSubmit={submit}>
             {!account.recoveryLogin && (
@@ -147,7 +127,7 @@ export function AccountSecurity({ children }: { children: ReactNode }) {
           </p>
         )}
         <button
-          className="secondary"
+          className="account-security-logout"
           disabled={busy}
           onClick={() =>
             void run(async () => {

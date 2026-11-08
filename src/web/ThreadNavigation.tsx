@@ -2,6 +2,9 @@ import { remoteFetch } from './device-session';
 import { useEffect, useRef, useState } from 'react';
 import type { ProjectSummary, ThreadSummary } from '../shared/types';
 import { Icon } from './Icon';
+import type { BackendInfo } from '../shared/backends';
+import { backendAppearanceDefaults } from '../shared/backend-appearance';
+import { BackendIcon } from './BackendIcon';
 type Page = { threads: ThreadSummary[]; nextCursor: string | null };
 export function ThreadNavigation({
   projects,
@@ -16,6 +19,7 @@ export function ThreadNavigation({
   onCreate,
   pendingQuestions,
   agentName = 'Codex',
+  backend,
   onWorkbench,
   canCreate,
 }: {
@@ -31,6 +35,7 @@ export function ThreadNavigation({
   onCreate: (projectId?: string) => void;
   pendingQuestions: number;
   agentName?: string;
+  backend?: BackendInfo;
   onWorkbench?: () => void;
   canCreate?: boolean;
 }) {
@@ -179,9 +184,14 @@ export function ThreadNavigation({
         </button>
       </header>
       <div className="workspace-tool">
-        <span className="tool-avatar">
-          <Icon name="monitor" size={25} />
-        </span>
+        <BackendIcon
+          icon={
+            backend
+              ? (backend.appearance ?? backendAppearanceDefaults(backend)).icon
+              : { kind: 'builtin', value: 'puzzle' }
+          }
+          product={backend?.product}
+        />
         <div>
           <strong>{agentName}</strong>
           <span>项目与任务</span>

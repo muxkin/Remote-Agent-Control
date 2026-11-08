@@ -9,6 +9,7 @@ export async function nodeSession(
   ticket: string,
   auth: DeviceAuth,
   lane: Lane = 'control',
+  accountCredential?: string,
 ) {
   const url = new URL('/connect', origin);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -38,8 +39,36 @@ export async function nodeSession(
         return;
       }
       const message = JSON.parse(raw.toString());
-      if (message.type === 'challenge') socket.send(JSON.stringify({ type: 'join', hostId, ticket, lane }));
-      else if (message.type === 'joined') {
+      if (message.type === 'challenge') {
+        void (async () => {
+          let resourceToken: string | undefined;
+          if (message.resources) {
+            if (!accountCredential) throw Error('An account credential is required for metered relay');
+            const response = await fetch(new URL('/api/im/resources/relay-ticket', origin), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accountCredential}` },
+              body: JSON.stringify({ hostId, lane, ticket }),
+            });
+            const result = await response.json();
+            if (!response.ok) throw Error(result.error ?? 'Relay quota unavailable');
+            resourceToken = result.token;
+          }
+          if (socket.readyState === WebSocket.OPEN)
+            socket.send(
+              JSON.stringify({
+                type: 'join',
+                hostId,
+                ticket,
+                lane,
+                ...(resourceToken ? { resourceToken } : {}),
+              }),
+            );
+        })().catch((error) => {
+          clearTimeout(timer);
+          reject(error);
+          socket.close();
+        });
+      } else if (message.type === 'joined') {
         clearTimeout(timer);
         resolve();
       }

@@ -6,6 +6,9 @@
 npm ci
 npm test
 npm run typecheck
+npm run typecheck:cf
+npm run test:cf
+npm run check:deployments
 POCKET_ENV_FILE=/dev/null npm run build
 ```
 
@@ -28,18 +31,22 @@ POCKET_ENV_FILE=/dev/null npm run build
 
 ```bash
 POCKET_ENV_FILE=/dev/null npx vite build --outDir ../../.implementation/web
+export TEST_WEB_ROOT=.implementation/web
 npm run test:browser
 npm run test:frontend
 npm run test:layout
 npm run test:composer
 npm run test:delivery
+npm run test:conversation-replay
 npm run test:messaging
 npm run test:messaging-design
 ```
 
 `test:browser` 与 `test:v2` 为同一套测试。它启动 loopback 上的临时中继和模拟桌面，不操作真实桌面会话，覆盖连接复用、直连/中继切换、文件和缓存。不要把测试夹具作为外部预览服务。`TEST_WEB_ROOT` 指定本次验收的构建目录，`TEST_PORT` 可指定隔离端口；需要跨设备预览时将 `TEST_BIND` 设为本机 Tailscale 地址。
 
-`test:delivery` 注入慢响应、结果未知、明确拒绝和迟到回执，验证发送提示、草稿保留及刷新后的请求日志；`test:messaging-design` 使用合成图片验证头像同步、表情面板和窄屏布局，不依赖个人素材。ACP 附件与流式辅助模块测试包含在默认 `npm test` 中。
+`test:delivery` 注入慢响应、结果未知、明确拒绝和迟到回执，验证按钮进度、异常操作入口、草稿保留及刷新后的请求日志；`test:conversation-replay` 重放历史新建事件，验证打开、刷新、切换不会误跳会话，本次主动新建仍能打开结果，离开后不会被拉回，并检查附件完成后不残留提示条。两项都在 CI 的真实浏览器中执行。
+
+`test:messaging-design` 使用合成图片验证头像同步、表情面板和窄屏布局，不依赖个人素材。ACP 附件/流式辅助模块及输入区反馈测试包含在默认 `npm test` 中。Node 与 CF 共用中继行为契约；`check:deployments` 通过实际构建入口比较同参数前端文件并检查 Worker 打包，见 [统一部署架构](docs/DEPLOYMENT_ARCHITECTURE.md)。
 
 以下测试读取私有部署配置：
 

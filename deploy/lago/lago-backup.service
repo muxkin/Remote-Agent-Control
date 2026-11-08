@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up Lago database, queues, files and encryption configuration
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lago/backup.sh
+UMask=0077

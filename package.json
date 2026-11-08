@@ -59,7 +59,14 @@
     "test:messaging": "node --import tsx scripts/im-smoke.mjs",
     "test:messaging-design": "node --import tsx scripts/im-design-smoke.mjs",
     "test:delivery": "node --import tsx scripts/delivery-feedback-smoke.mjs",
-    "im:migrate": "node --import ./scripts/env.mjs --import tsx scripts/im-encryption-migrate.ts"
+    "test:conversation-replay": "node --import tsx scripts/conversation-replay-smoke.ts",
+    "im:migrate": "node --import ./scripts/env.mjs --import tsx scripts/im-encryption-migrate.ts",
+    "typecheck:cf": "tsc -p tsconfig.cloudflare.json --noEmit",
+    "build:cf": "node scripts/cloudflare.mjs build",
+    "deploy:cf": "node scripts/cloudflare.mjs deploy",
+    "dev:cf": "node scripts/cloudflare.mjs dev",
+    "test:cf": "vitest run --config vitest.cloudflare.config.ts",
+    "check:deployments": "node scripts/check-deployments.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -76,10 +83,12 @@
     "@npmcli/arborist": "10.0.4",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
+    "cookie": "^2.0.1",
     "dompurify": "^3.4.17",
     "env-paths": "4.0.0",
     "execa": "10.2.1",
     "fastify": "^5.12.8",
+    "fflate": "^0.8.3",
     "idb": "8.0.4",
     "immer": "^11.2.9",
     "ipaddr.js": "2.5.0",
@@ -107,6 +116,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261107.1",
     "@playwright/test": "^1.64.1",
     "@types/node": "^24.19.2",
     "@types/npmcli__arborist": "6.3.3",
@@ -118,12 +128,14 @@
     "@types/ws": "^8.18.2",
     "esbuild": "^0.25.0",
     "jsqr": "^1.4.0",
+    "miniflare": "^5.20261104.0-beta",
     "pngjs": "^7.0.0",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vite": "^7.3.7",
-    "vitest": "^4.1.12"
+    "vitest": "^4.1.12",
+    "wrangler": "^4.158.0"
   },
   "license": "MIT",
   "description": "Encrypted mobile remote for existing Codex desktop and DSH Web conversations",

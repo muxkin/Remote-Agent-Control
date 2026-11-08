@@ -1,0 +1,122 @@
+.upload-progress-panel {
+  margin: 8px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.upload-progress-dismiss {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 12px 10px;
+  font-size: 12px;
+}
+.upload-progress-list {
+  max-height: 186px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.upload-progress-file {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 12px;
+  color: var(--accent);
+}
+.upload-progress-file + .upload-progress-file {
+  border-top: 1px solid var(--line);
+}
+.upload-file-type {
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--surface-subtle);
+  font:
+    600 9px ui-monospace,
+    monospace;
+}
+.upload-file-details {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.upload-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 550;
+}
+.upload-file-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.upload-file-details progress {
+  width: 100%;
+  height: 4px;
+  border: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  accent-color: var(--accent);
+  background: var(--surface-subtle);
+}
+.upload-file-details progress::-webkit-progress-bar {
+  background: var(--surface-subtle);
+}
+.upload-file-details progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 6px;
+  transition: width 0.15s ease;
+}
+.upload-file-details progress:indeterminate {
+  background: repeating-linear-gradient(
+    100deg,
+    var(--surface-subtle) 0 30%,
+    var(--soft) 40% 55%,
+    var(--surface-subtle) 65% 100%
+  );
+  background-size: 200% 100%;
+  animation: upload-pulse 1.4s linear infinite;
+}
+.upload-file-error {
+  color: var(--danger);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.composer-box .delivery-feedback {
+  margin: 5px 0;
+}
+.delivery-feedback.waiting,
+.delivery-feedback.failed {
+  border: 1px solid var(--line);
+  padding: 11px 13px;
+}
+.delivery-feedback .delivery-copy > span {
+  font-weight: 550;
+}
+@keyframes upload-pulse {
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (max-width: 480px) {
+  .upload-progress-list {
+    max-height: 148px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .upload-file-details progress:indeterminate {
+    animation: none;
+  }
+}

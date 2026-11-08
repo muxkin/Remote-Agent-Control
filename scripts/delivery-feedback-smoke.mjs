@@ -75,8 +75,8 @@ try {
   await submit('slow delivery fixture', 'hold');
   await expect(send).toHaveAttribute('aria-busy', 'true');
   await expect(send).toBeDisabled();
-  await expect(feedback).toHaveClass(/pending/);
-  await expect(feedback.getByRole('alert')).toHaveCount(0);
+  await expect(feedback).toHaveCount(0);
+  await expect(page.locator('.composer-activity')).toHaveCount(0);
   await page.screenshot({ path: join(output, 'sending-mobile.png') });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   expect(await send.locator('.sending-spinner').evaluate((el) => getComputedStyle(el).animationName)).toBe(
@@ -84,10 +84,11 @@ try {
   );
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   release();
-  await expect(feedback).toContainText('已发送');
   await expect(draft).toHaveValue('');
-  await expect(feedback).toHaveCount(0, { timeout: 4000 });
-  checks.push('slow send is neutral; accepted sends clear draft and dismiss feedback; reduced motion');
+  await expect(feedback).toHaveCount(0);
+  checks.push(
+    'slow sends animate only the button; accepted sends clear draft without a success banner; reduced motion',
+  );
 
   await submit('unknown outcome fixture', 'uncertain');
   await expect(feedback).toHaveClass(/waiting/);

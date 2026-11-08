@@ -1,3 +1,4 @@
+import type { UploadProgress } from '../shared/upload-progress';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import {
@@ -47,9 +48,10 @@ async function route(file: FileManifest) {
   }
   return fileRoute(file.size, session.direct, file.storage);
 }
-export async function uploadFile(threadId: string, file: File, progress: (text: string) => void) {
+export async function uploadFile(threadId: string, file: File, progress: (value: UploadProgress) => void) {
   const backendId = session.backendId;
   if (!file.size || file.size > MAX_FILE_SIZE) throw Error('附件大小需在 1 B 至 256 MiB 之间');
+  progress({ phase: 'preparing', loaded: 0, total: file.size });
   const whole = sha256.create(),
     hashes: string[] = [];
   for (let offset = 0; offset < file.size; offset += BLOCK_SIZE) {
@@ -87,7 +89,11 @@ export async function uploadFile(threadId: string, file: File, progress: (text: 
   }
   const path = await route(manifest);
   while (missing.length) {
-    progress(`${file.name} · ${Math.round((1 - missing.length / hashes.length) * 100)}%`);
+    progress({
+      phase: 'uploading',
+      loaded: file.size - missing.reduce((size, index) => size + blockLength(manifest!, index), 0),
+      total: file.size,
+    });
     const group: number[] = [missing[0]];
     while (group.length < 15 && missing[group.length] === group.at(-1)! + 1)
       group.push(missing[group.length]);
@@ -124,7 +130,7 @@ export async function uploadFile(threadId: string, file: File, progress: (text: 
     }
     missing.splice(0, group.length);
   }
-  progress(`校验 ${file.name}`);
+  progress({ phase: 'finalizing', loaded: file.size, total: file.size });
   return (await fileCall('finish', threadId, manifest.id)).value as {
     id: string;
     name: string;

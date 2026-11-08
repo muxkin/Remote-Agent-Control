@@ -14,7 +14,7 @@ it('handles one-use pairing fragments before ordinary routes without reflecting 
     page: 'pair',
   });
   expect(routeURL({ page: 'pair' })).toBe('/?page=pair');
-  expect(readRoute(new URL('https://app.invalid/?page=unknown'))).toEqual({ page: 'workbench' });
+  expect(readRoute(new URL('https://app.invalid/?page=unknown'))).toEqual({ page: 'messages' });
 });
 
 it('round-trips opaque native IDs and preserves the selected backend', () => {
@@ -36,4 +36,12 @@ it('keeps messaging conversation identities separate from desktop thread routes'
     readRoute(new URL('https://app.invalid/?page=messages&conversation=invalid&thread=private')),
   ).toEqual({ page: 'messages' });
   expect(parentRoute({ page: 'integrations' })).toEqual({ page: 'contacts' });
+});
+
+it('opens messages from the root and preserves explicit workspace links', () => {
+  expect(readRoute(new URL('https://app.invalid/'))).toEqual({ page: 'messages' });
+  expect(readRoute(new URL('https://app.invalid/?page=workbench&backend=dsh'))).toEqual({
+    page: 'workbench',
+    backend: 'dsh',
+  });
 });

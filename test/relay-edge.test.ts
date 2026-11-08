@@ -1,3 +1,4 @@
+import { relayContract } from './contracts/relay.js';
 import { afterEach, expect, it } from 'vitest';
 import { request } from 'node:http';
 import { once } from 'node:events';
@@ -36,7 +37,8 @@ async function setup(trustedProxies: string[] = ['127.0.0.1']) {
     return new Promise<WebSocket>((resolve, reject) => {
       socket.on('error', reject);
       socket.on('close', (code) => reject(Error(`Closed ${code}`)));
-      socket.on('message', (raw) => {
+      socket.on('message', (raw, binary) => {
+        if (binary) return;
         const value = JSON.parse(raw.toString());
         if (value.type === 'challenge') {
           if (!authenticate) resolve(socket);
@@ -62,7 +64,7 @@ async function setup(trustedProxies: string[] = ['127.0.0.1']) {
     socket.send(JSON.stringify({ type: 'routes', routes }));
     return { socket, hostId };
   }
-  return { relay, url, open, host };
+  return { relay, url, open, host, enrollment };
 }
 
 it('keeps more than 64 authenticated sockets behind one proxy/NAT, with per-device quotas', async () => {
@@ -175,4 +177,9 @@ it('does not allocate a client after it disconnects during route discovery', asy
   for (let i = 0; i < 8; i++)
     await open('198.51.100.1', () => ({ type: 'join', hostId, lane: 'control', ticket: route.ticket }));
   expect(relay.connections()).toMatchObject({ connections: 9, pending: 0 });
+});
+
+relayContract(async () => {
+  const instance = await setup();
+  return { connect: (auth) => instance.open('198.51.100.1', auth), enrollment: instance.enrollment };
 });

@@ -7,6 +7,7 @@ import { AttachmentIdentity } from './AttachmentIdentity';
 import { attachmentInfo, localReference, attachmentName } from '../shared/attachments';
 import { mediaContent, downloadFile } from './file-client';
 import { useVisible } from './useVisible';
+import { copyImage, imageBlob } from './image-clipboard';
 
 export function Media({
   src,
@@ -121,11 +122,21 @@ export function Media({
   const info = attachmentInfo(src.split(/[?#]/)[0]);
   const media = mediaType ?? info.media;
   const name = label || info.name;
+  const copyOriginal = () =>
+    copyImage(async () => {
+      const file = access
+        ? await access.load(threadId, src, undefined, true)
+        : localReference(src)
+          ? await mediaContent(threadId, src)
+          : { url: src };
+      return imageBlob(file.url);
+    });
   return (
     <AttachmentActions
       path={src}
       name={name}
       onDownload={download}
+      onCopyImage={media === 'image' ? copyOriginal : undefined}
       surface={compact ? 'compact' : 'media'}
       onRemove={onRemove}
     >
@@ -234,6 +245,7 @@ export function Media({
             onClose={() => setPreview(false)}
             onError={() => failed()}
             onRetry={() => renew()}
+            onCopy={copyOriginal}
           />
         )}
       </div>

@@ -13,6 +13,7 @@ export function AttachmentActions({
   onDownload,
   onPreview,
   onRemove,
+  onCopyImage,
   surface = 'card',
   children,
 }: {
@@ -21,6 +22,7 @@ export function AttachmentActions({
   onDownload: () => void | Promise<void>;
   onPreview?: () => void | Promise<void>;
   onRemove?: () => void;
+  onCopyImage?: () => Promise<void>;
   surface?: 'inline' | 'card' | 'media' | 'compact';
   children: ReactNode | ((open: OpenDetails) => ReactNode);
 }) {
@@ -78,6 +80,12 @@ export function AttachmentActions({
     <span
       className={`attachment-actions attachment-${surface}`}
       onContextMenu={(event) => {
+        // Preserve the browser's Copy Image / Save Image menu on actual image pixels.
+        // React portals bubble through this wrapper too; previews stop propagation themselves.
+        if ((event.target as HTMLElement).closest('img')) {
+          event.stopPropagation();
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         const anchor = (event.target as HTMLElement).closest<HTMLElement>('button') ?? event.currentTarget;
@@ -170,32 +178,43 @@ export function AttachmentActions({
               </button>
             </header>
             <div className="attachment-menu-body">
-              <span className="attachment-path-label">文件路径</span>
-              <div
-                className="attachment-path"
-                role="textbox"
-                aria-label="文件路径"
-                aria-readonly="true"
-                tabIndex={0}
-              >
-                {displayPath}
-              </div>
+              {!onCopyImage && (
+                <>
+                  <span className="attachment-path-label">文件路径</span>
+                  <div
+                    className="attachment-path"
+                    role="textbox"
+                    aria-label="文件路径"
+                    aria-readonly="true"
+                    tabIndex={0}
+                  >
+                    {displayPath}
+                  </div>
+                </>
+              )}
               <div className="attachment-menu-buttons">
                 <button
                   type="button"
                   className="attachment-copy"
                   onClick={async () => {
                     try {
-                      await navigator.clipboard.writeText(displayPath);
+                      if (onCopyImage) await onCopyImage();
+                      else await navigator.clipboard.writeText(displayPath);
                       setCopied(true);
                       setError('');
                     } catch {
-                      setError('复制失败，可选中上方路径手动复制');
+                      setError(
+                        onCopyImage
+                          ? '复制失败，请在图片上右键复制，或下载保存'
+                          : '复制失败，可选中上方路径手动复制',
+                      );
                     }
                   }}
                 >
                   <Icon name={copied ? 'check' : 'copy'} size={18} />
-                  <span aria-live="polite">{copied ? '已复制路径' : '复制路径'}</span>
+                  <span aria-live="polite">
+                    {onCopyImage ? (copied ? '图片已复制' : '复制图片') : copied ? '已复制路径' : '复制路径'}
+                  </span>
                 </button>
                 <button
                   type="button"

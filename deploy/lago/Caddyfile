@@ -1,0 +1,13 @@
+# Containerized Caddy example; replace the domains and use compose.proxy.yaml.
+billing.example.com {
+  header Strict-Transport-Security "max-age=31536000"
+  reverse_proxy pocket-lago-front:8080
+}
+
+billing-api.example.com {
+  header Strict-Transport-Security "max-age=31536000"
+  request_body {
+    max_size 10MB
+  }
+  reverse_proxy pocket-lago-api:3000
+}

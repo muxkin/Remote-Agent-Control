@@ -1,0 +1,125 @@
+.markdown .code-block {
+  --code-font: 'SFMono-Regular', Consolas, 'Liberation Mono', 'Noto Sans Mono CJK SC', monospace;
+  margin: 12px 0;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+  color: var(--ink);
+  overflow: hidden;
+}
+.markdown .code-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font:
+    12px/1.4 system-ui,
+    sans-serif;
+}
+.code-language {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-weight: 600;
+}
+.code-line-count {
+  font-size: 11px;
+  color: var(--muted);
+  margin-right: auto;
+}
+.code-actions {
+  display: flex;
+  gap: 4px;
+}
+.markdown .code-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  color: var(--muted);
+  font: inherit;
+}
+.markdown .code-toolbar button:hover,
+.markdown .code-toolbar button[aria-pressed='true'] {
+  color: var(--accent);
+  background: var(--soft);
+}
+.markdown .code-block .code-content {
+  max-height: 420px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.markdown .code-block pre,
+.markdown .code-block pre code {
+  font-family: var(--code-font);
+  font-size: 12px;
+  line-height: 1.65;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+  text-align: left;
+  tab-size: 2;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.markdown .code-block pre {
+  margin: 0;
+  padding: 16px;
+  overflow: visible;
+  background: transparent !important;
+}
+.markdown .code-block pre code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+.markdown .code-block.code-wrap pre,
+.markdown .code-block.code-wrap pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  width: auto;
+}
+.code-copy-status {
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface);
+}
+.markdown .code-block.diagram .code-content {
+  max-height: none;
+}
+@media (max-width: 480px) {
+  .code-line-count {
+    display: none;
+  }
+  .code-language {
+    margin-right: auto;
+  }
+  .markdown .code-toolbar {
+    padding-inline: 8px;
+  }
+  .markdown .code-block pre {
+    padding: 12px;
+  }
+  .markdown .code-block .code-content {
+    max-height: 320px;
+  }
+}
