@@ -4,7 +4,6 @@ const { updateURL } = require('./settings.cjs');
 const preview = process.env.POCKET_DESKTOP_PREVIEW === '1';
 const feed = preview ? null : updateURL(process.env.POCKET_DESKTOP_BUILD_FEED || '');
 module.exports = {
-  electronDist: 'node_modules/electron/dist',
   appId: 'org.agent-space.adapter',
   productName: 'Agent Space Adapter',
   directories: { output: '../dist/desktop', buildResources: '../assets/branding' },
