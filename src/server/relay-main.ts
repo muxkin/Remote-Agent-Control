@@ -1,4 +1,5 @@
 import { mkdirSync } from 'node:fs';
+import { callIceConfig } from './messaging/calls.js';
 import { resolve, join } from 'node:path';
 import { buildRelay } from './relay.js';
 import { loadStorage } from './object-storage.js';
@@ -10,12 +11,17 @@ mkdirSync(state, { recursive: true, mode: 0o700 });
 const app = await buildRelay({
   origin: new URL(process.env.POCKET_PUBLIC_ORIGIN!).origin,
   webRoot: resolve(process.env.POCKET_WEB_ROOT ?? './dist/web'),
+  releaseRoot: process.env.POCKET_DESKTOP_RELEASE_ROOT
+    ? resolve(process.env.POCKET_DESKTOP_RELEASE_ROOT)
+    : undefined,
   database: join(state, 'relay.sqlite'),
   enrollmentSecret: process.env.POCKET_RELAY_ENROLLMENT ?? '',
   messaging: {
     resourcePolicy: resourceProvider(process.env),
     database: join(state, 'messaging.sqlite'),
     registrationCode: process.env.POCKET_IM_REGISTRATION_CODE,
+    humanContacts: process.env.POCKET_IM_HUMAN_CONTACTS === 'true',
+    callIce: callIceConfig(process.env),
     storage: process.env.POCKET_IM_MEDIA_ADAPTER
       ? await loadStorage(
           { adapterPath: resolve(process.env.POCKET_IM_MEDIA_ADAPTER) },

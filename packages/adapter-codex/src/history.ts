@@ -1,12 +1,17 @@
 import { userContent } from './user-content.js';
 import { userMessageText } from './async-questions.js';
 import { DatabaseSync } from 'node:sqlite';
-import { open, realpath } from 'node:fs/promises';
+import { open, realpath, mkdir, writeFile, rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join, sep } from 'node:path';
 import { textOf, skillsOf, pluginsOf } from './timeline.js';
 import type { Message, ThreadSummary } from '../../../src/shared/types.js';
+import { codexAnswer, isCodexWorkspaceContext } from '../../../src/shared/codex-transcript.js';
 import { ProjectIndex } from './projects.js';
 import { RolloutFiles } from './rollout-files.js';
+import { itemMedia, mediaReference } from '../../../src/server/content-media.js';
+import { authorizeFile } from '../../../src/server/media.js';
+import { viewedImage } from './recovered-images.js';
 
 const PAGE_BYTES = 512 * 1024;
 const MAX_LINE = 4 * 1024 * 1024;
@@ -20,7 +25,10 @@ export class HistoryIndex {
     { file: string; identity: string; start: number; size: number; tail: JsonlTail; page: HistoryPage }
   >();
   private projectIndex: ProjectIndex;
-  constructor(private codexHome: string) {
+  constructor(
+    private codexHome: string,
+    private recoveredImages?: string,
+  ) {
     this.projectIndex = new ProjectIndex(codexHome);
   }
   private database(): DatabaseSync {
@@ -237,11 +245,114 @@ export class HistoryIndex {
     this.latest.clear();
     this.files.close();
   }
+
+  /** Read the owning rollout, including older pages and compressed history. */
+  private async *records(id: string) {
+    const reader = await this.files.open(await this.path(id));
+    try {
+      const size = (await reader.handle.stat()).size;
+      if (size > 512 * 1024 * 1024) throw Error('历史记录过大，请在电脑端查看附件');
+      let pending = Buffer.alloc(0),
+        offset = 0,
+        skipping = false;
+      while (offset < size) {
+        const chunk = Buffer.alloc(Math.min(65536, size - offset));
+        const { bytesRead } = await reader.handle.read(chunk, 0, chunk.length, offset);
+        if (!bytesRead) break;
+        offset += bytesRead;
+        const data = Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+        let from = 0,
+          end: number;
+        while ((end = data.indexOf(10, from)) >= 0) {
+          if (!skipping) {
+            try {
+              yield JSON.parse(data.subarray(from, end).toString('utf8'));
+            } catch {
+              /* malformed record */
+            }
+          }
+          skipping = false;
+          from = end + 1;
+        }
+        pending = data.subarray(from);
+        if (pending.length > 32 * 1024 * 1024) {
+          pending = Buffer.alloc(0);
+          skipping = true;
+        }
+      }
+    } finally {
+      await reader.close();
+    }
+  }
+  async inlineMedia(id: string, reference: string): Promise<string | null> {
+    for await (const record of this.records(id)) {
+      if (record.type !== 'response_item') continue;
+      for (const source of itemMedia(record.payload))
+        if (source.startsWith('data:') && mediaReference(source) === reference) return source;
+    }
+    return null;
+  }
+  async attachment(id: string, reference: string): Promise<string> {
+    const thread = this.get(id);
+    if (!thread) throw Error('找不到此会话');
+    let missing: unknown;
+    for await (const record of this.records(id)) {
+      const message = rolloutMessage(record, 'history');
+      if (!message) continue;
+      const file = await authorizeFile(reference, thread.cwd, [message]).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') missing = error;
+          return null;
+        },
+      );
+      if (file) return file;
+    }
+    if (missing) {
+      // A missing authorized link may still have its exact viewed bytes in the rollout.
+      // Never overwrite the former path or guess a replacement from another conversation.
+      if (this.recoveredImages) {
+        const source = await viewedImage(this.records(id), id, reference, thread.cwd);
+        if (source) {
+          await mkdir(this.recoveredImages, { recursive: true, mode: 0o700 });
+          const file = join(this.recoveredImages, mediaReference(source).slice('pocket-inline:'.length));
+          const temporary = join(this.recoveredImages, randomUUID() + '.tmp');
+          try {
+            await writeFile(temporary, Buffer.from(source.slice(source.indexOf(',') + 1), 'base64'), {
+              mode: 0o600,
+              flag: 'wx',
+            });
+            await rename(temporary, file);
+          } finally {
+            await rm(temporary, { force: true });
+          }
+          return file;
+        }
+      }
+      throw missing;
+    }
+    throw Error('附件未在此会话中找到，或原文件已移除');
+  }
 }
 
 export function rolloutMessage(record: any, fallbackId: string): Message | null {
-  const item = record.type === 'response_item' ? record.payload : null;
+  let item = record.type === 'response_item' ? record.payload : null;
   if (!item) return null;
+  const kinds = item.internal_chat_message_metadata_passthrough?.content_item_kinds;
+  if (item.role === 'user' && Array.isArray(item.content) && Array.isArray(kinds)) {
+    item = {
+      ...item,
+      content: item.content.filter(
+        (_part: unknown, index: number) => kinds[index] !== 'environments.environment_context',
+      ),
+    };
+  }
+  const media = itemMedia(item).map(mediaReference);
+  if (media.length && item.type !== 'message')
+    return {
+      id: `${item.id ?? fallbackId}:media:history`,
+      role: 'tool',
+      text: media.map((ref) => `![附件](<${ref}>)`).join('\n'),
+    };
   if (
     [
       'function_call',
@@ -270,22 +381,28 @@ export function rolloutMessage(record: any, fallbackId: string): Message | null 
   }
   if (item.type !== 'message' || !['user', 'assistant'].includes(item.role)) return null;
   if (item.role === 'assistant' && [item.channel, item.phase].includes('analysis')) return null;
-  const text = textOf(item.content);
-  if (!text) return null;
-  // Desktop persists its injected workspace context as a user-role message.
-  // Recognize only the complete generated envelope, not normal prompts mentioning it.
-  if (
-    item.role === 'user' &&
-    /^# AGENTS\.md instructions\b/.test(text) &&
-    /<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>\s*<environment_context>[\s\S]*<\/environment_context>\s*$/.test(
-      text,
-    )
-  )
-    return null;
+  const input = textOf(item.content);
+  const raw = item.role === 'user' && isCodexWorkspaceContext(input) ? '' : input;
+  const id = item.id ?? fallbackId;
+  const { text, codex } = item.role === 'assistant' ? codexAnswer(raw) : { text: raw, codex: undefined };
+  if (!text && !media.length && !codex) return null;
   return {
-    id: item.id ?? fallbackId,
+    id,
     role: item.role,
-    ...(item.role === 'user' ? { ...userContent(text), text: userMessageText(text) } : { text }),
+    ...(item.role === 'user'
+      ? {
+          ...userContent(text),
+          text: userMessageText(text),
+          ...(media.length
+            ? {
+                attachments: [
+                  ...(userContent(text).attachments ?? []),
+                  ...media.map((path) => ({ name: '附件', path })),
+                ],
+              }
+            : {}),
+        }
+      : { text: [text, ...media.map((ref) => `![附件](<${ref}>)`)].filter(Boolean).join('\n'), codex }),
     phase: item.phase ?? item.channel,
     ...(item.role === 'user' ? { skills: skillsOf(item.content) } : {}),
     ...(item.role === 'user' ? { plugins: pluginsOf(item.content) } : {}),

@@ -1,6 +1,6 @@
 import { uploadItems, type UploadItem } from '../UploadProgress';
 import { ConversationHeader } from '../shell/ConversationHeader';
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type {
   ChatAttachment,
   ChatConversation,
@@ -18,11 +18,64 @@ import { readDraft, writeDraft, type MessagingDraft } from './drafts';
 import { Avatar, Dialog, Notice, errorText, time, type Navigate } from './ui';
 import { loadMessagingMedia } from './media-cache';
 import { GroupDetails } from './Groups';
+import { AgentCallActions } from './AgentCall';
+import { ComposerPopover } from '../ComposerPopover';
 import { SecurityCodes } from './SecurityCodes';
 import { InteractionCard, CreateInteraction } from './InteractionCard';
+import { VoiceRecorder } from './VoiceRecorder';
 const Expressions = lazy(() => import('./Expressions').then((m) => ({ default: m.Expressions })));
-const VoiceRecorder = lazy(() => import('./VoiceRecorder').then((m) => ({ default: m.VoiceRecorder })));
 const RichMessage = lazy(() => import('../RichMessage'));
+const mobileComposer = window.matchMedia('(max-width: 700px)');
+function subscribeComposerLayout(listener: () => void) {
+  mobileComposer.addEventListener('change', listener);
+  return () => mobileComposer.removeEventListener('change', listener);
+}
+const attachmentChoices = [
+  { label: '照片与视频', icon: 'image', accept: 'image/*,video/*', multiple: true },
+  { label: '拍照', icon: 'camera', accept: 'image/*', capture: 'environment' },
+  { label: '文件', icon: 'folder', multiple: true },
+] as const;
+
+function AttachmentPicker({
+  choice,
+  closeMenu,
+  onFiles,
+}: {
+  choice: (typeof attachmentChoices)[number];
+  closeMenu: () => void;
+  onFiles: (files: FileList | null) => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => {
+          // Native pickers must open in the original tap handler.
+          input.current?.click();
+          closeMenu();
+        }}
+      >
+        <Icon name={choice.icon} size={20} />
+        {choice.label}
+      </button>
+      <input
+        ref={input}
+        type="file"
+        hidden
+        accept={'accept' in choice ? choice.accept : undefined}
+        capture={'capture' in choice ? choice.capture : undefined}
+        multiple={'multiple' in choice && choice.multiple}
+        onChange={(event) => {
+          onFiles(event.currentTarget.files);
+          event.currentTarget.value = '';
+        }}
+      />
+    </>
+  );
+}
+
 function merge(old: ChatMessage[], next: ChatMessage[]) {
   const map = new Map(old.map((m) => [m.id, m]));
   for (const m of next) {
@@ -186,7 +239,11 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
   }, [updates, conversation, id]);
   const last = messages.at(-1),
     active = messages.filter((m) => m.state === 'streaming'),
-    hasDraft = !!draft.text.trim() || !!draft.files.length;
+    hasDraft = !!draft.text.trim() || !!draft.files.length,
+    composerToolsDisabled =
+      busy || uploading || loading || unavailable || !!conversation?.closed || !!conversation?.readOnlyReason;
+  const compactComposer = useSyncExternalStore(subscribeComposerLayout, () => mobileComposer.matches);
+  const canRequestInteraction = conversation?.members.some((m) => m.id !== user!.id && m.kind === 'human');
   useEffect(() => {
     if (visible && last && conversation && last.sequence > conversation.readSequence)
       void messaging.read(id, last.sequence).catch(() => {});
@@ -222,7 +279,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     }
   }
   async function upload(files: FileList | File[] | null) {
-    if (!files || uploadAbort.current) return false;
+    if (!files?.length || uploadAbort.current) return false;
     const list = Array.from(files);
     if (list.length + draftRef.current.files.length > 6) {
       setError('每条消息最多 6 个附件');
@@ -319,7 +376,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     specialRequest.current = undefined;
   }
   async function sendVoice(file: File) {
-    if (busy || uploading || unavailable || conversation?.closed)
+    if (busy || uploading || unavailable || conversation?.closed || conversation?.readOnlyReason)
       throw new Error('当前无法发送语音，请稍后重试。');
     const request =
       voiceRequest.current?.file === file
@@ -367,6 +424,11 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                 : ''
           }
         >
+          {conversation?.kind === 'direct' &&
+            conversation.peer?.kind === 'agent' &&
+            !conversation.readOnlyReason && (
+              <AgentCallActions key={conversation.id} conversation={conversation} />
+            )}
           <button className="icon-button" aria-label="查看加密安全码" onClick={() => setSecurity(true)}>
             <Icon name="shield" />
           </button>
@@ -468,7 +530,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                         <InteractionCard
                           message={message}
                           userId={user!.id}
-                          disabled={unavailable || !!conversation?.closed}
+                          disabled={unavailable || !!conversation?.closed || !!conversation?.readOnlyReason}
                           onUpdate={(message) => setMessages((old) => merge(old, [message]))}
                         />
                       )}
@@ -578,13 +640,14 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               const next = typeof update === 'function' ? update(current) : update;
               change({ text: next.text ?? current.text });
             }}
-            disabled={busy || unavailable || !!conversation?.closed}
+            disabled={busy || unavailable || !!conversation?.closed || !!conversation?.readOnlyReason}
             sendDisabled={
               busy ||
               uploading ||
               loading ||
               unavailable ||
               !!conversation?.closed ||
+              !!conversation?.readOnlyReason ||
               (!hasDraft && !active.length)
             }
             placeholder={
@@ -598,10 +661,11 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
             maxLength={16000}
             onSubmit={() => void send()}
             onUpload={(files) => void upload(files)}
+            showUploadButton={!compactComposer}
             uploading={uploading}
             uploadItems={uploadJobs}
             onDismissUploads={() => setUploadJobs([])}
-            uploadDisabled={busy || unavailable || !!conversation?.closed}
+            uploadDisabled={composerToolsDisabled}
             running={!!active.length}
             onInterrupt={() => {
               for (const message of active) void cancel(message);
@@ -616,26 +680,10 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               <>
                 <button
                   type="button"
-                  className="icon-button"
-                  aria-label="表情与 Emoji"
-                  title="表情与 Emoji"
-                  disabled={busy || uploading || loading || unavailable || !!conversation?.closed}
-                  data-expression-trigger
-                  aria-expanded={tool === 'expressions'}
-                  onClick={(event) => {
-                    event.currentTarget.closest('form')?.querySelector('textarea')?.blur();
-                    setTool(tool === 'expressions' ? undefined : 'expressions');
-                  }}
-                >
-                  <Icon name="smile" size={22} />
-                </button>
-                <button
-                  type="button"
-                  className="icon-button"
-                  data-voice-trigger
+                  className="icon-button im-voice-trigger"
                   aria-label="语音消息"
                   title="语音消息"
-                  disabled={busy || uploading || loading || unavailable || !!conversation?.closed}
+                  disabled={composerToolsDisabled}
                   aria-expanded={tool === 'voice'}
                   onClick={(event) => {
                     event.currentTarget.closest('form')?.querySelector('textarea')?.blur();
@@ -644,19 +692,59 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                 >
                   <Icon name="mic" size={22} />
                 </button>
-                {conversation?.members.some((m) => m.id !== user!.id && m.kind === 'human') && (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    data-interaction-trigger
-                    aria-label="发起交互请求"
-                    title="问题与授权确认"
-                    disabled={busy || loading || unavailable || !!conversation?.closed}
-                    onClick={() => setTool('interaction')}
+                {(compactComposer || canRequestInteraction) && (
+                  <ComposerPopover
+                    label="更多功能"
+                    className="im-more-trigger"
+                    menu
+                    maxWidth={208}
+                    trigger={<Icon name="plus" size={22} />}
+                    disabled={composerToolsDisabled}
+                    onOpen={() => setTool(undefined)}
                   >
-                    <Icon name="plan" size={22} />
-                  </button>
+                    {(close) => (
+                      <div className="im-more-items">
+                        {compactComposer &&
+                          attachmentChoices.map((choice) => (
+                            <AttachmentPicker
+                              key={choice.label}
+                              choice={choice}
+                              closeMenu={() => close(false)}
+                              onFiles={(files) => void upload(files)}
+                            />
+                          ))}
+                        {canRequestInteraction && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              close();
+                              setTool('interaction');
+                            }}
+                          >
+                            <Icon name="plan" size={20} />
+                            发起交互请求
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </ComposerPopover>
                 )}
+                <button
+                  type="button"
+                  className="icon-button"
+                  data-expression-trigger
+                  aria-label="表情与表情包"
+                  title="表情与表情包"
+                  disabled={composerToolsDisabled}
+                  aria-expanded={tool === 'expressions'}
+                  onClick={(event) => {
+                    event.currentTarget.closest('form')?.querySelector('textarea')?.blur();
+                    setTool(tool === 'expressions' ? undefined : 'expressions');
+                  }}
+                >
+                  <Icon name="smile" size={22} />
+                </button>
                 {conversation?.kind === 'group' ? (
                   <label className="im-mention">
                     <span aria-hidden="true">@</span>
@@ -695,11 +783,13 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               />
             )}
           </Suspense>
-          <Suspense fallback={null}>
-            {tool === 'voice' && <VoiceRecorder onClose={() => setTool(undefined)} onSend={sendVoice} />}
-          </Suspense>
+          {tool === 'voice' && <VoiceRecorder onClose={() => setTool(undefined)} onSend={sendVoice} />}
           <p className="im-compose-help">
-            {conversation?.closed ? '历史消息仍可阅读' : 'Enter 发送 · Shift + Enter 换行'}
+            {conversation?.readOnlyReason
+              ? conversation.readOnlyReason
+              : conversation?.closed
+                ? '历史消息仍可阅读'
+                : 'Enter 发送 · Shift + Enter 换行'}
           </p>
         </footer>
         {tool === 'interaction' && conversation && (
@@ -734,7 +824,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               <InteractionCard
                 message={quoted}
                 userId={user!.id}
-                disabled={unavailable || !!conversation?.closed}
+                disabled={unavailable || !!conversation?.closed || !!conversation?.readOnlyReason}
                 onUpdate={(message) => {
                   setQuoted(message);
                   setMessages((old) => merge(old, [message]));

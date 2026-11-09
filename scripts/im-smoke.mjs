@@ -6,7 +6,12 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { PNG } from 'pngjs';
 import { buildRelay } from '../src/server/relay.ts';
-import { saveRecoveryCode, registerAgentFixture, messagingFixtureRequest } from './lib/messaging-smoke.ts';
+import {
+  saveRecoveryCode,
+  registerAgentFixture,
+  messagingFixtureRequest,
+  openChatMore,
+} from './lib/messaging-smoke.ts';
 // Isolated accounts and local relay; no live desktop or personal IM state is touched.
 const bind = process.env.TEST_BIND ?? '127.0.0.1',
   port = Number(process.env.TEST_PORT ?? 18931);
@@ -15,6 +20,7 @@ const origin = `http://${bind}:${port}`,
 await mkdir(out, { recursive: true });
 const state = await mkdtemp(join(tmpdir(), 'pocket-im-smoke-'));
 const relay = await buildRelay({
+  messaging: { humanContacts: true }, // Explicit optional social-mode fixture.
   origin,
   webRoot: resolve(process.env.TEST_WEB_ROOT ?? 'dist/web'),
   database: join(state, 'relay.sqlite'),
@@ -268,10 +274,13 @@ try {
   expect(await readFile(await download.path(), 'utf8')).toBe('sample,energy\ndemo_a,-0.31\ndemo_b,-0.29\n');
   await page.getByRole('button', { name: '关闭', exact: true }).click();
   checks.imageAndDownload = true;
+  await image.evaluate((element) => element.decode());
   const downloadsBefore = imageDownloads;
+  expect(downloadsBefore).toBeGreaterThan(0);
   await page.reload();
-  await expect(page.locator('.im-message img[alt="演示图片.png"]')).toBeVisible();
-  expect(imageDownloads).toBeGreaterThan(downloadsBefore);
+  await expect(image).toBeVisible();
+  await image.evaluate((element) => element.decode());
+  expect(imageDownloads).toBe(downloadsBefore);
   checks.encryptedImageReload = true;
   const [popup] = await Promise.all([
     page.waitForEvent('popup'),
@@ -373,7 +382,7 @@ try {
   await page.getByRole('button', { name: '拒绝', exact: true }).click();
   await expect(page.locator(`[data-message-id="${declined.id}"]`)).toContainText('已拒绝');
   checks.approvals = true;
-  await page.getByRole('button', { name: '发起交互请求', exact: true }).click();
+  await openChatMore(page, '发起交互请求');
   await page.getByLabel('请求标题').fill('补充信息');
   await page.getByLabel('问题说明').fill('请确认样本编号');
   await page.getByRole('button', { name: '发送请求', exact: true }).click();
@@ -385,13 +394,14 @@ try {
   checks.createAndWithdrawRequest = true;
   await page.getByLabel('聊天消息').fill('AB');
   await page.getByLabel('聊天消息').evaluate((el) => el.setSelectionRange(1, 1));
-  await page.getByRole('button', { name: '表情与 Emoji', exact: true }).click();
+  const expressions = page.getByRole('button', { name: '表情与表情包', exact: true });
+  await expressions.click();
   await expect(page.getByRole('region', { name: '表情与 Emoji' })).toBeVisible();
   expect(await page.locator('dialog[open]').count()).toBe(0);
   await page.getByLabel('聊天消息').click();
   await expect(page.getByRole('region', { name: '表情与 Emoji' })).toHaveCount(0);
   await page.getByLabel('聊天消息').evaluate((el) => el.setSelectionRange(1, 1));
-  await page.getByRole('button', { name: '表情与 Emoji', exact: true }).click();
+  await expressions.click();
   await page.getByLabel('搜索 Emoji').fill('微笑');
   checks.nonModalEmojiPanel = true;
   await page.getByRole('button', { name: '微笑 😊', exact: true }).click();
@@ -400,7 +410,7 @@ try {
   await expect(friendPage.getByRole('log').getByText('A😊B', { exact: true })).toBeVisible();
   checks.emoji = true;
   await page.getByRole('button', { name: '收藏表情 演示图片.png' }).click();
-  await page.getByRole('button', { name: '表情与 Emoji', exact: true }).click();
+  await expressions.click();
   await page.getByRole('tab', { name: '收藏', exact: true }).click();
   await expect(page.getByRole('button', { name: '发送表情 演示图片.png' })).toBeVisible();
   await page.getByLabel('导入表情包').setInputFiles({
@@ -423,7 +433,8 @@ try {
       return stream;
     };
   });
-  await page.getByRole('button', { name: '语音消息', exact: true }).click();
+  const voice = page.getByRole('button', { name: '语音消息', exact: true });
+  await voice.click();
   await page.getByRole('button', { name: '也可以点击录音', exact: true }).click();
   await expect(page.locator('.im-voice-time')).toHaveText('0:02 / 2:00');
   await page.getByRole('button', { name: '停止录音', exact: true }).click();
@@ -440,7 +451,7 @@ try {
   await audio.evaluate((el) => el.play());
   await expect.poll(() => audio.evaluate((el) => el.currentTime)).toBeGreaterThan(0);
   checks.voiceRecordPreviewSendPlayback = true;
-  await page.getByRole('button', { name: '语音消息', exact: true }).click();
+  await voice.click();
   await page.getByRole('button', { name: '也可以点击录音', exact: true }).click();
   await expect(page.getByRole('button', { name: '停止录音' })).toBeVisible();
   await page
@@ -453,7 +464,7 @@ try {
       throw new DOMException('Denied for QA', 'NotAllowedError');
     };
   });
-  await page.getByRole('button', { name: '语音消息', exact: true }).click();
+  await voice.click();
   await page.getByRole('button', { name: '也可以点击录音', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('麦克风权限未开启');
   await page
@@ -464,7 +475,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await noOverflow();
   await page.screenshot({ path: out + '/mobile-interactions.png' });
-  await page.getByRole('button', { name: '表情与 Emoji', exact: true }).click();
+  await expressions.click();
   await noOverflow();
   await page.screenshot({ path: out + '/mobile-emoji.png' });
   await page.getByRole('tab', { name: '收藏', exact: true }).click();
@@ -476,7 +487,7 @@ try {
     .click();
   await page.setViewportSize({ width: 320, height: 740 });
   await noOverflow();
-  await expect(page.getByRole('button', { name: '语音消息', exact: true })).toBeVisible();
+  await expect(expressions).toBeVisible();
   await page.screenshot({ path: out + '/mobile-tools-320.png' });
   await page.setViewportSize({ width: 1487, height: 1058 });
   checks.mobileTools = true;

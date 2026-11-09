@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { callIceConfig } from '../server/messaging/calls.js';
 import { WorkerMessagingHttp } from './http.js';
 import { ChatError, MessagingStore } from '../server/messaging/store-core.js';
 import { registerMessaging } from '../server/messaging/service-core.js';
@@ -29,6 +30,12 @@ export class MessagingHub extends DurableObject<Env> {
       store: this.store,
       origin: originFor(env),
       registrationCode: env.POCKET_IM_REGISTRATION_CODE,
+      humanContacts: env.POCKET_IM_HUMAN_CONTACTS === 'true',
+      callIce: callIceConfig({
+        POCKET_IM_CALL_STUN_URLS: env.POCKET_IM_CALL_STUN_URLS,
+        POCKET_IM_CALL_TURN_URLS: env.POCKET_IM_CALL_TURN_URLS,
+        POCKET_IM_CALL_TURN_SECRET: env.POCKET_IM_CALL_TURN_SECRET,
+      }),
       storage: true,
       externalUploads: true,
       maintenance: false,
@@ -54,6 +61,7 @@ export class MessagingHub extends DurableObject<Env> {
   private maintain() {
     this.store.expireStreams();
     this.store.expireInteractions();
+    this.store.calls?.expire();
   }
   private async schedule() {
     const row = this.store.db
@@ -68,8 +76,11 @@ export class MessagingHub extends DurableObject<Env> {
       UNION ALL SELECT min(expires_at) FROM im_message_features WHERE status='pending')`,
       )
       .get(Date.now() + 60000);
-    if (row?.deadline !== null && row?.deadline !== undefined)
-      await this.ctx.storage.setAlarm(Math.max(Date.now() + 1000, Number(row.deadline)));
+    const deadlines = [row?.deadline, this.store.calls?.nextDeadline()]
+      .filter((v) => v !== null && v !== undefined)
+      .map(Number);
+    if (deadlines.length)
+      await this.ctx.storage.setAlarm(Math.max(Date.now() + 1000, Math.min(...deadlines)));
     else await this.ctx.storage.deleteAlarm();
   }
   async fetch(request: Request) {

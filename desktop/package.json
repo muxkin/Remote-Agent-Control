@@ -1,0 +1,21 @@
+{
+  "name": "agent-space-desktop",
+  "version": "0.4.2",
+  "private": true,
+  "description": "Agent 空间电脑适配器",
+  "desktopName": "org.agent-space.adapter.desktop",
+  "author": "Agent Space contributors",
+  "license": "MIT",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --config builder.cjs --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0"
+  }
+}

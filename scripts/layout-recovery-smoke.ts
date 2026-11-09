@@ -1,8 +1,15 @@
 /** Bounded app layout and foreground recovery, with isolated native state. */
 import { chromium, expect } from '@playwright/test';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { config, host, store, native, close } from './v2-fixture.js';
+import { config, host, store, native, registry, close } from './v2-fixture.js';
 import { RpcError } from '../src/shared/rpc.js';
+const backend = registry.get();
+const status = backend.status.bind(backend);
+backend.status = () => {
+  const value = status();
+  return { ...value, capabilities: { ...value.capabilities, newThread: true } };
+};
+backend.projects = async () => [];
 const browser = await chromium.launch({ channel: 'chrome' });
 const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 const checks: Record<string, boolean> = {},
@@ -96,7 +103,7 @@ try {
   await expect(
     page.locator('.composer .connection-note').filter({ hasText: '桌面会话尚未就绪' }),
   ).toBeVisible();
-  await expect(page.getByRole('button', { name: '恢复桌面会话' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '继续此会话', exact: true })).toBeVisible();
   const service = host as any,
     send = service.send;
   let dropped = false;

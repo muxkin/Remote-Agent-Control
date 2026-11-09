@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './backends.js';
 export * from './controls.js';
+export * from './usage.js';
 export * from './backend.js';
 export * from './commands.js';
 export * from './delivery-error.js';

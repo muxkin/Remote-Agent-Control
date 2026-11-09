@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { CallIceConfig } from './calls.js';
 import sharp from 'sharp';
 import cookie from '@fastify/cookie';
 import type { StorageAdapter } from '../object-storage.js';
@@ -13,6 +14,8 @@ export interface MessagingConfig {
   database: string;
   origin: string;
   registrationCode?: string;
+  humanContacts?: boolean;
+  callIce?: CallIceConfig;
   storage?: StorageAdapter;
   resourcePolicy?: ResourcePolicyProvider;
   clientAddress: (request: FastifyRequest['raw']) => string;

@@ -11,6 +11,7 @@ import { SelectionError } from '../../../src/server/selection-error.js';
 import { DEFAULT_BACKEND, type BackendInfo, type CapabilityName } from '../../../src/shared/backends.js';
 import type { AgentBackend, BackendHistory } from '../../../src/server/backends/types.js';
 import type { Operation } from '../../../src/shared/types.js';
+import { authorizeFile } from '../../../src/server/media.js';
 
 export class CodexBackend extends EventEmitter implements AgentBackend {
   readonly history: BackendHistory;
@@ -139,8 +140,23 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
             : (kind === 'send' ? '\u001e' : '') + JSON.stringify(value);
     return this.desktop.control(id, kind, input, requestId);
   }
-  inlineMedia(id: string, ref: string) {
-    return this.desktop.inlineMedia(id, ref);
+  async inlineMedia(id: string, ref: string) {
+    return this.desktop.inlineMedia(id, ref) ?? (await this.index.inlineMedia(id, ref));
+  }
+  async attachment(id: string, reference: string) {
+    const thread = this.index.get(id);
+    if (!thread) throw Error('找不到此会话');
+    try {
+      return await authorizeFile(reference, thread.cwd, this.desktop.view(id)?.messages ?? []);
+    } catch (liveError) {
+      try {
+        return await this.index.attachment(id, reference);
+      } catch (historyError) {
+        // History can omit a viewed image that was already authorized in the live transcript.
+        if ((liveError as NodeJS.ErrnoException).code === 'ENOENT') throw liveError;
+        throw historyError;
+      }
+    }
   }
   fullMessage(id: string, messageId: string) {
     return this.desktop.fullMessage(id, messageId);
@@ -156,6 +172,17 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
   }
   models() {
     return modelCatalog(this.config.codexHome);
+  }
+  async usage(options?: { fresh?: boolean }) {
+    const anchor = this.index.list(undefined, 1).threads[0]?.id;
+    return (
+      (anchor ? this.desktop.usage?.(anchor, options?.fresh) : undefined) ?? {
+        available: false,
+        updatedAt: Date.now(),
+        buckets: [],
+        reason: '此适配器尚未提供用量信息',
+      }
+    );
   }
   async skills(id: string) {
     const excluded = this.desktop.disabledPlugins(id);

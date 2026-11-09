@@ -49,6 +49,7 @@ beforeAll(async () => {
       port,
       bindings: {
         POCKET_PUBLIC_ORIGIN: origin,
+        POCKET_IM_HUMAN_CONTACTS: 'true',
         POCKET_RELAY_ENROLLMENT: enrollment,
         POCKET_LAGO_URL: 'https://unreachable-billing.invalid',
         POCKET_LAGO_API_KEY: 'isolated-test',

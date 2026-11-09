@@ -6,7 +6,7 @@ import { messaging, useMessaging } from './context';
 import { Avatar, UserIdentity, Confirm, Dialog, Empty, Notice, errorText, type Navigate } from './ui';
 import { CreateGroup } from './Groups';
 export default function ContactsPage({ navigate }: { navigate: Navigate }) {
-  const { contacts } = useMessaging(),
+  const { contacts, humanContacts } = useMessaging(),
     [q, setQ] = useState(''),
     [filter, setFilter] = useState('all'),
     [selected, setSelected] = useState(''),
@@ -42,8 +42,8 @@ export default function ContactsPage({ navigate }: { navigate: Navigate }) {
           action={
             <button
               className="icon-button directory-add"
-              aria-label="添加联系人"
-              onClick={() => setAdding(true)}
+              aria-label={humanContacts ? '添加联系人' : '接入 Agent'}
+              onClick={() => (humanContacts ? setAdding(true) : navigate({ page: 'integrations' }))}
             >
               <Icon name="plus" />
             </button>
@@ -57,7 +57,7 @@ export default function ContactsPage({ navigate }: { navigate: Navigate }) {
           options={[
             ['all', '全部'],
             ['agent', 'Agent'],
-            ['human', '朋友'],
+            ...(humanContacts ? [['human', '朋友'] as [string, string]] : []),
           ]}
         />
         <div className="directory-scroll">
@@ -76,7 +76,7 @@ export default function ContactsPage({ navigate }: { navigate: Navigate }) {
             ))}
             {!visible.length && (
               <p className="im-list-hint">
-                {contacts.length ? '没有匹配的联系人' : '添加朋友，或邀请 Agent 加入'}
+                {contacts.length ? '没有匹配的联系人' : '邀请 Agent 加入，开始与你的助手对话'}
               </p>
             )}
           </div>
@@ -117,12 +117,12 @@ export default function ContactsPage({ navigate }: { navigate: Navigate }) {
           </>
         ) : (
           <Empty icon="contacts" title="与你的联系人保持联系">
-            选择朋友或 Agent，查看资料并开始聊天。
+            选择 Agent，查看资料并开始聊天。
           </Empty>
         )}
         <Notice text={error} />
       </section>
-      {adding && (
+      {adding && humanContacts && (
         <Dialog title="添加联系人" onClose={() => setAdding(false)}>
           <form
             className="im-form"

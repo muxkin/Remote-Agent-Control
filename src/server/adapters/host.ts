@@ -77,7 +77,7 @@ function publish() {
   }
 }
 function remoteError(error: unknown) {
-  const e = error as Error & { notSent?: boolean; outcome?: 'failed' };
+  const e = error as NodeJS.ErrnoException & { notSent?: boolean; outcome?: 'failed' };
   const data: RemoteError = {
     message: e?.message || 'Adapter request failed',
     kind:
@@ -87,6 +87,7 @@ function remoteError(error: unknown) {
           ? 'selection'
           : 'error',
     ...(typeof e?.notSent === 'boolean' ? { notSent: e.notSent, outcome: e.outcome } : {}),
+    ...(e?.code === 'ENOENT' ? { code: 'ENOENT' as const } : {}),
   };
   return new ResponseError(-32000, data.message, data);
 }
@@ -153,7 +154,7 @@ if (process.argv.includes('--check')) {
       return {
         ...checked(),
         maxUploadBytes: backend.maxUploadBytes,
-        optionalMethods: (['controls', 'exportLog', 'fileReferences', 'attachment'] as const).filter(
+        optionalMethods: (['controls', 'exportLog', 'fileReferences', 'attachment', 'usage'] as const).filter(
           (name) => typeof backend![name] === 'function',
         ),
       };

@@ -1,0 +1,17 @@
+{
+  "wechat": {
+    "recipient": "符华上仙",
+    "qr": "/support/wechat-reward.png",
+    "previewCrop": {
+      "x": 0.248,
+      "y": 0.124,
+      "size": 0.504
+    }
+  },
+  "platform": {
+    "name": "爱发电",
+    "creator": "符华上仙",
+    "url": "https://afdian.com/a/maomaogao",
+    "enabled": true
+  }
+}

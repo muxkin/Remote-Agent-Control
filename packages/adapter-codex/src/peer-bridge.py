@@ -100,6 +100,34 @@ def windows_pipe(path, expected_exe):
     finally: close(handle)
 
 
+def verified_executable(peer_exe, expected_exe, pid):
+    expected = os.path.realpath(expected_exe)
+    if os.path.realpath(peer_exe) == expected:
+        return True
+    # Linux package upgrades unlink the running inode. Accept only the same
+    # root-installed path, with both binaries and every parent still protected.
+    # User-owned/replaced executables do not get this exception.
+    if sys.platform != 'linux' or not peer_exe.endswith(' (deleted)'):
+        return False
+    if os.path.realpath(peer_exe[:-10]) != expected:
+        return False
+    try:
+        for binary in [expected, f'/proc/{pid}/exe']:
+            info = os.stat(binary)
+            if info.st_uid != 0 or info.st_mode & 0o022 or not stat.S_ISREG(info.st_mode):
+                return False
+        directory = os.path.dirname(expected)
+        while True:
+            info = os.stat(directory)
+            if info.st_uid != 0 or info.st_mode & 0o022 or not stat.S_ISDIR(info.st_mode):
+                return False
+            if directory == os.path.dirname(directory):
+                return True
+            directory = os.path.dirname(directory)
+    except OSError:
+        return False
+
+
 def main():
     path, expected_exe = sys.argv[1:3]
     if sys.platform == 'win32':
@@ -139,7 +167,7 @@ def main():
     else:
         pid, peer_uid, _ = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
         peer_exe = os.readlink(f'/proc/{pid}/exe')
-    if peer_uid != uid or os.path.realpath(peer_exe) != os.path.realpath(expected_exe): raise RuntimeError('unexpected-socket-peer')
+    if peer_uid != uid or not verified_executable(peer_exe, expected_exe, pid): raise RuntimeError('unexpected-socket-peer')
     print(json.dumps({'type': 'ready', 'pid': pid, 'uid': uid}), file=sys.stderr, flush=True)
     sock.setblocking(False)
     os.set_blocking(0, False)

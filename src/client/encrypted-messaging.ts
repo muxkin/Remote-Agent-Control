@@ -40,6 +40,12 @@ interface FileSecret {
   size: number;
   context: string;
 }
+/** Only authenticated ciphertext may persist; keys and plaintext stay in the unlocked client. */
+export interface EncryptedFileCache {
+  get(key: string): Promise<Uint8Array<ArrayBuffer> | undefined>;
+  put(key: string, bytes: Uint8Array<ArrayBuffer>): Promise<void>;
+  remove(key: string): Promise<void>;
+}
 export class EncryptedMessagingClient extends HttpMessagingClient {
   readonly account = new AccountClient(
     <T>(path: string, method?: string, body?: unknown, signal?: AbortSignal) =>
@@ -409,6 +415,7 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
   async download(
     path: string,
     signal?: AbortSignal,
+    cache?: EncryptedFileCache,
   ): Promise<{ data: Uint8Array<ArrayBuffer>; name: string; mime: string; size: number }> {
     const url = new URL(path, this.baseURL || location.origin),
       origin = new URL(this.baseURL || location.origin).origin;
@@ -416,21 +423,26 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
     const headers = this.credential ? { Authorization: `Bearer ${this.credential}` } : undefined;
     const meta = await fetch(`${url.origin}${url.pathname}?meta=1&full=1`, {
       credentials: 'same-origin',
+      cache: 'no-store',
       headers,
       signal,
     }).then(async (r) => {
       if (!r.ok) throw Error('附件不可用');
       return r.json();
     });
-    const response = await fetch(meta.url.startsWith('/') ? `${origin}${meta.url}` : meta.url, {
-      credentials: meta.url.startsWith('/') ? 'same-origin' : 'omit',
-      headers: meta.url.startsWith('/') ? headers : undefined,
-      signal,
-    });
-    if (!response.ok) throw Error('附件下载失败');
-    const data = new Uint8Array(await response.arrayBuffer());
+    const fetchBytes = async () => {
+      const response = await fetch(meta.url.startsWith('/') ? `${origin}${meta.url}` : meta.url, {
+        credentials: meta.url.startsWith('/') ? 'same-origin' : 'omit',
+        headers: meta.url.startsWith('/') ? headers : undefined,
+        signal,
+        cache: 'no-store',
+      });
+      if (!response.ok) throw Error('附件下载失败');
+      return new Uint8Array(await response.arrayBuffer());
+    };
     if (!meta.encrypted) {
       if (!url.pathname.includes('/avatar/')) throw Error('附件未经加密');
+      const data = await fetchBytes();
       return { data, name: meta.name, mime: meta.mime, size: data.length };
     }
     const fileLocation = /\/conversations\/([^/]+)\/files\/([^/]+)\//.exec(url.pathname);
@@ -445,8 +457,32 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
           ? meta.context
           : undefined,
     )) as FileSecret & { iv: string };
-    const plain = await unseal(decode64(secret.key), { iv: secret.iv, data: encode64(data) }, secret.context);
-    if (plain.length !== secret.size) throw Error('附件长度校验失败');
+    const key = typeof meta.cacheKey === 'string' ? meta.cacheKey : '';
+    const decode = async (data: Uint8Array<ArrayBuffer>) => {
+      const plain = await unseal(
+        decode64(secret.key),
+        { iv: secret.iv, data: encode64(data) },
+        secret.context,
+      );
+      if (plain.length !== secret.size) throw Error('附件长度校验失败');
+      signal?.throwIfAborted();
+      return plain;
+    };
+    let plain: Uint8Array<ArrayBuffer> | undefined;
+    const cached = key ? await cache?.get(key).catch(() => undefined) : undefined;
+    if (cached) {
+      try {
+        plain = await decode(cached);
+      } catch {
+        await cache?.remove(key).catch(() => {});
+        signal?.throwIfAborted();
+      }
+    }
+    if (!plain) {
+      const data = await fetchBytes();
+      plain = await decode(data);
+      if (key) await cache?.put(key, data).catch(() => {});
+    }
     return { data: plain, name: secret.name, mime: safeMime(secret.mime), size: secret.size };
   }
 }

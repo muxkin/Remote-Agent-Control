@@ -56,7 +56,11 @@ beforeAll(async () => {
       compatibilityFlags: ['nodejs_compat'],
       host: '127.0.0.1',
       port,
-      bindings: { POCKET_PUBLIC_ORIGIN: origin, POCKET_RELAY_ENROLLMENT: enrollment },
+      bindings: {
+        POCKET_PUBLIC_ORIGIN: origin,
+        POCKET_RELAY_ENROLLMENT: enrollment,
+        POCKET_IM_HUMAN_CONTACTS: 'true',
+      },
       durableObjects: {
         RELAY: { className: 'RelayHub', useSQLite: true },
         MESSAGING: { className: 'MessagingHub', useSQLite: true },
@@ -423,3 +427,17 @@ it('keeps exact string UIDs and rolls back multi-table registration failures in 
 });
 
 relayContract(async () => ({ connect, enrollment }));
+
+it('serves only the public desktop release prefix from R2, with resumable downloads', async () => {
+  const bucket = await mf.getR2Bucket('IM_MEDIA');
+  await bucket.put('desktop-releases/linux/x64/AgentSpace-0.4.0-linux-x64.AppImage', '0123456789');
+  await bucket.put('private/hidden.png', 'not public');
+  const response = await fetch(`${origin}/downloads/desktop/linux/x64/AgentSpace-0.4.0-linux-x64.AppImage`, {
+    headers: { Range: 'bytes=3-6' },
+  });
+  expect(response.status).toBe(206);
+  expect(response.headers.get('Content-Range')).toBe('bytes 3-6/10');
+  expect(await response.text()).toBe('3456');
+  expect((await fetch(`${origin}/downloads/desktop/private/hidden.png`)).status).toBe(404);
+  expect((await fetch(`${origin}/downloads/desktop/releases.json`)).status).toBe(404);
+});

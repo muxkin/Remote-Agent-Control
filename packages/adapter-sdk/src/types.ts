@@ -1,3 +1,11 @@
+export interface MemoryCitationEntry {
+  source: string;
+  lineStart: number;
+  lineEnd: number;
+  note: string;
+}
+export type CodexMessageMetadata = { kind: 'memory'; entries: MemoryCitationEntry[] };
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'tool';
@@ -13,6 +21,7 @@ export interface Message {
   attachments?: { name: string; path: string }[];
   skills?: string[];
   plugins?: string[];
+  codex?: CodexMessageMetadata;
 }
 export interface ConversationRequest {
   id: string;

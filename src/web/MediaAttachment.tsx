@@ -213,13 +213,13 @@ export function Media({
               )}
             </button>
           )
-        ) : compact ? (
+        ) : compact || error ? (
           <span className="file-card-link" aria-busy={!error}>
             <AttachmentIdentity path={src} name={name} />
           </span>
         ) : (
           <span className="attachment-media-loading" role="status">
-            {error ? '附件不可用' : '正在加载附件…'}
+            正在加载附件…
           </span>
         )}
         {!compact && url && label && media !== 'audio' && (
@@ -230,9 +230,11 @@ export function Media({
         {error && (
           <div role="alert">
             <small>{error}</small>
-            <button type="button" className="secondary" onClick={() => renew()}>
-              重新加载附件
-            </button>
+            {!error.startsWith('原附件文件已') && (
+              <button type="button" className="secondary" onClick={() => renew()}>
+                重新加载附件
+              </button>
+            )}
           </div>
         )}
         {preview && url && (

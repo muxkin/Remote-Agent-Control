@@ -1,3 +1,5 @@
+import { attachmentName } from '../shared/attachments.js';
+import { AttachmentCache } from './attachment-cache.js';
 import { controlAction } from '../shared/controls.js';
 import { join } from 'node:path';
 import { DEFAULT_BACKEND } from '../shared/backends.js';
@@ -37,6 +39,7 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
       ? config
       : { ...config, stateDir: join(config.stateDir, 'backends', backendId) };
   const app = new CoreRouter();
+  const attachmentCache = new AttachmentCache(join(scopedConfig.stateDir, 'attachment-cache-v1'));
   const operations = new Operations(desktop, store, backendId);
   const submit = operations.submit.bind(operations);
   operations.submit = (...args) => {
@@ -91,24 +94,46 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
     try {
       if (path.startsWith('pocket-inline:')) {
         const source = await desktop.inlineMedia(id, path);
-        if (!source) throw Error();
+        if (!source) {
+          const cached = await attachmentCache.lookup(id, path);
+          if (cached) return files.describe(cached, req.device.id, id);
+          throw Error('内嵌附件暂不可用');
+        }
         const link = await media.inline(source, req.device.id);
         const grant = await media.grant(link.url.split('/').at(-1)!, req.device.id);
         if (!grant) throw Error();
+        await attachmentCache.remember(id, path, grant.file).catch(() => {});
         return files.describe(grant.file, req.device.id, id, grant.mimeType);
       }
-      const file =
-        (await uploads.reference(path, req.device.id, id)) ??
-        (desktop.attachment
-          ? await desktop.attachment(id, path)
-          : await authorizeFile(path, thread.cwd, [
-              ...(desktop.view(id)?.messages ?? []),
-              ...(await history.page(id)).messages,
-            ]));
+      let file: string,
+        fromCache = false;
+      try {
+        file =
+          (await uploads.reference(path, req.device.id, id)) ??
+          (desktop.attachment
+            ? await desktop.attachment(id, path)
+            : await authorizeFile(path, thread.cwd, [
+                ...(desktop.view(id)?.messages ?? []),
+                ...(await history.page(id)).messages,
+              ]));
+      } catch (error) {
+        const cached = await attachmentCache.lookup(id, path);
+        if (!cached) throw error;
+        file = cached;
+        fromCache = true;
+      }
       const link = await media.resolve(file, req.device.id);
+      if (!fromCache) await attachmentCache.remember(id, path, file).catch(() => {});
       const grant = await media.grant(link.url.split('/').at(-1)!, req.device.id);
-      return files.describe(file, req.device.id, id, grant?.mimeType);
-    } catch {
+      return {
+        ...(await files.describe(file, req.device.id, id, grant?.mimeType)),
+        name: attachmentName(path),
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        return reply
+          .code(404)
+          .send({ error: '原附件文件已被移动或删除，且没有可恢复的缓存；请在电脑端重新发送。' });
       return reply
         .code(403)
         .send({ error: '附件暂不可访问：请确认原文件仍存在，且已在当前会话中发送；也可以重新加载' });
@@ -177,6 +202,16 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
     return files.describe(await desktop.exportLog(id), req.device.id, id, 'application/zip');
   });
   app.get('/api/models', async () => desktop.models());
+  app.get(
+    '/api/usage',
+    async () =>
+      desktop.usage?.() ?? {
+        available: false,
+        updatedAt: Date.now(),
+        buckets: [],
+        reason: '此实例尚未提供用量信息',
+      },
+  );
   app.get('/api/threads/:id/skills', async (req) => ({
     skills: await desktop.skills(params.parse(req.params).id),
   }));

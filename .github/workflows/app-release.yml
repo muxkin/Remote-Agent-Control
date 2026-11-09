@@ -1,0 +1,44 @@
+name: Publish application release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Retrieve the verified build and release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$version"
+          awk -v heading="## $version " '
+            /^## / {
+              if (found) exit
+              found = index($0, heading) == 1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md"
+          commit=$(git rev-parse HEAD)
+          run_id=$(gh api "repos/$GH_REPO/actions/workflows/compatibility.yml/runs?head_sha=$commit&status=success&per_page=30" --jq '.workflow_runs[0].id // empty')
+          test -n "$run_id" || { echo 'Compatibility contracts must pass for this commit before publishing'; exit 1; }
+          gh run download "$run_id" --name verified-build --dir verified
+          cd verified/dist/adapters
+          sha256sum --check SHA256SUMS
+      - name: Publish the release and verified adapter packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" verified/dist/adapters/*.tgz verified/dist/adapters/SHA256SUMS \
+            --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -51,6 +51,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
   readonly history: BackendHistory;
   maxUploadBytes?: number;
   controls?: AgentBackend['controls'];
+  usage?: AgentBackend['usage'];
   exportLog?: AgentBackend['exportLog'];
   fileReferences?: AgentBackend['fileReferences'];
   attachment?: AgentBackend['attachment'];
@@ -220,7 +221,7 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
     try {
       const raw = await connection.sendRequest(initialize, { generation, sdk: 1, context: this.context });
       if (!current() || raw.generation !== generation) throw Error('插件连接已更换');
-      for (const name of ['controls', 'exportLog', 'fileReferences', 'attachment'] as const)
+      for (const name of ['controls', 'exportLog', 'fileReferences', 'attachment', 'usage'] as const)
         (this as any)[name] = raw.optionalMethods.includes(name)
           ? (...args: any[]) => this.call(name, args as any)
           : undefined;
@@ -290,7 +291,8 @@ export class AdapterProxy extends EventEmitter implements AgentBackend {
         const e = error.data as RemoteError | undefined;
         if (e?.kind === 'delivery') throw new DeliveryError(e.message, e.notSent, e.outcome);
         if (e?.kind === 'selection') throw new SelectionError(e.message);
-        if (e?.kind === 'error') throw new Error(error.message);
+        if (e?.kind === 'error')
+          throw Object.assign(new Error(error.message), e.code === 'ENOENT' ? { code: 'ENOENT' } : {});
       }
       throw new DeliveryError(this.state.reason ?? '插件通信中断，结果待确认', !write);
     } finally {

@@ -15,11 +15,9 @@ try {
   await page.goto(`${config.origin}/#pair=${pair.code}&host=${host.identity.peerId}`);
   await page.getByRole('button', { name: '连接电脑', exact: true }).click();
   await page.getByRole('button', { name: '← 工作台', exact: true }).click();
-  await page.locator('.backend-card').filter({ hasText: 'dsh-one' }).click();
-  await page
-    .getByRole('button', { name: /same ID|dsh-one/ })
-    .last()
-    .click();
+  await page.getByRole('button', { name: '打开 dsh-one', exact: true }).click();
+  await page.getByRole('tab', { name: '最近', exact: true }).click();
+  await page.getByRole('button', { name: /dsh-one/ }).click();
   const permission = page.getByRole('button', { name: '会话权限', exact: true });
   await expect(permission).toBeVisible();
   await permission.click();

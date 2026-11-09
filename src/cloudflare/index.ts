@@ -1,3 +1,4 @@
+import { desktopRelease } from '../shared/desktop-releases.js';
 import type { Env } from './env.js';
 import { originFor, securityHeaders } from './security.js';
 export { RelayHub } from './relay.js';
@@ -11,6 +12,15 @@ export default {
     if (url.pathname === '/connect') {
       // No client-supplied routing header can select a different hub.
       return env.RELAY.get(env.RELAY.idFromName('relay-v2')).fetch(request);
+    } else if (url.pathname.startsWith('/downloads/desktop/')) {
+      const bucket = env.DESKTOP_RELEASES ?? env.IM_MEDIA;
+      response = await desktopRelease(request, {
+        head: async (key) => {
+          const object = await bucket.head(key);
+          return object ? { size: object.size, etag: object.httpEtag } : null;
+        },
+        read: async (key, range) => (await bucket.get(key, range ? { range } : undefined))?.body ?? null,
+      });
     } else if (url.pathname.startsWith('/api/im/')) {
       response = await env.MESSAGING.get(env.MESSAGING.idFromName('accounts-v1')).fetch(request);
     } else if (url.pathname === '/health') {

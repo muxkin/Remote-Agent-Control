@@ -6,6 +6,8 @@ import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
 import { PageHeader } from './PageHeader';
 import type { AppRoute } from './routes';
+const DownloadsPage = lazy(() => import('./DownloadsPage'));
+const DonationPage = lazy(() => import('./DonationPage'));
 const AppearanceSettings = lazy(() => import('../theme/AppearanceSettings'));
 
 function Row({
@@ -93,6 +95,8 @@ export default function MePages({
     integrations: 'Agent 接入',
     profile: '个人资料',
     about: '关于',
+    donation: '支持项目',
+    downloads: '电脑适配器',
   };
   return (
     <main className="module-page me-page">
@@ -103,7 +107,7 @@ export default function MePages({
             <Avatar user={user ?? { displayName: '我', kind: 'human' }} large />
             <span>
               <strong>{name}</strong>
-              <small>{user ? `UID ${user.id}` : '与 Agent 和朋友聊天'}</small>
+              <small>{user ? `UID ${user.id}` : '与你的 Agent 聊天'}</small>
             </span>
             <span className="profile-link">
               {user ? '个人资料' : '登录'}
@@ -112,10 +116,24 @@ export default function MePages({
           </button>
           <section className="settings-group">
             <Row icon="puzzle" title="Agent 接入" onClick={() => navigate({ page: 'integrations' })} />
+            <Row
+              icon="download"
+              title="电脑适配器"
+              detail="Windows、macOS、Linux"
+              onClick={() => navigate({ page: 'downloads' })}
+            />
             <Row icon="monitor" title="我的设备" onClick={() => navigate({ page: 'devices' })} />
           </section>
           <section className="settings-group">
             <Row icon="sliders" title="设置" onClick={() => navigate({ page: 'settings' })} />
+          </section>
+          <section className="settings-group">
+            <Row
+              icon="heart"
+              title="支持项目"
+              detail="微信赞赏 · 爱发电"
+              onClick={() => navigate({ page: 'donation' })}
+            />
           </section>
         </>
       )}
@@ -144,6 +162,16 @@ export default function MePages({
             <Row icon="info" title="关于" onClick={() => navigate({ page: 'about' })} />
           </section>
         </>
+      )}
+      {route.page === 'downloads' && (
+        <Suspense fallback={<div className="page-loading">正在读取安装包…</div>}>
+          <DownloadsPage />
+        </Suspense>
+      )}
+      {route.page === 'donation' && (
+        <Suspense fallback={<div className="page-loading">正在打开支持项目页面…</div>}>
+          <DonationPage />
+        </Suspense>
       )}
       {route.page === 'appearance' && (
         <Suspense fallback={<div className="page-loading">正在打开外观设置…</div>}>
@@ -232,7 +260,7 @@ export default function MePages({
           />
           <h2>Agent 空间</h2>
           <p>即时聊天与 Agent 工作台</p>
-          <p>注册账户后，可以与 Agent 和朋友聊天。连接电脑后，可继续已有会话、发送任务、处理审批。</p>
+          <p>注册账户后，可以与你的 Agent 聊天。连接电脑后，可继续已有会话、发送任务、处理审批。</p>
           <small>
             网页版本{' '}
             {typeof __POCKET_WEB_BUILD_ID__ === 'string' ? __POCKET_WEB_BUILD_ID__.slice(0, 8) : '开发版'}

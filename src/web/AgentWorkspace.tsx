@@ -1,8 +1,10 @@
+import { UsagePanel } from './UsagePanel';
 import { uploadItems, type UploadItem } from './UploadProgress';
 import { ConversationHeader } from './shell/ConversationHeader';
 import { ConversationControls, type ControlSection } from './ConversationControls';
 import type { ControlAction } from '../shared/controls';
 import { DEFAULT_BACKEND, type BackendInfo } from '../shared/backends';
+import { codexDisplayMessage } from '../shared/codex-transcript';
 import { uploadFile } from './file-client';
 import { deviceSession } from './device-session';
 import { RpcError as ApiError } from '../shared/rpc';
@@ -592,7 +594,11 @@ export default function AgentWorkspace({
     currentOperations[0];
   const canCompose = stream && !!view && (view.canSend || (view.canInterrupt && view.pendingRequests === 0));
   const currentIds = new Set(view?.messages.map((x) => x.id));
-  const messages = view ? [...older.filter((x) => !currentIds.has(x.id)), ...view.messages] : [];
+  const codex = backend?.product === 'codex' || (!backend && backendId === DEFAULT_BACKEND);
+  const combined = view ? [...older.filter((x) => !currentIds.has(x.id)), ...view.messages] : [];
+  const messages = codex
+    ? combined.flatMap((message) => codexDisplayMessage(message, message.turnId === view?.activeTurnId) ?? [])
+    : combined;
   useEffect(() => {
     onBusy(busy || uploading || pending);
   }, [busy, uploading, pending, onBusy]);
@@ -764,6 +770,7 @@ export default function AgentWorkspace({
             ) : undefined
           }
         >
+          <UsagePanel backendId={backendId} name={agentName} active={active} online={stream} />
           {selected && (
             <button
               className="icon-button more-tools"
@@ -821,6 +828,7 @@ export default function AgentWorkspace({
                   threadId={selected.id}
                   activeTurnId={view?.activeTurnId}
                   requests={view?.requests}
+                  codex={codex}
                 />
                 {view && messages.length === 0 && <p className="muted center">此会话暂时没有可显示的消息</p>}
                 {!!view?.requests?.length && (
@@ -857,15 +865,17 @@ export default function AgentWorkspace({
                 <span className={`dot ${stream && view?.synchronized ? 'online' : ''}`} />
                 {!stream ? '连接中断，正在恢复；控制暂不可用' : (view?.reason ?? '与原实例共享同一个会话')}
               </div>
-              {view && (!view.owner || view.runtimeStatus === 'notLoaded') && status?.writesEnabled && (
-                <button
-                  className="secondary"
-                  disabled={busy || pending || !stream}
-                  onClick={() => void act('open')}
-                >
-                  {view.owner ? '恢复桌面会话' : '在电脑打开此会话'}
-                </button>
-              )}
+              {view &&
+                (!view.owner || view.runtimeStatus === 'notLoaded') &&
+                status?.capabilities.openThread && (
+                  <button
+                    className="secondary"
+                    disabled={busy || pending || !stream}
+                    onClick={() => void act('open')}
+                  >
+                    {busy || pending ? '正在连接会话…' : '继续此会话'}
+                  </button>
+                )}
               {(error || threadError) && (
                 <p className="error" role="alert">
                   {error || threadError}

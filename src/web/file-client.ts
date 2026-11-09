@@ -19,7 +19,21 @@ const inflight = new Map<string, Promise<Uint8Array>>();
 const providers = new Map<string, { threadId: string; manifest: FileManifest }>();
 const urls = new Map<string, string>();
 const waited = new Set<string>();
+let generation = 0;
+function fileGuard(backendId = session.backendId) {
+  const ticket = generation,
+    scope = session.cache.scope,
+    key = session.contentKey('', backendId);
+  return () => {
+    if (ticket !== generation || scope !== session.cache.scope || key !== session.contentKey('', backendId))
+      throw new DOMException('Attachment session changed', 'AbortError');
+  };
+}
 export function clearFileProviders() {
+  generation++;
+  owners.clear();
+  inflight.clear();
+  waited.clear();
   for (const url of urls.values()) if (url.startsWith('blob:')) URL.revokeObjectURL(url);
   urls.clear();
   providers.clear();
@@ -138,8 +152,10 @@ export async function uploadFile(threadId: string, file: File, progress: (value:
   };
 }
 async function downloadBlock(threadId: string, manifest: FileManifest, index: number): Promise<Uint8Array> {
+  const check = fileGuard(owners.get(manifest.id));
   const key = session.contentKey(`block:${manifest.sha256}:${index}`, owners.get(manifest.id));
   const cached = await session.cache.get<Uint8Array>(key);
+  check();
   if (cached && hashBytes(cached) === manifest.hashes[index]) return cached;
   const old = inflight.get(key);
   if (old) return old;
@@ -183,17 +199,20 @@ async function downloadBlock(threadId: string, manifest: FileManifest, index: nu
         session.metrics.fallback = '对象存储读取失败，恢复加密中继';
       }
     }
+    check();
     data ??= (await fileCall('read', threadId, manifest.id, { index }, undefined, true)).bytes;
+    check();
     if (!data || data.length !== blockLength(manifest, index) || hashBytes(data) !== manifest.hashes[index])
       throw Error('附件校验失败');
     await session.cache.block(key, data);
+    check();
     return data;
   })();
   inflight.set(key, pending);
   try {
     return await pending;
   } finally {
-    inflight.delete(key);
+    if (inflight.get(key) === pending) inflight.delete(key);
   }
 }
 async function readRange(threadId: string, file: FileManifest, start: number, end: number) {
@@ -237,6 +256,7 @@ if ('serviceWorker' in navigator)
       .catch(() => port.postMessage({ error: '附件读取中断，请恢复电脑连接后重试' }));
   });
 export async function mediaContent(threadId: string, path: string, backendId = session.backendId) {
+  const check = fileGuard(backendId);
   const cacheKey = session.contentKey(
     `file:${threadId}:${hashBytes(new TextEncoder().encode(path))}`,
     backendId,
@@ -251,17 +271,23 @@ export async function mediaContent(threadId: string, path: string, backendId = s
       },
       backendId,
     );
+    check();
     session.cache.put(cacheKey, manifest);
   }
+  check();
   return manifestContent(threadId, manifest, backendId);
 }
 export async function exportSessionLog(threadId: string) {
+  const backendId = session.backendId,
+    check = fileGuard(backendId);
   const manifest = await session.api<FileManifest>(`/threads/${encodeURIComponent(threadId)}/export`, {
     method: 'POST',
   });
-  return manifestContent(threadId, manifest, session.backendId);
+  check();
+  return manifestContent(threadId, manifest, backendId);
 }
 async function manifestContent(threadId: string, manifest: FileManifest, backendId: string) {
+  const check = fileGuard(backendId);
   owners.set(manifest.id, backendId);
   const metadata = { name: manifest.name, mime: manifest.mime, size: manifest.size, expiresAt: 0 };
   const key = session.contentKey(`url:${manifest.sha256}:${manifest.mime}`, backendId),
@@ -278,6 +304,7 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
         const timer = setTimeout(done, 3000);
         navigator.serviceWorker.addEventListener('controllerchange', done, { once: true });
       });
+    check();
     if (!navigator.serviceWorker?.controller) throw Error('流式附件尚未就绪，请刷新页面后重试');
   }
   if (
@@ -300,6 +327,7 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
     parts.push(bytes as Uint8Array<ArrayBuffer>);
   }
   if (bytesToHex(hash.digest()) !== manifest.sha256) throw Error('附件整体校验失败');
+  check();
   const url = URL.createObjectURL(new Blob(parts, { type: manifest.mime }));
   urls.set(key, url);
   if (urls.size > 32) {

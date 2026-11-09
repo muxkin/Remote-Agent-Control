@@ -1,0 +1,59 @@
+.memory-citations {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.memory-citations > summary {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  list-style: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+.memory-citations > summary::-webkit-details-marker {
+  display: none;
+}
+.memory-citations > summary > svg:last-child {
+  margin-inline-start: auto;
+  flex: none;
+  color: var(--muted);
+  transform: rotate(90deg);
+}
+.memory-citations[open] > summary > svg:last-child {
+  transform: rotate(-90deg);
+}
+.memory-citations > summary:hover {
+  background: var(--surface-hover);
+}
+.memory-citations {
+  margin-top: 12px;
+}
+.memory-citations > summary {
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+.memory-citations > summary > svg:first-child {
+  color: var(--accent);
+  flex: none;
+}
+.memory-citations small {
+  color: var(--muted);
+  font-weight: 400;
+}
+.memory-citations ul {
+  margin: 10px 0 2px 13px;
+  padding: 4px 12px;
+  border-inline-start: 2px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+.memory-citations li + li {
+  margin-top: 10px;
+}
+.memory-citations li p {
+  margin: 3px 0 0;
+}

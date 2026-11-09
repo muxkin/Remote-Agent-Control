@@ -199,7 +199,7 @@ export function ConversationControls({
         onOpen={() => setReload((n) => n + 1)}
         trigger={
           <>
-            <Icon name="grid" size={18} />
+            <Icon name="plus" size={18} />
             <span>工具</span>
           </>
         }
@@ -218,7 +218,7 @@ export function ConversationControls({
                 </button>
               )}
               <h2>{headings[section]}</h2>
-              <button type="button" className="icon-button" aria-label="关闭工具" onClick={close}>
+              <button type="button" className="icon-button" aria-label="关闭工具" onClick={() => close()}>
                 <Icon name="close" size={18} />
               </button>
             </header>

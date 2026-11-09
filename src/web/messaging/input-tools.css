@@ -34,10 +34,30 @@
 .im-message {
   margin-bottom: 22px;
 }
+.im-compose-wrap .im-more-trigger {
+  justify-content: center;
+  width: 40px;
+  padding: 0;
+}
+.im-more-items button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  text-align: left;
+  touch-action: manipulation;
+}
+.im-more-items button:hover,
+.im-more-items button:focus-visible {
+  background: var(--soft);
+}
 @media (max-width: 700px) {
   .im-compose-wrap .composer-box {
     display: grid;
-    grid-template-columns: 32px minmax(0, 1fr) 32px 32px 54px;
+    grid-template-columns: 44px 44px minmax(0, 1fr) 44px 54px;
     gap: 3px;
     align-items: end;
     padding: 8px 3px;
@@ -50,9 +70,9 @@
     grid-column: 1 / -1;
   }
   .im-compose-wrap .composer-box > textarea {
-    grid-column: 2;
+    grid-column: 3;
     grid-row: 2;
-    min-height: 40px;
+    min-height: 44px;
     padding: 10px 8px;
     border-radius: 12px;
     background: var(--surface-subtle);
@@ -66,37 +86,34 @@
     align-self: end;
   }
   .im-compose-wrap .composer-actions .icon-button,
-  .im-compose-wrap .upload-button {
-    width: 32px;
-    height: 40px;
-  }
-  .im-compose-wrap [data-voice-trigger] {
-    grid-column: 1;
-    grid-row: 2;
+  .im-compose-wrap .composer-actions .im-more-trigger {
+    width: 44px;
+    height: 44px;
+    touch-action: manipulation;
   }
   .im-compose-wrap [data-expression-trigger] {
-    grid-column: 3;
+    grid-column: 4;
     grid-row: 2;
   }
-  .im-compose-wrap .upload-button {
-    grid-column: 4;
+  .im-compose-wrap .im-more-trigger {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .im-compose-wrap .im-voice-trigger {
+    grid-column: 1;
     grid-row: 2;
   }
   .im-compose-wrap .composer-send {
     grid-column: 5;
     grid-row: 2;
   }
-  .im-compose-wrap [data-interaction-trigger] {
-    grid-column: 1;
-    grid-row: 3;
-  }
   .im-compose-wrap .im-mention {
-    grid-column: 2;
+    grid-column: 3;
     grid-row: 3;
   }
   .im-compose-wrap .send-button {
     width: 54px;
-    height: 40px;
+    height: 44px;
     border-radius: 20px;
   }
   .im-compose-wrap .send-button:not(.pause-button) > svg {

@@ -1,4 +1,5 @@
 import type { MessagingDatabase } from './database.js';
+import type { CallStore } from './calls.js';
 import { attachmentMime } from './media.js';
 import { interactionInput, interactionResponse } from './interaction.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -49,6 +50,8 @@ function logical(value: any): any {
 
 /** One database authority. All multi-row mutations commit before notifying clients. */
 export class MessagingStore {
+  calls?: CallStore;
+  humanContacts = false;
   resources?: ResourceService;
   readonly db: MessagingDatabase;
   readonly changes = new EventEmitter();
@@ -273,6 +276,7 @@ export class MessagingStore {
   revokeAgent(ownerId: string, id: string, rotate: boolean) {
     if (!this.db.prepare('SELECT 1 FROM im_users WHERE id=? AND owner_id=?').get(id, ownerId))
       throw new ChatError(404, 'Agent 不存在');
+    this.calls?.endFor(id);
     const result = this.transaction(() => {
       this.db.prepare('DELETE FROM im_sessions WHERE user_id=?').run(id);
       return rotate ? this.issueSession(id) : { ok: true };
@@ -305,7 +309,19 @@ export class MessagingStore {
     return this.db
       .prepare('SELECT contact_id,remark,blocked FROM im_contacts WHERE user_id=? ORDER BY rowid DESC')
       .all(id)
+      .filter((r) => this.canConnect([id, String(r.contact_id)]))
       .map((r) => ({ ...this.user(String(r.contact_id)), remark: String(r.remark), blocked: !!r.blocked }));
+  }
+  canConnect(ids: string[]) {
+    if (this.humanContacts) return true;
+    const owners = ids.map((id) => {
+      const row = this.db.prepare('SELECT kind,owner_id FROM im_users WHERE id=?').get(id);
+      return row?.kind === 'human' ? id : row?.owner_id;
+    });
+    return owners.every((id) => !!id && id === owners[0]);
+  }
+  assertParticipants(ids: string[]) {
+    if (!this.canConnect(ids)) throw new ChatError(403, '当前服务仅支持与自己的 Agent 对话');
   }
   editContact(id: string, contactId: string, change: { remark?: string; blocked?: boolean }, remove = false) {
     if (!this.db.prepare('SELECT 1 FROM im_contacts WHERE user_id=? AND contact_id=?').get(id, contactId))
@@ -356,9 +372,13 @@ export class MessagingStore {
   }
   addContact(id: string, identifier: string) {
     const row = this.account(identifier);
+    // Do not turn the disabled add-contact route into an account-existence lookup.
+    if (!this.humanContacts && (!row || !this.canConnect([id, String(row.id)])))
+      throw new ChatError(403, '当前服务仅支持与自己的 Agent 对话');
     if (!row) throw new ChatError(404, '没有找到这个 UID 或用户名，请确认账号属于当前服务');
     const contactId = String(row.id);
     if (id === contactId) throw new ChatError(400, '不能添加自己为联系人');
+    this.assertParticipants([id, contactId]);
     this.transaction(() => this.link(id, contactId));
     this.changes.emit(id);
     return this.user(contactId);
@@ -379,8 +399,9 @@ export class MessagingStore {
   private notify(ids: string[]) {
     for (const id of ids) this.changes.emit(id);
   }
-  private assertWritable(id: string, conversationId: string) {
+  assertWritable(id: string, conversationId: string) {
     this.member(id, conversationId);
+    this.assertParticipants(this.members(conversationId));
     const row = this.db.prepare('SELECT * FROM im_conversations WHERE id=?').get(conversationId)!;
     if (row.closed) throw new ChatError(409, '群聊已解散，只能阅读历史');
     if (
@@ -468,6 +489,9 @@ export class MessagingStore {
       name: row.kind === 'group' ? String(row.name) : (peer?.displayName ?? '联系人'),
       ownerId: row.owner_id ? String(row.owner_id) : null,
       closed: !!row.closed,
+      ...(!this.canConnect(members.map((m) => m.id))
+        ? { readOnlyReason: '账号间聊天已关闭，历史记录仍可查看' }
+        : {}),
       peer: row.kind === 'direct' ? peer : null,
       members,
       readSequence,
@@ -485,6 +509,7 @@ export class MessagingStore {
   }
   direct(id: string, peerId: string) {
     if (id === peerId) throw new ChatError(400, '请选择其他联系人');
+    this.assertParticipants([id, peerId]);
     const [low, high] = [id, peerId].sort();
     const existing = this.db
       .prepare('SELECT id FROM im_conversations WHERE low_id=? AND high_id=?')
@@ -503,6 +528,7 @@ export class MessagingStore {
     return this.conversation(id, cid);
   }
   private requireContact(id: string, peer: string) {
+    this.assertParticipants([id, peer]);
     if (
       !this.db
         .prepare('SELECT 1 FROM im_contacts WHERE user_id=? AND contact_id=? AND blocked=0')
@@ -546,6 +572,7 @@ export class MessagingStore {
     if (change.remove === convo.ownerId && !convo.closed) throw new ChatError(400, '请先转让群主或解散群聊');
     const members = this.members(cid),
       added = [...new Set(change.add ?? [])].filter((uid) => !members.includes(uid));
+    if (added.length || change.ownerId) this.assertParticipants([...members, ...added]);
     if (members.length + added.length > 50) throw new ChatError(400, '群聊最多 50 位成员');
     for (const uid of added) this.requireContact(id, uid);
     if (change.ownerId && !members.includes(change.ownerId)) throw new ChatError(400, '新群主必须已经在群内');

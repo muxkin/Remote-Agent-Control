@@ -106,16 +106,19 @@ export class SyncStore {
       this.memory.get(key) ??
       (await (await this.db).get('content', key).catch(() => undefined));
     if (!entry || generation !== this.generation) return;
-    this.metrics.hitBytes += entry.size;
     if (entry.opfs) {
       try {
         const root = await navigator.storage.getDirectory();
-        return new Uint8Array(await (await (await root.getFileHandle(key)).getFile()).arrayBuffer()) as T;
+        const bytes = new Uint8Array(await (await (await root.getFileHandle(key)).getFile()).arrayBuffer());
+        if (generation !== this.generation) return;
+        this.metrics.hitBytes += bytes.byteLength;
+        return bytes as T;
       } catch {
-        await this.remove(entry);
+        if (generation === this.generation) await this.remove(entry);
         return;
       }
     }
+    this.metrics.hitBytes += entry.size;
     this.remember(entry);
     return entry.value;
   }

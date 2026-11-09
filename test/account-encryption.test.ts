@@ -35,7 +35,7 @@ async function fixture() {
     assetOrigin: null,
     uploadOrigins: [],
     enrollmentSecret: 'encryption-test-enrollment-secret-32',
-    messaging: { database },
+    messaging: { humanContacts: true, database },
   });
   cleanup.push(() => relay.app.close());
   const db = new DatabaseSync(database);
@@ -280,4 +280,47 @@ it('accepts same-origin pairing QR codes and refuses foreign origins or malforme
   expect(parsePairingLink(link, 'https://chat.test').host).toBe(identity.peerId);
   expect(() => parsePairingLink(link, 'https://other.test')).toThrow();
   expect(() => parsePairingLink('javascript:alert(1)', 'https://chat.test')).toThrow();
+});
+
+it('reauthorizes encrypted cache reads, persists only ciphertext and refetches corrupt cache entries', async () => {
+  const { session } = await fixture();
+  const a = session(),
+    b = session();
+  await a.account.register('cachealice', 'Alice', 'cache-password-alice');
+  await b.account.register('cachebob', 'Bob', 'cache-password-bob');
+  const alice = a.client(),
+    bob = b.client();
+  await alice.addContact(b.account.user!.id);
+  const { conversation } = await alice.direct(b.account.user!.id);
+  const content = new TextEncoder().encode('private-cache-content-do-not-store-plaintext');
+  const { file } = await alice.upload(conversation.id, 'cached.txt', new Blob([content]));
+  await alice.send(conversation.id, 'file', 'cache-message', { attachmentIds: [file.id] });
+  const rows = new Map<string, Uint8Array<ArrayBuffer>>();
+  let reads = 0;
+  const original = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: any, init: any) => {
+    if (String(input).includes('/files/') && !String(input).includes('meta=')) reads++;
+    return original(input, init);
+  });
+  const cache = {
+    get: async (key: string) => rows.get(key),
+    put: async (key: string, data: Uint8Array<ArrayBuffer>) => {
+      rows.set(key, data);
+    },
+    remove: async (key: string) => {
+      rows.delete(key);
+    },
+  };
+  expect((await bob.download(file.url, undefined, cache)).data).toEqual(content);
+  expect(reads).toBe(1);
+  expect(new TextDecoder().decode([...rows.values()][0])).not.toContain('private-cache-content');
+  // A fresh client represents a page reload; no decoded or object-URL memory is retained.
+  expect((await b.client().download(file.url, undefined, cache)).data).toEqual(content);
+  expect(reads).toBe(1);
+  rows.set([...rows.keys()][0], new Uint8Array([1, 2, 3]));
+  expect((await b.client().download(file.url, undefined, cache)).data).toEqual(content);
+  expect(reads).toBe(2);
+  await bob.raw('/logout', 'POST');
+  await expect(b.client().download(file.url, undefined, cache)).rejects.toThrow('附件不可用');
+  expect(reads).toBe(2);
 });

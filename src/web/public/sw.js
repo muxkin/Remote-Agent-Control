@@ -1,5 +1,5 @@
 /* Cache local public assets only. CDN assets use their immutable HTTP cache directly. */
-const CACHE = 'pocket-static-v3';
+const CACHE = 'pocket-static-v4';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) =>
   event.waitUntil(
@@ -17,17 +17,28 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(localFile(event, url.pathname.split('/').at(-1)));
     return;
   }
-  if (url.origin === self.location.origin && request.mode === 'navigate') {
+  if (
+    url.origin === self.location.origin &&
+    request.mode === 'navigate' &&
+    !url.pathname.startsWith('/api/')
+  ) {
     event.respondWith(
-      caches.open(CACHE).then(async (cache) => {
-        try {
-          const response = await fetch(request);
-          if (response.ok) await cache.put('/', response.clone());
-          return response;
-        } catch {
-          return (await cache.match('/')) ?? new Response('请联网打开一次页面', { status: 503 });
-        }
-      }),
+      caches
+        .open(CACHE)
+        .catch(() => undefined)
+        .then(async (cache) => {
+          try {
+            const response = await fetch(request);
+            if (response.ok && response.headers.get('Content-Type')?.includes('text/html'))
+              await cache?.put('/', response.clone()).catch(() => {});
+            return response;
+          } catch {
+            return (
+              (await cache?.match('/').catch(() => undefined)) ??
+              new Response('请联网打开一次页面', { status: 503 })
+            );
+          }
+        }),
     );
     return;
   }
@@ -39,14 +50,17 @@ self.addEventListener('fetch', (event) => {
   )
     return;
   event.respondWith(
-    caches.open(CACHE).then(async (cache) => {
-      const hit = await cache.match(request);
-      if (hit) return hit;
-      const response = await fetch(request);
-      if (response.ok && response.type !== 'opaque')
-        await cache.put(request, response.clone()).catch(() => {});
-      return response;
-    }),
+    caches
+      .open(CACHE)
+      .catch(() => undefined)
+      .then(async (cache) => {
+        const hit = await cache?.match(request).catch(() => undefined);
+        if (hit) return hit;
+        const response = await fetch(request);
+        if (response.ok && response.type !== 'opaque')
+          await cache?.put(request, response.clone()).catch(() => {});
+        return response;
+      }),
   );
 });
 

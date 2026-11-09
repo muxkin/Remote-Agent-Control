@@ -1,6 +1,8 @@
 import { remoteFetch, deviceSession } from './device-session';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import type { Message } from '../shared/types';
+import { codexDisplayMessage } from '../shared/codex-transcript';
+import { MemoryCitations } from './CodexTranscriptMetadata';
 import { DiffView } from './DiffView';
 const UserAttachments = lazy(() => import('./UserAttachments'));
 const RichMessage = lazy(() => import('./RichMessage'));
@@ -9,10 +11,12 @@ export function MessageContent({
   message,
   threadId,
   streaming,
+  codex,
 }: {
   message: Message;
   threadId: string;
   streaming: boolean;
+  codex: boolean;
 }) {
   const [full, setFull] = useState<Message | null>(null);
   const [busy, setBusy] = useState(false);
@@ -21,7 +25,8 @@ export function MessageContent({
     setFull(null);
     setError('');
   }, [message.id, message.text, message.details]);
-  const displayed = full ?? message;
+  const displayed = (full && codex ? codexDisplayMessage(full) : full) ?? message;
+  const metadata = displayed.codex ?? message.codex;
   async function expand() {
     const backendId = deviceSession.backendId;
     setBusy(true);
@@ -88,6 +93,7 @@ export function MessageContent({
           <UserAttachments files={displayed.attachments} threadId={threadId} />
         </Suspense>
       )}
+      {metadata?.kind === 'memory' && <MemoryCitations entries={metadata.entries} />}
       {displayed.changes && <DiffView changes={displayed.changes} />}
       {displayed.output && (
         <details className="tool-details">

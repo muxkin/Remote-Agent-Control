@@ -5,10 +5,14 @@ import './dialog.css';
 
 export function Dialog({
   title,
+  titleIcon,
+  className,
   onClose,
   children,
 }: {
   title: string;
+  titleIcon?: ReactNode;
+  className?: string;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -25,7 +29,7 @@ export function Dialog({
   }, []);
   return createPortal(
     <dialog
-      className="im-dialog"
+      className={className ? `im-dialog ${className}` : 'im-dialog'}
       ref={ref}
       aria-labelledby={id}
       onCancel={(e) => {
@@ -41,7 +45,10 @@ export function Dialog({
       }}
     >
       <header>
-        <h2 id={id}>{title}</h2>
+        <h2 id={id}>
+          {titleIcon}
+          {title}
+        </h2>
         <button className="icon-button" aria-label="关闭" onClick={onClose}>
           <Icon name="close" />
         </button>

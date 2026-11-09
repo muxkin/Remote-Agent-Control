@@ -16,6 +16,7 @@ export interface DesktopBackend {
   view(id: string): ThreadView | null;
   waitForView(id: string, timeout?: number): Promise<ThreadView | null>;
   projects(id: string): Promise<DesktopProject[]>;
+  usage?(anchor: string, fresh?: boolean): Promise<import('../../adapter-sdk/src/usage.js').AgentUsage>;
   disabledPlugins(id: string): string[];
   openThread(id: string): Promise<void>;
   control(id: string, kind: Operation['kind'], input: string, requestId: string): Promise<string | null>;

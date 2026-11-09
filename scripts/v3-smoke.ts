@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { config, host, store, native, close } from './v2-fixture.js';
 import { THREAD, TURN } from '../test/helpers.js';
 import { saveRecoveryCode } from './lib/messaging-smoke.js';
+import { mathCopyFixture, verifyMathCopy } from './lib/math-copy-smoke.js';
 const report: any = { fixture: true, checks: {}, errors: [], physicalPhone: false };
 const browser = await chromium.launch({
   channel: 'chrome',
@@ -36,7 +37,7 @@ async function tab(name: string) {
 async function openChat() {
   await page.getByRole('tab', { name: '最近', exact: true }).click();
   await page.getByRole('button', { name: /测试会话/ }).click();
-  await expect(page.locator('.chat-head h2')).toContainText('测试会话');
+  await expect(page.getByRole('heading', { name: /测试会话/ })).toBeVisible();
 }
 try {
   await page.goto(`${config.origin}/?page=messages`);
@@ -57,6 +58,17 @@ try {
   report.checks.quietWorkbench = true;
   await openChat();
   await expect(page.getByLabel('消息', { exact: true })).toBeEnabled({ timeout: 20000 });
+  native.current.turnHistory.history.entitiesByKey.one.items.push({
+    type: 'agentMessage',
+    id: 'math-copy-fixture',
+    text: mathCopyFixture,
+  });
+  native.revision++;
+  native.snapshot();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await verifyMathCopy(page, page.locator('.message.assistant').filter({ hasText: '起始 前文' }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  report.checks.mathCopy = true;
   await page.getByLabel('消息', { exact: true }).fill('draft-kept-between-modules');
   expect(new URL(page.url()).searchParams.get('host')).toBe(host.identity.peerId);
   await expect
@@ -74,7 +86,10 @@ try {
   await expect(page.getByText('还没有聊天记录')).toBeVisible();
   await screenshot('messages');
   await tab('联系人');
-  await page.getByRole('button', { name: '接入 Agent', exact: true }).click();
+  await page
+    .getByRole('button', { name: '接入 Agent', exact: true })
+    .filter({ hasText: '连接你的智能助手' })
+    .click();
   await expect(page.getByText('让你的 Agent 加入聊天')).toBeVisible();
   await page.getByRole('button', { name: '返回', exact: true }).click();
   await tab('我的');

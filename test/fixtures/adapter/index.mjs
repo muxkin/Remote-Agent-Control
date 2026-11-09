@@ -149,7 +149,10 @@ export function createAdapter(context) {
     validateSelection: async () => {},
     validateSettings: async () => {},
     validateCreation: async () => {},
-    attachment: async () => join(context.stateDirectory, 'authorized-file.txt'),
+    attachment: async (_id, reference) => {
+      if (reference === 'missing') throw Object.assign(Error('File is missing'), { code: 'ENOENT' });
+      return join(context.stateDirectory, 'authorized-file.txt');
+    },
     fileReferences: async () => Object.keys(process.env).map((name) => ({ name, path: name })),
   });
 }

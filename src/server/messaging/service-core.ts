@@ -1,4 +1,5 @@
 import type { MessagingHttp, MessagingReply, MessagingRequest } from './http.js';
+import { CallStore, callId, type CallIceConfig } from './calls.js';
 import { scrypt } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { z } from 'zod';
@@ -44,12 +45,16 @@ export interface MessagingConfig {
   take?: (key: string, max: number) => void;
   origin: string;
   registrationCode?: string;
+  humanContacts?: boolean;
+  callIce?: CallIceConfig;
   storage?: boolean;
 }
 
 /** Shared account/message routes; each provider supplies its HTTP and persistence adapters. */
 export async function registerMessaging(app: MessagingHttp, config: MessagingConfig) {
   const { store, objects } = config;
+  store.humanContacts = config.humanContacts === true;
+  const calls = (store.calls = new CallStore(store, config.callIce));
   try {
     assertEncryptedDatabase(store.db);
   } catch (error) {
@@ -147,12 +152,10 @@ export async function registerMessaging(app: MessagingHttp, config: MessagingCon
     const status =
       error instanceof ChatError ? error.statusCode : (error as { statusCode?: number }).statusCode;
     if (status === 429) reply.header('Retry-After', '60');
-    return reply
-      .code(status && status >= 400 && status < 600 ? status : 500)
-      .send({
-        error:
-          error instanceof ChatError || error instanceof ResourceError ? error.message : '请求未完成，请重试',
-      });
+    return reply.code(status && status >= 400 && status < 600 ? status : 500).send({
+      error:
+        error instanceof ChatError || error instanceof ResourceError ? error.message : '请求未完成，请重试',
+    });
   });
   const messageParams = (req: MessagingRequest) =>
     z.object({ id: z.string().uuid(), messageId: z.string().uuid() }).parse(req.params);
@@ -420,6 +423,7 @@ export async function registerMessaging(app: MessagingHttp, config: MessagingCon
       : setInterval(() => {
           store.expireStreams();
           store.expireInteractions();
+          calls.expire();
           if (config.storage) void objects.collectGarbage?.().catch(() => {});
         }, 15000);
   expiry?.unref();
@@ -428,10 +432,67 @@ export async function registerMessaging(app: MessagingHttp, config: MessagingCon
     const user = identity(req);
     return {
       user,
+      humanContacts: store.humanContacts,
       contacts: store.contacts(user.id),
       conversations: store.conversations(user.id),
       cursor: store.cursor(user.id),
     };
+  });
+  app.get('/calls/ice', async (req) => ({ iceServers: calls.iceServers(identity(req).id) }));
+  app.put('/calls/presence', { bodyLimit: 1024 }, async (req) => {
+    const user = identity(req);
+    take(`call-presence:${user.id}`, 10);
+    const body = z
+      .object({ video: z.boolean(), available: z.boolean().default(true) })
+      .strict()
+      .parse(req.body);
+    return calls.ready(user.id, body.video, body.available);
+  });
+  app.get('/conversations/:id/call-capabilities', async (req) =>
+    calls.capabilities(identity(req).id, cid(req)),
+  );
+  app.post('/conversations/:id/calls', { bodyLimit: 1024 }, async (req) => {
+    const user = human(req);
+    take(`call-create:${user.id}`, 10);
+    const body = z
+      .object({ id: callId, mode: z.enum(['audio', 'video']) })
+      .strict()
+      .parse(req.body);
+    return { call: calls.create(user.id, cid(req), body.id, body.mode) };
+  });
+  app.get('/calls', async (req) => ({ calls: calls.list(identity(req).id) }));
+  app.get('/calls/:id', async (req) => {
+    const id = z.object({ id: callId }).parse(req.params).id;
+    const { after } = z.object({ after: integer.default(0) }).parse(req.query);
+    return calls.poll(identity(req).id, id, after);
+  });
+  app.patch('/calls/:id', { bodyLimit: 1024 }, async (req) => {
+    const id = z.object({ id: callId }).parse(req.params).id;
+    const body = z
+      .object({
+        action: z.enum(['accept', 'heartbeat', 'end']),
+        reason: z.enum(['hangup', 'declined', 'failed']).optional(),
+      })
+      .strict()
+      .parse(req.body);
+    return { call: calls.update(identity(req).id, id, body.action, body.reason) };
+  });
+  app.post('/calls/:id/signals', { bodyLimit: 128 * 1024 }, async (req) => {
+    const user = identity(req),
+      id = z.object({ id: callId }).parse(req.params).id;
+    take(`call-signal:${user.id}`, 300);
+    const body = z
+      .object({
+        id: callId,
+        encrypted: z
+          .string()
+          .min(1)
+          .max(120 * 1024),
+      })
+      .strict()
+      .parse(req.body);
+    calls.signal(user.id, id, body.id, body.encrypted);
+    return { ok: true };
   });
   app.get('/status', async () => ({ registrationRequiresCode: !!config.registrationCode }));
   app.get('/me', async (req) => ({ user: token(req) ? identity(req) : null }));

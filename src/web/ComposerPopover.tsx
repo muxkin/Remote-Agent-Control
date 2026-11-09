@@ -6,7 +6,9 @@ export function ComposerPopover({
   title,
   trigger,
   className = '',
+  disabled = false,
   menu = false,
+  maxWidth = menu ? 304 : 344,
   openRequest = 0,
   onOpen,
   children,
@@ -15,71 +17,86 @@ export function ComposerPopover({
   title?: string;
   trigger: ReactNode;
   className?: string;
+  disabled?: boolean;
   menu?: boolean;
+  maxWidth?: number;
   openRequest?: number;
   onOpen?: () => void;
-  children: (close: () => void) => ReactNode;
+  children: (close: (restoreFocus?: boolean) => void) => ReactNode;
 }) {
   const id = useId();
   const panel = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
-  const close = () => {
+  const close = (restoreFocus = true) => {
     panel.current?.hidePopover();
-    button.current?.focus({ preventScroll: true });
+    if (restoreFocus) button.current?.focus({ preventScroll: true });
   };
   useEffect(() => {
     const el = panel.current;
     const anchor = button.current;
     const composer = anchor?.closest('.composer-box');
     if (!el || !anchor || !composer) return;
+    const viewport = window.visualViewport;
     const position = () => {
       const box = composer.getBoundingClientRect();
       const triggerBox = anchor.getBoundingClientRect();
-      const viewport = window.visualViewport;
       const left = viewport?.offsetLeft ?? 0;
       const top = viewport?.offsetTop ?? 0;
-      const width = Math.min(menu ? 304 : 344, (viewport?.width ?? innerWidth) - 24);
+      const width = Math.min(maxWidth, (viewport?.width ?? innerWidth) - 24);
       el.style.width = `${width}px`;
       el.style.left = `${Math.max(left + 12, Math.min(triggerBox.left, left + (viewport?.width ?? innerWidth) - width - 12))}px`;
       el.style.bottom = `${innerHeight - box.top + 8}px`;
       el.style.maxHeight = `${Math.max(80, box.top - top - 20)}px`;
     };
+    let frame = 0;
+    const reposition = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (el.matches(':popover-open')) position();
+      });
+    };
+    const observer = new ResizeObserver(reposition);
+    const stopTracking = () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+      frame = 0;
+      window.removeEventListener('resize', reposition);
+      window.removeEventListener('scroll', reposition, true);
+      viewport?.removeEventListener('resize', reposition);
+      viewport?.removeEventListener('scroll', reposition);
+    };
     const before = (event: Event) => {
       if ((event as ToggleEvent).newState === 'open') {
         position();
         onOpenRef.current?.();
-      }
+      } else stopTracking();
     };
     const toggle = () => {
       const open = el.matches(':popover-open');
       anchor.setAttribute('aria-expanded', String(open));
       if (open) {
+        observer.observe(composer);
+        window.addEventListener('resize', reposition);
+        window.addEventListener('scroll', reposition, true);
+        viewport?.addEventListener('resize', reposition);
+        viewport?.addEventListener('scroll', reposition);
         const target = el.querySelector<HTMLElement>(
           '[aria-checked="true"], button:not(:disabled), input, textarea',
         );
         target?.focus({ preventScroll: true });
       }
     };
-    const observer = new ResizeObserver(position);
-    observer.observe(composer);
     el.addEventListener('beforetoggle', before);
     el.addEventListener('toggle', toggle);
-    window.addEventListener('resize', position);
-    window.addEventListener('scroll', position, true);
-    window.visualViewport?.addEventListener('resize', position);
-    window.visualViewport?.addEventListener('scroll', position);
     return () => {
-      observer.disconnect();
+      stopTracking();
       el.removeEventListener('beforetoggle', before);
       el.removeEventListener('toggle', toggle);
-      window.removeEventListener('resize', position);
-      window.removeEventListener('scroll', position, true);
-      window.visualViewport?.removeEventListener('resize', position);
-      window.visualViewport?.removeEventListener('scroll', position);
     };
-  }, [menu]);
+  }, [maxWidth]);
   useEffect(() => {
     if (openRequest) panel.current?.showPopover();
   }, [openRequest]);
@@ -94,6 +111,7 @@ export function ComposerPopover({
         title={title ?? label}
         aria-haspopup={menu ? 'menu' : 'dialog'}
         aria-expanded="false"
+        disabled={disabled}
       >
         {trigger}
       </button>
@@ -112,7 +130,7 @@ export function ComposerPopover({
           if (!menu || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
           const items = [
             ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-              '[role="menuitemradio"]:not(:disabled)',
+              '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled)',
             ),
           ];
           if (!items.length) return;

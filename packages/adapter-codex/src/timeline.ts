@@ -2,6 +2,11 @@ import { codexPermissionState } from './codex-permissions.js';
 import { userContent } from './user-content.js';
 import { asyncRequests, asyncQuestionRequest, userMessageText } from './async-questions.js';
 import type { Message, ThreadView, ConversationRequest } from '../../../src/shared/types.js';
+import {
+  codexAnswer,
+  codexNativeMemory,
+  isCodexWorkspaceContext,
+} from '../../../src/shared/codex-transcript.js';
 import { itemMedia, mediaReference } from '../../../src/server/content-media.js';
 import { normalizeRequest } from './approvals.js';
 
@@ -73,12 +78,13 @@ export function messagesOf(state: Json, full = false): Message[] {
     const turnId = turn.turnId ?? turn.id;
     const items = orderedEntities(turn.items);
     // The opening input belongs before the assistant, including partial snapshots.
-    if (!items.some((x) => x.type === 'userMessage') && textOf(turn.params?.input)) {
+    const opening = textOf(turn.params?.input);
+    if (opening && !isCodexWorkspaceContext(opening) && !items.some((x) => x.type === 'userMessage')) {
       messages.push({
         id: `${turnId}:input`,
         role: 'user',
-        ...userContent(textOf(turn.params.input)),
-        text: userMessageText(textOf(turn.params.input)),
+        ...userContent(opening),
+        text: userMessageText(opening),
         turnId,
         clientMessageId: turn.params?.clientUserMessageId,
         skills: skillsOf(turn.params?.input),
@@ -103,14 +109,19 @@ export function messagesOf(state: Json, full = false): Message[] {
       let role: Message['role'];
       let text = '';
       let attachments: Message['attachments'];
+      let codex: Message['codex'];
       if (type === 'userMessage' || type === 'steeringUserMessage') {
         role = 'user';
         const raw = textOf(item.content ?? item.input ?? item.text);
-        text = userMessageText(raw);
-        attachments = userContent(raw).attachments?.filter((file) => !media.includes(file.path));
+        if (!isCodexWorkspaceContext(raw)) {
+          text = userMessageText(raw);
+          attachments = userContent(raw).attachments?.filter((file) => !media.includes(file.path));
+        }
       } else if (type === 'agentMessage') {
         role = 'assistant';
-        text = textOf(item.text ?? item.content);
+        const answer = codexAnswer(textOf(item.text ?? item.content), turn.status === 'inProgress');
+        text = answer.text;
+        codex = answer.codex ?? codexNativeMemory(item.memoryCitation ?? item.memory_citation);
         const question = asyncQuestionRequest(item, turnId);
         if (question)
           text += `${text ? '\n\n' : ''}${question.questions!.map((q) => q.question).join('\n\n')}`;
@@ -131,11 +142,12 @@ export function messagesOf(state: Json, full = false): Message[] {
         role = 'tool';
         text = `${type ?? '活动'} · ${item.status ?? '已记录'}`;
       }
-      if (text || attachments?.length)
+      if (text || attachments?.length || codex)
         messages.push({
           id: String(item.id ?? `${turnId}:${index}`),
           role,
           text,
+          codex,
           attachments,
           skills: role === 'user' ? skillsOf(item.content ?? item.input ?? turn.params?.input) : undefined,
           plugins: role === 'user' ? pluginsOf(item.content ?? item.input ?? turn.params?.input) : undefined,

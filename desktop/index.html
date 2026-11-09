@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Agent 空间适配器</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">AGENT SPACE</div>
+      <h1>让电脑与手机保持连接</h1>
+      <p>连接已有的 Codex 和 Agent，随时从手机继续工作。</p>
+      <section>
+        <div class="status"><span></span><strong id="status">正在启动…</strong></div>
+        <label for="origin">服务地址</label
+        ><input id="origin" type="url" placeholder="https://agent.example.com" autocomplete="off" />
+        <p class="hint">填写手机上使用的 Agent 空间网址。</p>
+        <label for="enrollment">接入密钥（首次接入时由服务管理员提供）</label
+        ><input
+          id="enrollment"
+          type="password"
+          autocomplete="new-password"
+          placeholder="已配置时可留空"
+        /><button id="save">保存设置</button><button id="open" class="secondary">打开工作台</button>
+      </section>
+      <section>
+        <h2>连接手机</h2>
+        <p>用自己的手机扫描，一次有效，5 分钟后过期。</p>
+        <button id="pair">生成配对二维码</button><img id="qr" hidden alt="手机配对二维码" />
+        <p id="expiry" class="hint"></p>
+      </section>
+      <section>
+        <h2>后台运行</h2>
+        <label class="switch"
+          ><span>登录电脑时自动启动<small>关闭窗口后仍保持连接，可在托盘退出。</small></span
+          ><input id="autoStart" type="checkbox" /></label
+        ><label class="switch"
+          ><span>自动下载并安装更新<small>从所选更新服务下载，在手机连接空闲时安装。</small></span
+          ><input id="autoUpdate" type="checkbox"
+        /></label>
+        <details>
+          <summary>更新来源</summary>
+          <label for="updateBaseURL">独立更新地址（可选）</label
+          ><input id="updateBaseURL" type="url" placeholder="留空：跟随服务地址" autocomplete="off" />
+          <p class="hint">
+            留空时跟随服务地址迁移；使用独立分发服务时，填写更新根目录，例如
+            https://updates.example.com/downloads/desktop/。支持 Cloudflare、VPS 或其他 HTTPS 服务。
+          </p>
+          <p id="updateFeed" class="hint"></p>
+          <button id="saveUpdates" class="secondary">保存更新设置</button>
+        </details>
+        <p id="update" class="hint"></p>
+        <button id="check" class="secondary">检查更新</button>
+      </section>
+      <p id="notice" role="status"></p>
+      <footer id="version"></footer>
+    </main>
+    <script src="renderer.js"></script>
+  </body>
+</html>

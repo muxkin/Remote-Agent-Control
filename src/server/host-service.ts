@@ -21,6 +21,8 @@ import { RPC_ROUTES, RpcError, type RpcCall } from '../shared/rpc.js';
 import { checkpoint, contentVersion, type SyncCheckpoint } from '../shared/sync.js';
 import { SyncJournal } from './sync-journal.js';
 import type { ThreadView, Operation } from '../shared/types.js';
+import type { UsageSnapshot } from '../shared/usage.js';
+import { UsageFeed } from './usage-feed.js';
 import { DevicePeer } from './device-peer.js';
 import { backendAppearanceDefaults } from '../shared/backend-appearance.js';
 import { appearanceUpdateSchema, normalizeAppearancePatch } from './backends/appearance.js';
@@ -33,6 +35,7 @@ interface Subscription {
   release?: () => void;
   cancelled: boolean;
   timer?: NodeJS.Timeout;
+  activeTurnId?: string | null;
 }
 interface Session {
   id: string;
@@ -40,6 +43,8 @@ interface Session {
   device: { id: string; name: string };
   channels: Map<string, SecureChannel>;
   subscriptions: Map<string, Subscription>;
+  usageBackends: Set<string>;
+  usageVersions: Map<string, number>;
   peer?: DevicePeer;
   expire?: NodeJS.Timeout;
 }
@@ -56,6 +61,11 @@ const idSchema = z.string().uuid();
 
 /** Owns authenticated device sessions independently of individual chats and relay sockets. */
 export class HostService {
+  private stopped = false;
+  relayConnected = false;
+  get idleForUpdate() {
+    return this.sessions.size === 0 && [...this.cores.values()].every((core) => !core.operations.dispatching);
+  }
   readonly core;
   readonly journal = new SyncJournal();
   readonly registry: BackendRegistry;
@@ -67,6 +77,7 @@ export class HostService {
   }
   private cores = new Map<string, ReturnType<typeof createGatewayCore>>();
   private journals = new Map<string, SyncJournal>();
+  private usageFeeds = new Map<string, UsageFeed>();
   private detach: (() => void)[] = [];
   private coreFor(backendId = DEFAULT_BACKEND) {
     this.registry.get(backendId);
@@ -77,13 +88,19 @@ export class HostService {
   private relay?: HostRelay;
   private sweep?: NodeJS.Timeout;
   private readonly onThread = (view: ThreadView, backendId = DEFAULT_BACKEND) => {
+    let finished = false;
     for (const session of this.sessions.values()) {
       const sub = session.subscriptions.get(conversationKey(backendId, view.id));
       if (sub && !sub.cancelled) {
+        if (view.synchronized) {
+          if (sub.activeTurnId && sub.activeTurnId !== view.activeTurnId) finished = true;
+          sub.activeTurnId = view.activeTurnId;
+        }
         clearTimeout(sub.timer);
         sub.timer = setTimeout(() => this.publish(session, view, backendId), 60);
       }
     }
+    if (finished) this.usageFeeds.get(backendId)?.turnFinished();
   };
   private readonly onStatus = () => {
     for (const backend of this.registry.all())
@@ -112,26 +129,42 @@ export class HostService {
       'registry' in deps ? deps.registry : new BackendRegistry().register(resolveBackend(config, deps));
     for (const backend of this.registry.all()) {
       const core = createGatewayCore(config, { store: deps.store, backend });
-      core.router.get('/api/backends', () => ({ backends: this.registry.list().map((info) => {
-        const appearance = this.appearance(info.id).values;
-        return { ...info, name: appearance.name, appearance };
-      }) }));
+      core.router.get('/api/backends', () => ({
+        backends: this.registry.list().map((info) => {
+          const appearance = this.appearance(info.id).values;
+          return { ...info, name: appearance.name, appearance };
+        }),
+      }));
       core.router.get('/api/backends/:id/appearance', (req) => this.appearance(req.params.id));
       core.router.post('/api/backends/:id/appearance', async (req) => {
         this.registry.get(req.params.id);
         const { revision, patch } = appearanceUpdateSchema.parse(req.body);
-        this.deps.store.updateBackendAppearance(req.params.id, await normalizeAppearancePatch(patch), revision);
+        this.deps.store.updateBackendAppearance(
+          req.params.id,
+          await normalizeAppearancePatch(patch),
+          revision,
+        );
         return this.appearance(req.params.id);
       });
       this.cores.set(backend.id, core);
+      const usage = new UsageFeed(backend, (snapshot) => {
+        for (const session of this.sessions.values())
+          if (session.usageBackends.has(backend.id) && this.deps.store.peer(session.peerId))
+            this.sendUsage(session, backend.id, snapshot);
+      });
+      this.usageFeeds.set(backend.id, usage);
       this.journals.set(backend.id, backend.id === DEFAULT_BACKEND ? this.journal : new SyncJournal());
       const thread = (view: ThreadView) => this.onThread(view, backend.id);
+      const usageStatus = () => usage.setConnected(backend.status().connected);
       backend.on('thread', thread);
       backend.on('status', this.onStatus);
+      backend.on('status', usageStatus);
       core.operations.on('operation', this.onOperation);
       this.detach.push(() => {
         backend.off('thread', thread);
         backend.off('status', this.onStatus);
+        backend.off('status', usageStatus);
+        usage.setActive(false);
         core.operations.off('operation', this.onOperation);
         core.close();
       });
@@ -145,6 +178,7 @@ export class HostService {
     return new HostService(config, await hostIdentity(config.stateDir, config.platform), deps);
   }
   start() {
+    this.stopped = false;
     this.relay = new HostRelay(
       this.config.relay?.origin ?? this.config.origin,
       this.identity,
@@ -157,6 +191,9 @@ export class HostService {
           return;
         }
         void this.accept(wire, lane, 'relay', ticket, route.peerId);
+      },
+      (connected) => {
+        this.relayConnected = connected;
       },
     );
     this.relay.start();
@@ -176,8 +213,16 @@ export class HostService {
     expectedSession?: string,
   ) {
     let channel: SecureChannel;
+    if (this.stopped) {
+      void wire.close();
+      return;
+    }
     try {
       channel = await SecureChannel.open(wire, this.identity, false, lane, peerId);
+      if (this.stopped) {
+        channel.close();
+        return;
+      }
     } catch {
       return;
     }
@@ -234,6 +279,8 @@ export class HostService {
             device,
             channels: new Map(),
             subscriptions: new Map(),
+            usageBackends: new Set(),
+            usageVersions: new Map(),
           };
           this.sessions.set(key, session);
           this.metrics.connections++;
@@ -296,6 +343,26 @@ export class HostService {
             conversationKey(value.backendId ?? DEFAULT_BACKEND, conversationId.parse(value.threadId)),
           );
           result = { ok: true };
+        } else if (value.type === 'usage-watch') {
+          if (lane !== 'control') throw new RpcError('用量订阅需要控制连接', 400);
+          const backendId = z.string().max(80).parse(value.backendId ?? DEFAULT_BACKEND);
+          const backend = this.registry.get(backendId);
+          const watching = z.boolean().parse(value.watching);
+          const version = z.number().int().positive().parse(value.version);
+          const feed = this.usageFeeds.get(backendId)!;
+          // Relay and direct control packets may arrive in different orders.
+          if (version > (session.usageVersions.get(backendId) ?? 0)) {
+            if (watching) {
+              if (!session.usageBackends.has(backendId) && session.usageBackends.size >= 4)
+                throw new RpcError('订阅数量过多', 429);
+              feed.setConnected(backend.status().connected);
+              session.usageBackends.add(backendId);
+            } else session.usageBackends.delete(backendId);
+            session.usageVersions.set(backendId, version);
+            this.updateUsageInterest(backendId);
+            if (watching) this.sendUsage(session, backendId, feed.snapshot);
+          }
+          result = { ok: true };
         } else if (value.type === 'offer') {
           if (!this.config.p2p?.enabled) throw new RpcError('直连未启用', 400);
           session.peer?.close();
@@ -342,6 +409,8 @@ export class HostService {
       if (!session) return;
       const key = `${path}:${lane}`;
       if (session.channels.get(key) === channel) session.channels.delete(key);
+      if (!session.channels.has('relay:control') && !session.channels.has('direct:control'))
+        this.clearUsageInterest(session);
       if (!session.channels.size) {
         session.expire = setTimeout(() => this.drop(session!), 120000);
         session.expire.unref();
@@ -355,6 +424,19 @@ export class HostService {
       this.metrics[direct ? 'directBytes' : 'relayBytes'] += Buffer.byteLength(JSON.stringify(message));
       void channel.send(message).catch(() => {});
     }
+  }
+  private sendUsage(session: Session, backendId: string, snapshot: UsageSnapshot) {
+    this.send(session, { type: 'usage', backendId, snapshot });
+  }
+  private updateUsageInterest(backendId: string) {
+    this.usageFeeds.get(backendId)?.setActive(
+      [...this.sessions.values()].some((session) => session.usageBackends.has(backendId)),
+    );
+  }
+  private clearUsageInterest(session: Session) {
+    const backends = [...session.usageBackends];
+    session.usageBackends.clear();
+    for (const backendId of backends) this.updateUsageInterest(backendId);
   }
   private publish(session: Session, view: ThreadView, backendId = DEFAULT_BACKEND) {
     const subscription = session.subscriptions.get(conversationKey(backendId, view.id));
@@ -405,7 +487,7 @@ export class HostService {
           pendingRequests: 0,
           canSend: false,
           canInterrupt: false,
-          reason: '已加载历史记录；在电脑打开此会话后可继续对话',
+          reason: '已加载历史记录，点击“继续此会话”即可连接电脑端',
         },
         backendId,
       );
@@ -455,6 +537,7 @@ export class HostService {
   private drop(session: Session) {
     clearTimeout(session.expire);
     this.sessions.delete(`${session.peerId}:${session.id}`);
+    this.clearUsageInterest(session);
     for (const threadId of session.subscriptions.keys()) this.unwatch(session, threadId);
     session.peer?.close();
     for (const channel of session.channels.values()) channel.close();
@@ -462,6 +545,8 @@ export class HostService {
     clearTimeout(session.expire);
   }
   stop() {
+    if (this.stopped) return;
+    this.stopped = true;
     this.relay?.stop();
     clearInterval(this.sweep);
     for (const session of this.sessions.values()) this.drop(session);

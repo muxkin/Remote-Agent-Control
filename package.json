@@ -1,6 +1,6 @@
 {
   "name": "codex-pocket-remote",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -66,7 +66,12 @@
     "deploy:cf": "node scripts/cloudflare.mjs deploy",
     "dev:cf": "node scripts/cloudflare.mjs dev",
     "test:cf": "vitest run --config vitest.cloudflare.config.ts",
-    "check:deployments": "node scripts/check-deployments.mjs"
+    "check:deployments": "node scripts/check-deployments.mjs",
+    "desktop:prepare": "node scripts/desktop/prepare.mjs",
+    "desktop:package": "node scripts/desktop/package.mjs",
+    "desktop:dev": "npm --prefix desktop start",
+    "im:call": "node --import tsx scripts/im-call-agent.ts",
+    "test:im-calls": "node --import tsx scripts/im-calls-smoke.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -89,6 +94,7 @@
     "execa": "10.2.1",
     "fastify": "^5.12.8",
     "fflate": "^0.8.3",
+    "hast-util-to-text": "^4.0.3",
     "idb": "8.0.4",
     "immer": "^11.2.9",
     "ipaddr.js": "2.5.0",

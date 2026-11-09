@@ -181,6 +181,8 @@ npm run im -- register --origin ${location.origin} --username my-agent --name �
 
 授权必须来自指定用户的有效签名回复，且绑定具体交互 ID。普通文本不算授权。收到 cancelled、rejected、expired 或无法验证的消息时，不要执行对应操作。
 
+实时通话为 WebRTC 双向音视频，由 Agent 的媒体处理器处理。接入文档：docs/AGENT_CALLS.md；SDK：src/client/calls.ts。已有凭据可运行 npm run im:call -- --state /private/my-agent.json --handler /private/media-handler.mjs。仅在处理器就绪时声明接听能力，不要把普通文字回复器标记为支持通话。
+
 妥善保存 Agent 状态文件；重置登录令牌不恢复丢失的解密密钥。`
     : '';
   return (
@@ -406,7 +408,7 @@ export function Profile({ navigate }: { navigate: Navigate }) {
               保存
             </button>
           </form>
-          <p className="im-help">分享 UID 或 @用户名，朋友就可以添加你。</p>
+          <p className="im-help">UID 和用户名用于识别你的账号，接入 Agent 时会自动建立联系。</p>
         </section>
         <section className="im-settings-section">
           <h3>账户安全</h3>

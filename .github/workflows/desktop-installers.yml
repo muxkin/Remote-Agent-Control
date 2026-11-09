@@ -1,0 +1,41 @@
+name: Desktop installer previews
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+      - shell: bash
+        run: |
+          npm ci --ignore-scripts
+          npm --prefix desktop ci
+          uv python install 3.12
+          python_path="$(uv python find --managed-python 3.12)"
+          python_root="$(python -c "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.parent if sys.platform == 'win32' else p.parent.parent)" "$python_path")"
+          echo "POCKET_DESKTOP_PYTHON=$python_root" >> "$GITHUB_ENV"
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npx vitest run test/desktop-runtime.test.ts test/desktop-releases.test.ts
+      - run: npm run desktop:prepare
+      - run: npm run desktop:package -- --preview
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-preview-${{ matrix.os }}
+          path: |
+            dist/desktop/*.exe
+            dist/desktop/*.dmg
+            dist/desktop/*.zip
+            dist/desktop/*.AppImage
+          if-no-files-found: error

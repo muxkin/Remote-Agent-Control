@@ -7,8 +7,9 @@ import { EncryptedMessagingClient } from '../../client/encrypted-messaging';
 import { activateAccount, syncAccountHosts } from '../account-session';
 import type { ChatConversation, ChatContact, ChatMessage, ChatUser } from '../../shared/messaging';
 export const messaging = new EncryptedMessagingClient();
-setEncryptedDownload((path, signal) => messaging.download(path, signal));
+setEncryptedDownload((path, signal, cache) => messaging.download(path, signal, cache));
 interface MessagingState {
+  humanContacts: boolean;
   user: ChatUser | null;
   loading: boolean;
   contacts: ChatContact[];
@@ -24,6 +25,7 @@ interface MessagingState {
 const Context = createContext<MessagingState | null>(null);
 export const useMessaging = () => useContext(Context)!;
 export function MessagingProvider({ children }: { children: ReactNode }) {
+  const [humanContacts, setHumanContacts] = useState(false);
   const [user, setUser] = useState<ChatUser | null>(null),
     [loading, setLoading] = useState(true);
   const [contacts, setContacts] = useState<ChatContact[]>([]),
@@ -83,6 +85,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setMediaAccount(user?.id ?? null);
     clearDrafts();
+    setHumanContacts(false);
     setContacts([]);
     setConversations([]);
     setUpdates([]);
@@ -123,11 +126,13 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
           if (recovering) {
             if (messaging.account.secrets) await syncAccountHosts(messaging.account);
             const state = await messaging.request<{
+              humanContacts?: boolean;
               contacts: ChatContact[];
               conversations: ChatConversation[];
               cursor: number;
             }>('/bootstrap', 'GET', undefined, requestSignal);
             if (signal.aborted) return;
+            setHumanContacts(state.humanContacts === true);
             setContacts(state.contacts);
             setConversations(state.conversations);
             invalidateMediaConversations(new Set(state.conversations.map((c) => c.id)));
@@ -191,6 +196,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     <Context.Provider
       value={{
         user,
+        humanContacts,
         loading,
         contacts,
         conversations,

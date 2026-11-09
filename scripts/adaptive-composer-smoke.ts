@@ -37,6 +37,16 @@ try {
   await page.getByRole('button', { name: '连接电脑', exact: true }).click();
   await page.getByRole('button', { name: /测试会话/ }).click();
   await expect(page.getByLabel('消息', { exact: true })).toBeEnabled({ timeout: 20000 });
+  const [filePicker] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.locator('.composer .upload-button').click(),
+  ]);
+  await filePicker.setFiles([]);
+  const tools = page.getByRole('button', { name: '工具', exact: true });
+  await tools.click();
+  await expect(page.getByRole('dialog', { name: '工具', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(tools).toBeFocused();
   // Same page adapts through wide desktop, compact desktop, mobile and short landscape windows.
   for (const size of [
     { width: 1920, height: 1080 },
@@ -58,12 +68,21 @@ try {
     const chat = await page.locator('.chat').boundingBox();
     const composer = await page.locator('.composer').boundingBox();
     const send = await page.locator('.composer .send-button').boundingBox();
-    const compact = await page.locator('.composer-box').evaluate((el) => el.clientWidth - parseFloat(getComputedStyle(el).paddingLeft) - parseFloat(getComputedStyle(el).paddingRight) <= 520);
+    const compact = await page
+      .locator('.composer-box')
+      .evaluate(
+        (el) =>
+          el.clientWidth -
+            parseFloat(getComputedStyle(el).paddingLeft) -
+            parseFloat(getComputedStyle(el).paddingRight) <=
+          520,
+      );
     for (const selector of ['.permission-trigger > span', '.composer-tool-trigger > span']) {
       if (compact) await expect(page.locator(selector)).toBeHidden();
       else await expect(page.locator(selector)).toBeVisible();
     }
-    for (const name of ['会话权限', '工具']) await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
+    for (const name of ['会话权限', '工具'])
+      await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
     const model = await page.getByRole('button', { name: '模型设置', exact: true }).boundingBox();
     expect(model!.x + model!.width).toBeLessThanOrEqual(send!.x);
     if (size.width > 700) {

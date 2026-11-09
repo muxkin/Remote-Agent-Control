@@ -41,6 +41,7 @@ function setup() {
     }),
   };
   vi.spyOn(app as any, 'connect').mockResolvedValue(client);
+  vi.spyOn(app, 'has').mockImplementation((tool) => ['list_projects', 'create_thread'].includes(tool));
   cleanup.push(() => {
     app.close();
     rmSync(config.desktopRoot, { recursive: true, force: true });

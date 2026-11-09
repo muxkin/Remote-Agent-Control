@@ -8,6 +8,8 @@ export type AppPage =
   | 'devices'
   | 'integrations'
   | 'profile'
+  | 'donation'
+  | 'downloads'
   | 'about'
   | 'pair';
 export interface AppRoute {
@@ -27,6 +29,8 @@ const pages: AppPage[] = [
   'devices',
   'integrations',
   'profile',
+  'donation',
+  'downloads',
   'about',
   'pair',
 ];

@@ -8,6 +8,8 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { SyncStore, type PairedHost } from './sync-store';
 import type { GatewayStatus, ServerEvent, ThreadView } from '../shared/types';
+import type { AgentUsage } from '../../packages/adapter-sdk/src/usage';
+import type { UsageSnapshot } from '../shared/usage';
 
 export class DeviceSession {
   readonly cache = new SyncStore();
@@ -32,6 +34,8 @@ export class DeviceSession {
   private pc?: RTCPeerConnection;
   private candidates: RTCIceCandidateInit[] = [];
   private watchers = new Map<string, Set<(event: ServerEvent) => void>>();
+  private usageWatchers = new Map<string, (snapshot: UsageSnapshot) => void>();
+  private usageVersion = 0;
   private views = new Map<string, CachedThread>();
   private events = new EventTarget();
   private running = false;
@@ -295,6 +299,11 @@ export class DeviceSession {
       }
     });
     link.onEvent((event) => {
+      if (event.type === 'usage') {
+        if (generation === this.generation && this.online && this.link() === link)
+          this.usageWatchers.get(event.backendId)?.(event.snapshot);
+        return;
+      }
       this.processing = this.processing
         .then(() => (generation === this.generation ? this.receive(event) : undefined))
         .catch(() => {
@@ -421,6 +430,71 @@ export class DeviceSession {
   }
   private async resume() {
     for (const id of this.watchers.keys()) await this.watchRemote(id).catch(() => {});
+  }
+  watchUsage(backendId: string, notify: (snapshot: UsageSnapshot) => void) {
+    const generation = this.generation;
+    let selected: DeviceLink | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+    const current = (link: DeviceLink) => !disposed && generation === this.generation && selected === link;
+    const update = (link: DeviceLink, watching: boolean) =>
+      link.request('usage-watch', { backendId, watching, version: ++this.usageVersion }, undefined, 5000);
+    const stopWatching = (link?: DeviceLink) => {
+      if (!link || link.closed) return;
+      void update(link, false).catch(() => {});
+    };
+    const receive = (snapshot: UsageSnapshot) => {
+      if (!disposed && selected && generation === this.generation) notify(snapshot);
+    };
+    const legacy = async (link: DeviceLink) => {
+      try {
+        const value = await link.rpc<AgentUsage>({ ...apiCall('/usage'), backendId });
+        if (current(link)) notify({ state: value.available ? 'current' : 'unavailable', value });
+      } catch {
+        if (current(link)) notify({ state: 'stale' });
+      } finally {
+        if (current(link)) timer = setTimeout(() => void legacy(link), 60_000);
+      }
+    };
+    const subscribe = (link: DeviceLink) => {
+      void update(link, true).catch((error) => {
+        if (!current(link)) return;
+        if (error instanceof RpcError && [400, 404].includes(error.status)) void legacy(link);
+        else {
+          notify({ state: 'stale' });
+          timer = setTimeout(() => subscribe(link), 5000);
+        }
+      });
+    };
+    const sync = () => {
+      const next =
+        generation === this.generation && this.online && document.visibilityState !== 'hidden'
+          ? this.link()
+          : undefined;
+      if (next === selected) return;
+      clearTimeout(timer);
+      const previous = selected;
+      selected = next;
+      if (next) subscribe(next);
+      else {
+        stopWatching(previous);
+        notify({ state: 'stale' });
+      }
+    };
+    this.usageWatchers.set(backendId, receive);
+    const unsubscribe = this.onChange(sync);
+    document.addEventListener('visibilitychange', sync);
+    sync();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      if (this.usageWatchers.get(backendId) === receive) {
+        this.usageWatchers.delete(backendId);
+        if (generation === this.generation && this.online) stopWatching(this.link());
+      }
+      unsubscribe();
+      document.removeEventListener('visibilitychange', sync);
+    };
   }
   private schedulePeer() {
     clearTimeout(this.peerRetry);
@@ -612,6 +686,7 @@ export class DeviceSession {
     for (const link of this.links.values()) link.close();
     this.links.clear();
     this.watchers.clear();
+    this.usageWatchers.clear();
     this.views.clear();
     this.status = undefined;
     this.statuses.clear();

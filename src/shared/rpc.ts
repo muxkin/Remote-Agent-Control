@@ -16,6 +16,7 @@ export const RPC_ROUTES = {
   'history.read': ['GET', '/api/threads/:id/history'],
   'content.read': ['GET', '/api/threads/:id/content'],
   'models.list': ['GET', '/api/models'],
+  'usage.read': ['GET', '/api/usage'],
   'skills.list': ['GET', '/api/threads/:id/skills'],
   'plugins.list': ['GET', '/api/threads/:id/plugins'],
   'creation.projects': ['GET', '/api/threads/:id/projects'],

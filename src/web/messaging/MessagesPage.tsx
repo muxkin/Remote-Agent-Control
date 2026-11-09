@@ -6,7 +6,7 @@ import { ConversationAvatar, Avatar, Dialog, Empty, Notice, errorText, time, typ
 import { CreateGroup } from './Groups';
 const ChatView = lazy(() => import('./ChatView'));
 export default function MessagesPage({ id, navigate }: { id?: string; navigate: Navigate }) {
-  const { conversations, contacts } = useMessaging(),
+  const { humanContacts, conversations, contacts } = useMessaging(),
     [q, setQ] = useState(''),
     [filter, setFilter] = useState('all'),
     [newChat, setNewChat] = useState(false),
@@ -114,7 +114,7 @@ export default function MessagesPage({ id, navigate }: { id?: string; navigate: 
               </div>
             }
           >
-            与你的朋友和 Agent 分享想法、文件与进展。
+            与 Agent 分享想法、文件与进展。
             <br />
             选择左侧会话，或开始一段新对话。
           </Empty>
@@ -137,11 +137,11 @@ export default function MessagesPage({ id, navigate }: { id?: string; navigate: 
             className="im-setting-row"
             onClick={() => {
               setNewChat(false);
-              navigate({ page: 'contacts' });
+              navigate({ page: humanContacts ? 'contacts' : 'integrations' });
             }}
           >
             <Icon name="plusCircle" />
-            <span>添加联系人</span>
+            <span>{humanContacts ? '添加联系人' : '接入 Agent'}</span>
             <Icon name="chevron" size={18} />
           </button>
           <div className="im-picker-list">

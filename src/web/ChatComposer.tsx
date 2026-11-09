@@ -69,6 +69,7 @@ export function ChatComposer({
   uploadItems = [],
   onDismissUploads,
   uploadDisabled = false,
+  showUploadButton = true,
   onUpload,
   running = false,
   sendDisabled,
@@ -95,6 +96,7 @@ export function ChatComposer({
   uploadItems?: UploadItem[];
   onDismissUploads?: () => void;
   uploadDisabled?: boolean;
+  showUploadButton?: boolean;
   onUpload?: (files: FileList | File[] | null) => void;
   running?: boolean;
   sendDisabled: boolean;
@@ -265,9 +267,9 @@ export function ChatComposer({
       />
       {feedback}
       <div className="composer-actions">
-        {onUpload && (
-          <label className="upload-button">
-            <Icon name="plusCircle" size={24} />
+        {onUpload && showUploadButton && (
+          <label className="upload-button" title="添加附件">
+            <Icon name="attach" size={22} />
             <span className="sr-only">添加附件</span>
             <input
               aria-label="添加附件"

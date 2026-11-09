@@ -4,6 +4,7 @@ import { PNG } from 'pngjs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildRelay } from '../src/server/relay.ts';
+import { mathCopyFixture, verifyMathCopy } from './lib/math-copy-smoke.ts';
 import {
   saveRecoveryCode,
   registerAgentFixture,
@@ -21,6 +22,7 @@ const host = process.env.TEST_BIND ?? '127.0.0.1',
 await mkdir(out, { recursive: true });
 const dir = await mkdtemp(join(tmpdir(), 'im-design-'));
 const relay = await buildRelay({
+  messaging: { humanContacts: true }, // Explicit optional social-mode fixture.
   origin,
   webRoot: resolve(process.env.TEST_WEB_ROOT ?? 'dist/web'),
   assetOrigin: null,
@@ -103,7 +105,9 @@ try {
     .click();
   await expect(page.locator('.is-sticker img')).toBeVisible();
   await expect(page.locator('.im-message .im-avatar img').first()).toBeVisible();
-  expect(await page.getByRole('button', { name: '发起交互请求', exact: true }).count()).toBe(0);
+  await expect(page.getByRole('button', { name: '更多功能', exact: true })).toHaveCount(0);
+  await expect(page.locator('.im-compose-wrap .upload-button')).toBeVisible();
+  await expect(page.getByRole('button', { name: '语音消息', exact: true })).toBeVisible();
   const removed = await fetch(origin + '/api/im/me/avatar', {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${agent.token}` },
@@ -117,7 +121,7 @@ try {
   });
   await expect(page.locator('.im-message .im-avatar img').first()).toBeVisible();
   await page.screenshot({ path: out + '/desktop-chat.png' });
-  await page.getByRole('button', { name: '表情与 Emoji', exact: true }).click();
+  await page.getByRole('button', { name: '表情与表情包', exact: true }).click();
   await expect(page.getByRole('region', { name: '表情与 Emoji' })).toBeVisible();
   await page.screenshot({ path: out + '/desktop-emoji.png' });
   for (const width of [390, 320]) {
@@ -189,6 +193,9 @@ try {
   }
   await expect(page.getByRole('navigation', { name: '会话提问导航' })).toHaveCount(0);
   await page.screenshot({ path: out + '/mobile-math.png' });
+  await page.setViewportSize({ width: 1488, height: 1056 });
+  const copyFixture = await agentClient.send(cid, mathCopyFixture, 'formula-copy');
+  await verifyMathCopy(page, page.locator(`[data-message-id="${copyFixture.message.id}"]`));
   expect(errors).toEqual([]);
   await writeFile(
     out + '/result.json',
@@ -200,6 +207,7 @@ try {
         emptyInteractionHidden: true,
         responsive: [390, 320],
         mathTypography: true,
+        mathCopy: true,
         errors,
       },
       null,

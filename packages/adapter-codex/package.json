@@ -1,6 +1,6 @@
 {
   "name": "@agent-remote/adapter-codex",
-  "version": "1.0.1",
+  "version": "1.0.7",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -23,7 +23,9 @@
     "zod": "^4.6.7",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "env-paths": "4.0.0"
+    "env-paths": "4.0.0",
+    "unified": "^11.0.5",
+    "remark-parse": "^11.0.0"
   },
   "agentAdapter": {
     "sdk": 1,

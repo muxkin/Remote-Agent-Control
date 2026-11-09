@@ -1,3 +1,7 @@
+import { Readable } from 'node:stream';
+import type { CallIceConfig } from './messaging/calls.js';
+import { desktopRelease } from '../shared/desktop-releases.js';
+import { fileReleaseStore } from './desktop-releases.js';
 import Fastify from 'fastify';
 import { edgeSecurityHeaders } from './edge-policy.js';
 import type { StorageAdapter } from './object-storage.js';
@@ -15,6 +19,7 @@ import type { ResourcePolicyProvider } from '../shared/resources.js';
 export interface RelayConfig {
   origin: string;
   webRoot: string;
+  releaseRoot?: string;
   database?: string;
   enrollmentSecret: string;
   assetOrigin: string | null;
@@ -23,6 +28,8 @@ export interface RelayConfig {
   messaging?: {
     database?: string;
     registrationCode?: string;
+    humanContacts?: boolean;
+    callIce?: CallIceConfig;
     storage?: StorageAdapter;
     resourcePolicy?: ResourcePolicyProvider;
   };
@@ -47,9 +54,26 @@ export async function buildRelay(config: RelayConfig) {
     database: config.messaging?.database ?? (config.database ? `${config.database}.im.sqlite` : ':memory:'),
     origin: config.origin,
     registrationCode: config.messaging?.registrationCode,
+    humanContacts: config.messaging?.humanContacts,
+    callIce: config.messaging?.callIce,
     clientAddress,
     storage: config.messaging?.storage,
     resourcePolicy: config.messaging?.resourcePolicy,
+  });
+  const releases = fileReleaseStore(config.releaseRoot ?? join(config.webRoot, '..'));
+  app.route({
+    method: ['GET', 'HEAD'],
+    url: '/downloads/desktop/*',
+    handler: async (req, reply) => {
+      const request = new Request(new URL(req.url, config.origin), {
+        method: req.method,
+        headers: req.headers as Record<string, string>,
+      });
+      const result = await desktopRelease(request, releases);
+      reply.code(result.status);
+      result.headers.forEach((value, key) => reply.header(key, value));
+      return reply.send(result.body ? Readable.fromWeb(result.body as any) : undefined);
+    },
   });
   app.get('/health', async () => ({ ok: true, protocol: 2 }));
   // Version 1 cookies confer no authority and are deliberately retired at the new edge.

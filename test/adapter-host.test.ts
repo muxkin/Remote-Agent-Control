@@ -107,6 +107,11 @@ it('isolates same native IDs, credentials and subscriptions in three independent
     3,
   );
 });
+it('preserves a missing attachment error through the real plugin process boundary', async () => {
+  const { backend } = await instance();
+  await expect(backend.attachment!('shared', 'missing')).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(backend.status().connected).toBe(true);
+});
 it('marks lost writes uncertain, restores subscriptions and never replays creates, sends or approvals', async () => {
   const { backend, directory } = await instance();
   const store = new Store(join(directory, 'store'), temporaryRuntime);

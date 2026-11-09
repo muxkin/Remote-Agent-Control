@@ -1,11 +1,12 @@
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, type ExecFileException } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
-import { promisify } from 'node:util';
+import { parseEnv, promisify } from 'node:util';
 import { powershell } from '../../../src/server/platform.js';
+import { DeliveryError } from '../../../src/server/delivery-error.js';
 import type { CodexConfig as Config } from './config.js';
 
 /** Product protocols see a byte channel, never a Python subprocess. */
@@ -82,6 +83,37 @@ export function codexPaths(platform: string, home: string) {
       (platform === 'win32' ? '\\\\.\\pipe\\codex-ipc' : join(home, 'ipc', 'ipc.sock')),
   };
 }
+async function linuxDesktopEnvironment(): Promise<NodeJS.ProcessEnv> {
+  const env = { ...process.env };
+  if (env.DISPLAY || env.WAYLAND_DISPLAY) return env;
+  // User services can start before the graphical login exports its environment.
+  try {
+    const { stdout } = await promisify(execFile)(
+      'systemctl',
+      ['--user', '--output=json', 'show-environment'],
+      {
+        env,
+        timeout: 2000,
+      },
+    );
+    // Older systemd versions report shell-style assignments even with JSON output selected.
+    const current = stdout.trimStart().startsWith('{') ? JSON.parse(stdout) : parseEnv(stdout);
+    for (const key of [
+      'DISPLAY',
+      'WAYLAND_DISPLAY',
+      'XAUTHORITY',
+      'DBUS_SESSION_BUS_ADDRESS',
+      'XDG_CURRENT_DESKTOP',
+      'KDE_FULL_SESSION',
+      'KDE_SESSION_VERSION',
+    ]) {
+      if (typeof current?.[key] === 'string' && current[key]) env[key] = current[key];
+    }
+  } catch {
+    // The graphical environment may still be starting, or systemd may be unavailable.
+  }
+  return env;
+}
 export class LocalCodexConnector implements CodexConnector {
   constructor(private platform: string = process.platform) {}
   private executable(root: string) {
@@ -148,14 +180,26 @@ export class LocalCodexConnector implements CodexConnector {
     return discoverAppTools(this.platform === 'linux' ? '/tmp' : tmpdir(), process.getuid?.());
   }
   async openThread(id: string) {
-    if (!/^[a-f0-9-]{36}$/i.test(id)) throw Error('Invalid Codex thread');
+    if (!/^[a-f0-9-]{36}$/i.test(id)) throw new DeliveryError('无效的 Codex 会话标识', true);
     if (this.platform !== 'linux')
-      throw Error('Open this chat in Codex first; native activation is unverified on this platform');
+      throw new DeliveryError('桌面导航接口暂不可用，请在电脑上的 Codex 打开此会话', true);
+    const env = await linuxDesktopEnvironment();
+    if (!env.DISPLAY && !env.WAYLAND_DISPLAY)
+      throw new DeliveryError('未找到本机图形会话，请登录电脑并打开 Codex 后重试', true);
     const { stdout } = await promisify(execFile)('xdg-mime', ['query', 'default', 'x-scheme-handler/codex'], {
+      env,
       timeout: 5000,
+    }).catch(() => {
+      throw new DeliveryError('无法查询本机 Codex 链接处理程序，请在电脑上打开此会话', true);
     });
-    if (stdout.trim() !== 'chatgpt.desktop') throw Error('Unsupported Codex URL handler');
-    await promisify(execFile)('xdg-open', [`codex://threads/${id}`], { timeout: 10000 });
+    if (stdout.trim() !== 'chatgpt.desktop')
+      throw new DeliveryError('本机未将 Codex 链接关联到桌面应用，请在电脑上打开此会话', true);
+    try {
+      await promisify(execFile)('xdg-open', [`codex://threads/${id}`], { env, timeout: 10000 });
+    } catch (error) {
+      if ((error as ExecFileException).killed) throw new DeliveryError('打开桌面链接超时，结果待确认');
+      throw new DeliveryError('本机未能打开 Codex 链接，请在电脑上打开此会话', true);
+    }
   }
 }
 export const connectorFor = (config: Config) => config.codexConnector ?? new LocalCodexConnector();

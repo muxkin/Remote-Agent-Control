@@ -126,7 +126,7 @@ it('authorizes signed metadata and 304s, returns original downloads and supports
     assetOrigin: null,
     uploadOrigins: [],
     enrollmentSecret: 'testing-object-relay-secret-32-chars',
-    messaging: { database: db, storage: s.adapter },
+    messaging: { humanContacts: true, database: db, storage: s.adapter },
   });
   cleanup.push(() => relay.app.close());
   const call = (url: string, token = auth, extra: object = {}) =>

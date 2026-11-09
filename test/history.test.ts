@@ -4,6 +4,8 @@ import { zstdCompressSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { HistoryIndex, JsonlTail, rolloutMessage } from '../packages/adapter-codex/src/history.js';
+import { messagesOf } from '../packages/adapter-codex/src/timeline.js';
+import { codexDisplayMessage } from '../src/shared/codex-transcript.js';
 import { fixtureConfig, historyFixture, THREAD } from './helpers.js';
 const callbacks: (() => void)[] = [];
 afterEach(() => callbacks.splice(0).forEach((x) => x()));
@@ -87,7 +89,7 @@ it('includes user-visible native chats created through desktop tools', () => {
   expect(h.list().threads).toEqual([]);
   db.close();
 });
-it('omits only the generated workspace envelope and preserves ordinary user text', () => {
+it('drops the generated workspace envelope and preserves ordinary user text', () => {
   const record = (text: string) => ({
     type: 'response_item',
     payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
@@ -101,6 +103,82 @@ it('omits only the generated workspace envelope and preserves ordinary user text
     ),
   ).toBeNull();
   expect(rolloutMessage(record('请检查 # AGENTS.md instructions 的内容'), 'id')?.role).toBe('user');
+});
+it('keeps the real prompt when a native record includes generated environment context', () => {
+  const context =
+    '<environment_context>\n<current_date>2026-11-09</current_date>\n<timezone>Asia/Shanghai</timezone>\n<filesystem><workspace_roots><root>/fixture</root></workspace_roots></filesystem>\n</environment_context>';
+  const record = (texts: string[], kinds?: string[]) => ({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'user',
+      content: texts.map((text) => ({ type: 'input_text', text })),
+      internal_chat_message_metadata_passthrough: { content_item_kinds: kinds },
+    },
+  });
+  expect(rolloutMessage(record([context], ['environments.environment_context']), 'ctx')).toBeNull();
+  expect(rolloutMessage(record([context]), 'old-ctx')).toBeNull();
+  expect(
+    rolloutMessage(record([context, '继续分析'], ['environments.environment_context', 'user.text']), 'real')
+      ?.text,
+  ).toBe('继续分析');
+  const quoted = '请解释这段 XML：\n\n```xml\n' + context + '\n```';
+  expect(rolloutMessage(record([quoted]), 'quoted')?.text).toBe(quoted);
+  expect(codexDisplayMessage({ id: 'cached', role: 'user', text: context })).toBeNull();
+  const cached = JSON.parse('{"id":"cached","role":"user","text":"","codex":{"kind":"environment"}}');
+  expect(codexDisplayMessage(cached)).toBeNull();
+  expect(
+    messagesOf({
+      turns: [
+        {
+          id: 'first',
+          params: { input: context },
+          items: [{ id: 'answer', type: 'agentMessage', text: '正文' }],
+        },
+        {
+          id: 'second',
+          items: [{ id: 'context', type: 'userMessage', content: context }],
+        },
+      ],
+    }),
+  ).toMatchObject([{ text: '正文' }]);
+});
+
+it('separates a Codex memory footer from history, live snapshots and old cached views', () => {
+  const citation = [
+    '<oai-mem-citation>',
+    '<citation_entries>',
+    '/fixture/notes/MEMORY.md:5-6|note=[Fixture note]',
+    '</citation_entries>',
+    '<rollout_ids>',
+    '01234567-89ab-cdef-0123-456789abcdef',
+    '</rollout_ids>',
+    '</oai-mem-citation>',
+  ].join('\n');
+  const answer = '正文含有 [普通引用](https://example.com/source) 和 \\(x=1\\)。';
+  const raw = answer + '\n\n' + citation;
+  const record = (text: string) => ({
+    type: 'response_item',
+    payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] },
+  });
+  const summary = {
+    text: answer,
+    codex: {
+      kind: 'memory',
+      entries: [{ source: 'MEMORY.md', lineStart: 5, lineEnd: 6, note: 'Fixture note' }],
+    },
+  };
+  expect(rolloutMessage(record(raw), 'history')).toMatchObject(summary);
+  const live = (text: string) => ({
+    turns: [{ id: 'turn', status: 'inProgress', items: [{ id: 'answer', type: 'agentMessage', text }] }],
+  });
+  expect(messagesOf(live(raw))[0]).toMatchObject(summary);
+  expect(messagesOf(live(raw.slice(0, raw.indexOf('</citation_entries>'))), true)[0].text).toBe(answer);
+  expect(codexDisplayMessage({ id: 'cached', role: 'assistant', text: raw })).toMatchObject(summary);
+  const example = '示例：\n\n```xml\n' + citation + '\n```';
+  expect(rolloutMessage(record(example), 'example')?.text).toBe(example);
+  const unfinishedExample = example.slice(0, -4);
+  expect(messagesOf(live(unfinishedExample))[0].text).toBe(unfinishedExample);
 });
 it('paginates by byte boundaries without dropping or duplicating records', async () => {
   const { h, file } = setup();
@@ -218,4 +296,46 @@ it('historical tool calls and outputs remain visible, private reasoning is skipp
       'fallback',
     ),
   ).toBeNull();
+});
+
+it('resolves older local attachments and inline images without a desktop owner, including compressed rollouts', async () => {
+  const { h, c, file } = setup();
+  const attachment = join(c.desktopRoot, 'older.png'),
+    secret = join(c.desktopRoot, 'unmentioned.png');
+  writeFileSync(attachment, 'image');
+  writeFileSync(secret, 'private');
+  const inline = 'data:image/png;base64,aGVsbG8=';
+  const records = [
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: `![old](<${attachment}>)` }],
+      },
+    },
+    {
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_image', image_url: inline }] },
+    },
+    ...Array.from({ length: 1000 }, () => ({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'later '.repeat(200) }],
+      },
+    })),
+  ];
+  writeFileSync(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  expect((await h.page(THREAD)).messages.some((m) => m.text.includes('older.png'))).toBe(false);
+  expect(await h.attachment(THREAD, attachment)).toBe(attachment);
+  await expect(h.attachment(THREAD, secret)).rejects.toThrow();
+  const { mediaReference } = await import('../src/server/content-media.js');
+  expect(await h.inlineMedia(THREAD, mediaReference(inline))).toBe(inline);
+  writeFileSync(`${file}.zst`, zstdCompressSync(readFileSync(file)));
+  rmSync(file);
+  expect(await h.attachment(THREAD, attachment)).toBe(attachment);
+  expect(await h.inlineMedia(THREAD, mediaReference(inline))).toBe(inline);
+  expect(await h.inlineMedia(THREAD, mediaReference('data:image/png;base64,bm8='))).toBeNull();
 });

@@ -25,7 +25,7 @@ async function fixture(registrationCode?: string) {
     assetOrigin: null,
     uploadOrigins: [],
     enrollmentSecret: 'test-messaging-relay-enrollment-secret',
-    messaging: { registrationCode },
+    messaging: { humanContacts: true, registrationCode },
   });
   cleanups.push(() => relay.app.close());
   vi.stubGlobal('fetch', async (input: string, init: RequestInit = {}) => {

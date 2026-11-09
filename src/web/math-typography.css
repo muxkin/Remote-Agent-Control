@@ -28,6 +28,31 @@
   margin-left: 0;
   margin-right: 2em;
 }
+.markdown [data-math-copy] {
+  border-radius: 5px;
+  cursor: copy;
+}
+.markdown .katex[data-math-copy] {
+  display: inline-block;
+  max-width: 100%;
+}
+@media (hover: hover) {
+  .markdown [data-math-copy]:hover {
+    background-color: var(--surface-hover);
+    outline: 2px solid var(--surface-hover);
+  }
+}
+.markdown [data-math-copy]:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.markdown [data-math-copy][data-math-copy-state='copied'] {
+  background-color: var(--soft);
+  outline-color: var(--accent);
+}
+.markdown [data-math-copy][data-math-copy-state='failed'] {
+  background-color: var(--danger-soft);
+  outline-color: var(--danger);
+}
 .markdown .chemical-formula {
   white-space: nowrap;
   overflow-wrap: normal;

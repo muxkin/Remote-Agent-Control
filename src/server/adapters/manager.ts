@@ -151,14 +151,20 @@ export class AdapterManager extends BackendRegistry {
         const result = join(directory, 'results', name);
         if (existsSync(result)) continue;
         try {
-          const { instanceId, target } = JSON.parse(readFileSync(join(directory, 'requests', name), 'utf8'));
+          const { instanceId, target, from } = JSON.parse(
+            readFileSync(join(directory, 'requests', name), 'utf8'),
+          );
           const proxy = this.get(instanceId) as AdapterProxy,
             catalog = loadCatalog(this.config),
-            installed = catalog.packages[target];
+            installed = catalog.packages[target],
+            bound = catalog.instances[instanceId]?.current;
           if (!installed) throw Error('Requested plugin package is not installed');
           const next = readAdapterPackage(installed.root);
           if (`${next.name}@${next.version}` !== target) throw Error('Installed package identity changed');
-          if (catalog.instances[instanceId]?.current !== target) {
+          if (bound !== target) {
+            if (from !== undefined && bound !== from) throw Error('实例版本已变更，跳过原定的自动升级');
+            // Keep automatic requests pending without interrupting writes or blocking the other instances.
+            if (from !== undefined && proxy.activeWrites) continue;
             await proxy.replace(next);
             await catalogLock(this.config, () => {
               const current = loadCatalog(this.config),

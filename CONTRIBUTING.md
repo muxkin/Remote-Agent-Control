@@ -40,6 +40,8 @@ npm run test:delivery
 npm run test:conversation-replay
 npm run test:messaging
 npm run test:messaging-design
+npm run test:im-calls
+npm run test:controls
 ```
 
 `test:browser` 与 `test:v2` 为同一套测试。它启动 loopback 上的临时中继和模拟桌面，不操作真实桌面会话，覆盖连接复用、直连/中继切换、文件和缓存。不要把测试夹具作为外部预览服务。`TEST_WEB_ROOT` 指定本次验收的构建目录，`TEST_PORT` 可指定隔离端口；需要跨设备预览时将 `TEST_BIND` 设为本机 Tailscale 地址。
@@ -75,3 +77,5 @@ PR 请说明用户可见的变化与验证方式。涉及桌面内部协议的�
 暂存待发布文件后运行 `npm run check:public`。检查针对 Git 暂存区，拒绝配置、身份/数据库、私有部署目录、诊断输出及已知凭据模式，并在本机环境文件存在时检测其中的敏感值。不要强制添加被忽略的目录或把环境文件复制成普通源码文件。
 
 自动检查不能证明没有泄露：仍需复核 Git 历史、提交者邮箱、截图与二进制元数据，以及新引入的外部服务地址。只发布通用示例配置；中继、STUN、存储适配器和 CDN 均由部署者配置，不能内置个人服务。发布包只从通过检查的 Git 树生成，不打包整个工作目录。
+
+应用发行版本以根目录 `package.json` 为准。在 `CHANGELOG.md` 添加对应版本记录，待主分支同一提交的 Compatibility contracts 全部通过后，再推送 `v<版本>` 标签。GitHub Actions 会从该次验收取回并核对适配器包，然后发布 GitHub Release。

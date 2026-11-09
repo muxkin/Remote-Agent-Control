@@ -1,5 +1,6 @@
 import { openDB, type DBSchema } from 'idb';
 import type { AttachmentResource } from '../AttachmentAccess';
+import type { EncryptedFileCache } from '../../client/encrypted-messaging';
 interface MediaDB extends DBSchema {
   blobs: {
     key: string;
@@ -36,6 +37,7 @@ let encryptedDownload:
   | ((
       path: string,
       signal?: AbortSignal,
+      cache?: EncryptedFileCache,
     ) => Promise<{ data: Uint8Array<ArrayBuffer>; name: string; mime: string; size: number }>)
   | undefined;
 export function setEncryptedDownload(loader: NonNullable<typeof encryptedDownload>) {
@@ -73,7 +75,13 @@ export function invalidateMediaConversations(ids: Set<string>) {
 }
 async function readBlob(key: string) {
   try {
-    return (await (await database)?.get('blobs', key))?.blob;
+    const db = await database;
+    if (!db) return;
+    const tx = db.transaction('blobs', 'readwrite');
+    const row = await tx.store.get(key);
+    if (row) await tx.store.put({ ...row, used: Date.now() });
+    await tx.done;
+    return row?.blob;
   } catch {
     return undefined;
   }
@@ -137,7 +145,21 @@ export async function loadMessagingMedia(
       if (!pending) {
         const loader = encryptedDownload;
         pending = (async () => {
-          const file = await loader(path, controller.signal);
+          const prefix = `${accountId}:cipher:v1:`;
+          const file = await loader(path, controller.signal, {
+            get: async (key) => {
+              if (ticketEpoch !== epoch) return;
+              const blob = await readBlob(prefix + key);
+              if (ticketEpoch !== epoch) return;
+              return blob ? new Uint8Array(await blob.arrayBuffer()) : undefined;
+            },
+            put: async (key, bytes) => {
+              await saveBlob(prefix + key, accountId, new Blob([bytes]), ticketEpoch);
+            },
+            remove: async (key) => {
+              await (await database)?.delete('blobs', prefix + key);
+            },
+          });
           if (ticketEpoch !== epoch) throw new DOMException('Aborted', 'AbortError');
           const url = URL.createObjectURL(new Blob([file.data], { type: file.mime }));
           memory.set(blobKey, { url, size: file.size });

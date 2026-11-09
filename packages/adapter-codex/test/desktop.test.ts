@@ -1,8 +1,11 @@
-import { LocalCodexConnector } from '../src/connector.js';
+import { LocalCodexConnector, type VerifiedPipe } from '../src/connector.js';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { writeFileSync, rmSync } from 'node:fs';
+import { writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DesktopAdapter } from '../src/desktop.js';
+import { encodeFrame, FrameReader } from '../src/framing.js';
 import { platformRuntime } from '../../../src/server/platform.js';
 import { requestFingerprint } from '../src/approvals.js';
 import { messagesOf } from '../src/timeline.js';
@@ -10,9 +13,13 @@ import { fixtureConfig, FakeTransport, THREAD, TURN, state } from '../../../test
 const cleanups: (() => void)[] = [];
 afterEach(() => {
   cleanups.splice(0).forEach((x) => x());
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
-async function setup(version?: string) {
+async function setup(version?: string, connector?: LocalCodexConnector) {
   const c = fixtureConfig();
+  c.codexConnector = connector ?? new LocalCodexConnector();
+  if (!connector) c.codexConnector.appTools = async () => [];
   if (version)
     writeFileSync(join(c.desktopRoot, 'resources/linux-package-metadata.json'), JSON.stringify({ version }));
   const t = new FakeTransport();
@@ -24,6 +31,28 @@ async function setup(version?: string) {
   await d.start();
   const release = await d.acquire(THREAD);
   return { c, t, d, release };
+}
+
+class AppToolsFixture extends EventEmitter implements VerifiedPipe {
+  stdin = new PassThrough();
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  kill = vi.fn(() => this.emit('close'));
+
+  constructor(tools: string[], navigate: () => boolean) {
+    super();
+    const reader = new FrameReader();
+    this.stdin.on('data', (bytes) =>
+      reader.push(bytes, ({ id, method }) => {
+        const result =
+          method === 'tools/list'
+            ? { tools: tools.map((name) => ({ namespace: 'codex_app', name })) }
+            : { success: navigate() };
+        this.stdout.write(encodeFrame({ id, result }));
+      }),
+    );
+    queueMicrotask(() => this.stderr.write('{"type":"ready"}\n'));
+  }
 }
 describe('Desktop follower', () => {
   it('steers only the pinned running turn through the native follower', async () => {
@@ -572,6 +601,7 @@ it('resumes an owned but unloaded desktop instead of treating ownership as readi
   t.revision++;
   t.snapshot();
   const runtime = new LocalCodexConnector();
+  runtime.appTools = async () => [];
   const open = vi.fn(async () => {
     setTimeout(() => {
       t.current = state({ threadRuntimeStatus: { type: 'idle' }, resumeState: 'resumed' });
@@ -589,3 +619,131 @@ it('resumes an owned but unloaded desktop instead of treating ownership as readi
   await d.openThread(THREAD);
   expect(open).toHaveBeenCalledTimes(1);
 });
+
+it('discovers a late desktop navigation endpoint on demand and confirms the follower snapshot', async () => {
+  const connector = new LocalCodexConnector();
+  const discover = vi.fn<LocalCodexConnector['appTools']>().mockResolvedValue([]);
+  connector.appTools = discover;
+  connector.openThread = vi.fn();
+  const { d, t } = await setup(undefined, connector);
+  expect(discover).toHaveBeenCalledTimes(1);
+  t.current = state({ threadRuntimeStatus: { type: 'notLoaded' } });
+  t.revision++;
+  t.snapshot();
+  discover.mockResolvedValue(['desktop-tools']);
+  const navigate = vi.fn(() => {
+    t.current = state();
+    t.revision++;
+    t.snapshot();
+    return true;
+  });
+  connector.pipe = () => new AppToolsFixture(['navigate_to_codex_page'], navigate);
+
+  await d.openThread(THREAD);
+
+  expect(navigate).toHaveBeenCalledTimes(1);
+  expect(connector.openThread).not.toHaveBeenCalled();
+  expect(d.status().capabilities.newThread).toBe(false);
+  expect(d.view(THREAD)?.canSend).toBe(true);
+});
+
+it('republishes capabilities when the optional desktop socket appears, closes, and returns', async () => {
+  vi.useFakeTimers();
+  const connector = new LocalCodexConnector();
+  const discover = vi.fn<LocalCodexConnector['appTools']>().mockResolvedValue([]);
+  connector.appTools = discover;
+  let pipe: AppToolsFixture | undefined;
+  let tools: string[] = [];
+  connector.pipe = () => (pipe = new AppToolsFixture(tools, () => true));
+  const { d } = await setup(undefined, connector);
+  const status = vi.fn();
+  d.on('status', status);
+
+  discover.mockResolvedValue(['desktop-tools']);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(status).not.toHaveBeenCalled();
+  tools = ['create_thread', 'list_projects'];
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(status).toHaveBeenLastCalledWith(
+    expect.objectContaining({ capabilities: expect.objectContaining({ newThread: true }) }),
+  );
+
+  pipe!.kill();
+  discover.mockResolvedValue([]);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(status).toHaveBeenLastCalledWith(
+    expect.objectContaining({ capabilities: expect.objectContaining({ newThread: false }) }),
+  );
+  expect(d.status().connected).toBe(true);
+
+  discover.mockResolvedValue(['replacement-tools']);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(status).toHaveBeenCalledTimes(3);
+  expect(d.status().capabilities.newThread).toBe(true);
+});
+
+it('waits for the snapshot after an inconclusive native navigation reply without dispatching a link', async () => {
+  vi.useFakeTimers();
+  const connector = new LocalCodexConnector();
+  connector.appTools = async () => ['desktop-tools'];
+  connector.openThread = vi.fn();
+  const navigate = vi.fn(() => false);
+  connector.pipe = () => new AppToolsFixture(['navigate_to_codex_page'], navigate);
+  const { d, t } = await setup(undefined, connector);
+  t.current = state({ threadRuntimeStatus: { type: 'notLoaded' } });
+  t.revision++;
+  t.snapshot();
+  const pending = d.openThread(THREAD);
+
+  await vi.advanceTimersByTimeAsync(500);
+  expect(navigate).toHaveBeenCalledTimes(1);
+  expect(connector.openThread).not.toHaveBeenCalled();
+  t.current = state();
+  t.revision++;
+  t.snapshot();
+  await vi.advanceTimersByTimeAsync(500);
+  await expect(pending).resolves.toBeUndefined();
+});
+
+it.skipIf(process.platform !== 'linux').each([
+  { display: 'wayland-test', association: 'chatgpt.desktop', error: null },
+  { display: 'wayland-test', association: 'chatgpt.desktop', error: null, legacy: true },
+  { display: '', association: 'chatgpt.desktop', error: '未找到本机图形会话' },
+  { display: 'wayland-test', association: 'browser.desktop', error: '未将 Codex 链接关联到桌面应用' },
+])(
+  'checks the current graphical session and handler before launching the Linux fallback ($display, $association, $legacy)',
+  async ({ display, association, error, legacy }) => {
+    const { c } = await setup();
+    const log = join(c.desktopRoot, 'activation');
+    vi.stubEnv('DISPLAY', undefined);
+    vi.stubEnv('WAYLAND_DISPLAY', undefined);
+    vi.stubEnv('PATH', c.desktopRoot);
+    vi.stubEnv('POCKET_TEST_ACTIVATION', log);
+    vi.stubEnv('POCKET_TEST_UNRELATED', undefined);
+    const managerEnv = legacy
+      ? `WAYLAND_DISPLAY=${display}\nPOCKET_TEST_UNRELATED=ignored`
+      : JSON.stringify({ WAYLAND_DISPLAY: display, POCKET_TEST_UNRELATED: 'ignored' });
+    writeFileSync(join(c.desktopRoot, 'systemctl'), `#!/bin/sh\nprintf '%s\\n' '${managerEnv}'\n`, {
+      mode: 0o700,
+    });
+    writeFileSync(
+      join(c.desktopRoot, 'xdg-mime'),
+      `#!/bin/sh\n[ "$WAYLAND_DISPLAY" = wayland-test ] || exit 1\nprintf '%s\\n' '${association}'\n`,
+      { mode: 0o700 },
+    );
+    writeFileSync(
+      join(c.desktopRoot, 'xdg-open'),
+      '#!/bin/sh\n[ "$WAYLAND_DISPLAY" = wayland-test ] && [ -z "$POCKET_TEST_UNRELATED" ] || exit 1\nprintf "%s\\n" "$1" > "$POCKET_TEST_ACTIVATION"\n',
+      { mode: 0o700 },
+    );
+
+    const pending = new LocalCodexConnector('linux').openThread(THREAD);
+    if (error) {
+      await expect(pending).rejects.toMatchObject({ message: expect.stringContaining(error), notSent: true });
+      expect(existsSync(log)).toBe(false);
+    } else {
+      await expect(pending).resolves.toBeUndefined();
+      expect(readFileSync(log, 'utf8').trim()).toBe(`codex://threads/${THREAD}`);
+    }
+  },
+);

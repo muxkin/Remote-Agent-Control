@@ -1,0 +1,349 @@
+.donation-page {
+  width: min(100%, 680px);
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+.donation-intro {
+  text-align: center;
+  padding: 20px 0 32px;
+}
+.donation-mark {
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  margin: 0 auto 20px;
+  border-radius: 26px;
+  background: var(--surface-subtle);
+  color: var(--accent);
+}
+.donation-intro > small {
+  letter-spacing: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.donation-intro h2 {
+  margin: 12px 0;
+  font-size: clamp(26px, 5vw, 34px);
+  letter-spacing: -1px;
+}
+.donation-page p {
+  color: var(--muted);
+  line-height: 1.8;
+  font-size: 14px;
+}
+.donation-card {
+  border: 1px solid var(--outline);
+  border-radius: 24px;
+  padding: 26px;
+  margin-bottom: 18px;
+  background: var(--surface);
+}
+.donation-card h3 {
+  font-size: 17px;
+  margin: 0 0 8px;
+}
+.donation-purposes {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--outline);
+  padding-top: 20px;
+  margin-top: 20px;
+}
+.donation-purposes span {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.donation-payment {
+  text-align: center;
+}
+.donation-empty {
+  padding: 20px;
+  margin-top: 20px;
+  border-radius: 18px;
+  background: var(--surface-subtle);
+}
+.donation-empty > svg {
+  display: block;
+  margin: 0 auto 12px;
+  color: var(--accent);
+}
+.donation-empty p {
+  margin-bottom: 0;
+}
+.donation-platform {
+  display: grid;
+  gap: 6px;
+  margin: 24px 0;
+}
+.donation-platform strong {
+  font-size: 22px;
+}
+.donation-platform span {
+  font-size: 14px;
+}
+.donation-platform small {
+  font-size: 12px;
+  color: var(--muted);
+}
+.donation-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--accent);
+  color: white;
+  border-radius: 14px;
+  padding: 14px 22px;
+  text-decoration: none;
+}
+.donation-payment > small {
+  display: block;
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.donation-footnote {
+  text-align: center;
+  font-size: 12px !important;
+}
+@media (max-width: 420px) {
+  .donation-page {
+    padding: 12px 16px 36px;
+  }
+  .donation-card {
+    padding: 22px 18px;
+  }
+  .donation-purposes {
+    gap: 8px;
+  }
+  .donation-purposes span {
+    font-size: 12px;
+    gap: 5px;
+  }
+}
+
+/* Support page: the QR stays a local original; only its preview viewport is focused. */
+.support-page {
+  width: min(100%, 600px);
+  margin: 0 auto;
+  padding: 20px 20px 40px;
+  color: var(--text);
+}
+.support-intro {
+  text-align: center;
+  margin: 0 0 22px;
+}
+.support-heart {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 12px;
+  border-radius: 17px;
+  background: var(--surface-subtle);
+  color: var(--accent);
+}
+.support-intro h2 {
+  font-size: 28px;
+  letter-spacing: -0.6px;
+  line-height: 1.3;
+  margin: 0 0 10px;
+}
+.support-intro p {
+  font-size: 14px;
+  line-height: 1.75;
+  margin: 0;
+  color: var(--muted);
+}
+.reward-card {
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: 24px;
+  padding: 22px 24px;
+  text-align: center;
+  box-shadow: 0 6px 28px #12392d06;
+}
+.reward-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+}
+.reward-heading h3 {
+  font-size: 17px;
+  margin: 0;
+}
+.reward-heading > span {
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--surface-subtle);
+  padding: 4px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.reward-code {
+  display: block;
+  width: max-content;
+  background: white;
+  padding: 12px;
+  border-radius: 18px;
+  margin: 14px auto 10px;
+  max-width: 100%;
+}
+.reward-code-frame {
+  position: relative;
+  display: block;
+  width: 224px;
+  max-width: 100%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: white;
+}
+.reward-code-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  -webkit-touch-callout: default;
+}
+.reward-code-image.cropped {
+  position: absolute;
+  max-width: none;
+}
+.reward-recipient {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+.reward-help {
+  display: none;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 8px 0 0;
+}
+.support-platform-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+.support-platform-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+  color: var(--text);
+  padding: 18px;
+  margin-top: 14px;
+  border: 1px solid var(--outline);
+  border-radius: 20px;
+  background: var(--surface);
+}
+.support-platform-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: var(--surface-subtle);
+  color: var(--accent);
+}
+.support-platform-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.support-platform-text strong {
+  font-size: 15px;
+}
+.support-platform-text small {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.support-platform-card > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.support-purpose {
+  padding: 26px 6px 0;
+}
+.support-purpose h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+.support-purpose p {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--muted);
+  margin: 0 0 14px;
+}
+.support-purpose > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  color: var(--muted);
+}
+.support-purpose span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.support-footnote {
+  font-size: 11px;
+  line-height: 1.85;
+  color: var(--muted);
+  text-align: center;
+  margin: 24px 0 0;
+  padding: 18px 0 0;
+  border-top: 1px solid var(--outline);
+}
+.support-notice {
+  text-align: center;
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--muted);
+  padding: 20px;
+  background: var(--surface);
+  border-radius: 18px;
+}
+.reward-image-error {
+  padding: 32px 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+@media (hover: none) and (pointer: coarse) {
+  .reward-help {
+    display: block;
+  }
+}
+@media (max-width: 420px) {
+  .support-page {
+    padding: 18px 16px 32px;
+  }
+  .support-intro h2 {
+    font-size: 26px;
+  }
+  .reward-card {
+    padding: 18px 16px;
+  }
+  .reward-code-frame {
+    width: 208px;
+  }
+  .reward-code {
+    padding: 10px;
+    margin-top: 10px;
+  }
+  .support-platform-card {
+    padding: 16px;
+  }
+  .support-purpose > div {
+    gap: 10px 14px;
+  }
+}

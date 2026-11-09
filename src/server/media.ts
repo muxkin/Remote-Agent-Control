@@ -101,6 +101,9 @@ function referencePath(reference: string): string {
 }
 /** The conversation's exact attachment links are the capability, not its working directory. */
 const markdown = unified().use(remarkParse).use(remarkFileCitations);
+export function resolveAttachmentPath(reference: string, cwd: string): string {
+  return resolve(cwd, referencePath(reference));
+}
 export function attachmentLinks(text: string): string[] {
   const tree = markdown.runSync(markdown.parse(text)) as Root;
   const definitions = new Map<string, string>();
@@ -117,11 +120,10 @@ export function attachmentLinks(text: string): string[] {
   return links;
 }
 export async function authorizeFile(reference: string, cwd: string, messages: Message[]): Promise<string> {
-  const raw = referencePath(reference);
-  const requested = resolve(cwd, raw);
+  const requested = resolveAttachmentPath(reference, cwd);
   const matches = (value: string) => {
     try {
-      return resolve(cwd, referencePath(value)) === requested;
+      return resolveAttachmentPath(value, cwd) === requested;
     } catch {
       return false;
     }

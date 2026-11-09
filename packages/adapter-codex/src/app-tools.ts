@@ -8,6 +8,7 @@ import { DeliveryError } from './transport.js';
 import type { CodexConfig as Config } from './config.js';
 import { platformRuntime } from '../../../src/server/platform.js';
 import { creationBody } from '../../../src/server/control-schemas.js';
+import { codexUsage } from './usage.js';
 export interface DesktopProject {
   id: string;
   desktopId?: string;
@@ -80,14 +81,20 @@ class VerifiedAppPipe {
       });
     });
   }
-  request(method: 'tools/list' | 'tools/call', params: unknown, timeout = 15000): Promise<any> {
-    if (!this.child.stdin.writable) return Promise.reject(new DeliveryError('桌面工具连接不可用', true));
+  request(
+    method: 'tools/list' | 'tools/call',
+    params: unknown,
+    timeout = 15000,
+    closeOnTimeout = true,
+  ): Promise<any> {
+    if (this.closed || !this.child.stdin.writable)
+      return Promise.reject(new DeliveryError('桌面工具连接不可用', true));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new DeliveryError('桌面工具响应超时，结果待确认'));
-        this.close();
+        if (closeOnTimeout) this.close();
       }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       this.child.stdin.write(encodeFrame({ id, jsonrpc: '2.0', method, params }));
@@ -98,46 +105,55 @@ class VerifiedAppPipe {
     this.child.kill();
   }
 }
-/** A second Desktop-owned socket, restricted here to project listing and native creation. No general tool forwarding. */
+/** A second Desktop-owned socket, restricted to explicit project, creation, navigation and read-only usage tools. No general tool forwarding. */
 export class DesktopAppTools {
-  available = false;
+  get available() {
+    return this.has('create_thread') && this.has('list_projects');
+  }
+  private tools = new Set<string>();
+  has(tool: string) {
+    return !!this.client && !this.client.closed && this.tools.has(tool);
+  }
   private client?: VerifiedAppPipe;
   private connecting?: Promise<VerifiedAppPipe>;
+  private generation = 0;
+  private usageCache?: { expires: number; value: import('../../adapter-sdk/src/usage.js').AgentUsage };
+  private loadingUsage?: Promise<import('../../adapter-sdk/src/usage.js').AgentUsage>;
   private projectCache?: { value: DesktopProject[]; expires: number };
   private loadingProjects?: Promise<DesktopProject[]>;
   constructor(private config: Config) {}
   private connect(): Promise<VerifiedAppPipe> {
-    if (this.client && !this.client.closed) return Promise.resolve(this.client);
     if (this.connecting) return this.connecting;
-    this.connecting = this.open().finally(() => {
-      this.connecting = undefined;
+    if (this.client && !this.client.closed) return Promise.resolve(this.client);
+    const connecting = this.open(this.generation).finally(() => {
+      if (this.connecting === connecting) this.connecting = undefined;
     });
-    return this.connecting;
+    this.connecting = connecting;
+    return connecting;
   }
-  private async open() {
+  private async open(generation: number) {
     const files = await connectorFor(this.config).appTools(this.config);
     if (files.length > 1)
       throw new DeliveryError('检测到多个桌面应用工具端点，请配置 POCKET_CODEX_APP_TOOLS', true);
-    for (const file of files) {
-      const client = new VerifiedAppPipe(this.config, file);
-      try {
-        await client.ready;
-        const catalog = await client.request('tools/list', { threadStartKind: 'all' }, 5000);
-        if (
-          !['create_thread', 'list_projects'].every((name) =>
-            catalog.tools?.some((tool: any) => tool.name === name && tool.namespace === 'codex_app'),
-          )
-        )
-          throw Error();
-        this.available = true;
-        this.client = client;
-        return client;
-      } catch {
-        client.close();
-      }
+    if (!files.length || generation !== this.generation)
+      throw new DeliveryError('本机桌面应用工具不可用', true);
+    const client = new VerifiedAppPipe(this.config, files[0]);
+    this.client = client;
+    this.usageCache = undefined;
+    this.tools.clear();
+    try {
+      await client.ready;
+      const catalog = await client.request('tools/list', { threadStartKind: 'all' }, 5000);
+      if (client.closed) throw new DeliveryError('桌面工具连接不可用', true);
+      this.tools = new Set(
+        (catalog.tools ?? []).filter((t: any) => t.namespace === 'codex_app').map((t: any) => t.name),
+      );
+      if (!this.tools.size) throw new DeliveryError('桌面工具目录尚未就绪', true);
+      return client;
+    } catch {
+      client.close();
+      throw new DeliveryError('本机桌面应用工具不可用', true);
     }
-    this.available = false;
-    throw new DeliveryError('本机桌面应用工具不可用，无法新建会话', true);
   }
   async probe() {
     await this.connect();
@@ -146,7 +162,7 @@ export class DesktopAppTools {
     client: VerifiedAppPipe,
     anchor: string,
     requestId: string,
-    tool: 'list_projects' | 'create_thread',
+    tool: 'list_projects' | 'create_thread' | 'get_usage_limits' | 'navigate_to_codex_page',
     args: any,
   ) {
     const result = await client.request(
@@ -161,9 +177,11 @@ export class DesktopAppTools {
         tool,
         turnId: `pocket-control-${requestId}`,
       },
-      30000,
+      tool === 'get_usage_limits' ? 8000 : 30000,
+      tool !== 'get_usage_limits',
     );
-    if (!result.success) throw new DeliveryError('桌面未确认该会话操作，请检查桌面消息');
+    if (result?.success !== true) throw new DeliveryError('桌面未确认该会话操作，请检查桌面消息');
+    if (tool === 'navigate_to_codex_page') return;
     const text = result.contentItems?.find((item: any) => item.type === 'inputText')?.text;
     try {
       return JSON.parse(text);
@@ -179,8 +197,48 @@ export class DesktopAppTools {
     });
     return this.loadingProjects;
   }
+  async usage(anchor: string, fresh = false) {
+    if (this.loadingUsage) return this.loadingUsage;
+    if (!fresh && this.usageCache && this.usageCache.expires > Date.now() && this.has('get_usage_limits'))
+      return this.usageCache.value;
+    const generation = this.generation;
+    const loading = this.readUsage(anchor)
+      .then((value) => {
+        if (generation !== this.generation) throw new DeliveryError('桌面工具连接已更换', true);
+        this.usageCache = { value, expires: Date.now() + 30000 };
+        return value;
+      })
+      .finally(() => {
+        if (this.loadingUsage === loading) this.loadingUsage = undefined;
+      });
+    this.loadingUsage = loading;
+    return loading;
+  }
+  private async readUsage(anchor: string) {
+    const client = await this.connect();
+    if (!this.has('get_usage_limits'))
+      return {
+        available: false,
+        updatedAt: Date.now(),
+        buckets: [],
+        reason: '此桌面版本尚未提供用量接口',
+      };
+    return codexUsage(await this.call(client, anchor, randomUUID(), 'get_usage_limits', {}));
+  }
+  async openThread(id: string) {
+    const client = await this.connect().catch(() => undefined);
+    if (!client || !this.has('navigate_to_codex_page')) return false;
+    try {
+      await this.call(client, id, randomUUID(), 'navigate_to_codex_page', { threadId: id });
+      return true;
+    } catch (error) {
+      if (error instanceof DeliveryError && error.notSent) return false;
+      throw error;
+    }
+  }
   private async readProjects(anchor: string): Promise<DesktopProject[]> {
     const client = await this.connect();
+    if (!this.has('list_projects')) throw new DeliveryError('此桌面版本未提供项目列表接口', true);
     const result = await this.call(client, anchor, randomUUID(), 'list_projects', {});
     // The catalog uses migrated app-server IDs; Desktop's tool still expects legacy IDs.
     // Only use Desktop's explicit mapping, never project labels or filesystem paths.
@@ -215,6 +273,7 @@ export class DesktopAppTools {
       : undefined;
     if (input.projectId && !project) throw new DeliveryError('项目不可用，请重新选择本机项目', true);
     const client = await this.connect();
+    if (!this.available) throw new DeliveryError('此桌面版本未提供新建会话接口', true);
     const result = await this.call(client, anchor, requestId, 'create_thread', {
       ...(input.title?.trim() ? { title: input.title.trim() } : {}),
       ...(input.model ? { model: input.model } : {}),
@@ -230,8 +289,14 @@ export class DesktopAppTools {
     return id.data;
   }
   close() {
+    this.generation++;
+    this.connecting = undefined;
     this.client?.close();
+    this.client = undefined;
+    this.tools.clear();
     this.projectCache = undefined;
+    this.usageCache = undefined;
+    this.loadingUsage = undefined;
   }
 }
 

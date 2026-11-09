@@ -86,6 +86,7 @@ export interface ChatMember extends ChatUser {
   readSequence: number;
 }
 export interface ChatConversation {
+  readOnlyReason?: string;
   id: string;
   kind: 'direct' | 'group';
   name: string;

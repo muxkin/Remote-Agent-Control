@@ -64,7 +64,7 @@ it('migrates existing identities, message history, attachments, stickers and sig
       assetOrigin: null,
       uploadOrigins: [],
       enrollmentSecret: 'migration-test-secret-enrollment-32',
-      messaging: { database: sourcePath },
+      messaging: { humanContacts: true, database: sourcePath },
     }),
   ).rejects.toThrow('一次性');
   const originalBytes = Buffer.from('migration-private-bytes'),
@@ -184,7 +184,7 @@ it('migrates existing identities, message history, attachments, stickers and sig
     assetOrigin: null,
     uploadOrigins: [],
     enrollmentSecret: 'migration-test-secret-enrollment-32',
-    messaging: { database: candidatePath },
+    messaging: { humanContacts: true, database: candidatePath },
   });
   cleanup.push(() => relay.app.close());
   for (const path of ['/register', '/login', '/password', '/crypto/upgrade', '/crypto/agent'])

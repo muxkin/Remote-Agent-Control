@@ -225,7 +225,11 @@ export default memo(function RichMessage({
   );
   const source = markdownSource(text);
   return (
-    <div className="markdown">
+    <div
+      className="markdown"
+      onClick={math ? (event) => math.copyFormulaFromEvent(event.nativeEvent) : undefined}
+      onKeyDown={math ? (event) => math.copyFormulaFromEvent(event.nativeEvent) : undefined}
+    >
       <Markdown
         remarkPlugins={[
           ...(preserveLineBreaks ? [remarkUserBreaks] : []),
@@ -234,7 +238,12 @@ export default memo(function RichMessage({
             : [remarkFileCitations, remarkGfm, remarkChemicalFormulas]),
         ]}
         rehypePlugins={
-          math ? [[math.rehypeKatex, { throwOnError: false, strict: 'ignore', trust: false }]] : []
+          math
+            ? [
+                [math.rehypeKatex, { throwOnError: false, strict: 'ignore', trust: false }],
+                math.rehypeMathCopy,
+              ]
+            : []
         }
         urlTransform={(url) => (localReference(url) ? url : defaultUrlTransform(url))}
         components={components}

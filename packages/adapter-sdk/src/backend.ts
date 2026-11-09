@@ -62,6 +62,7 @@ export interface AgentBackend extends EventEmitter {
   exportLog?(id: string): Promise<string>;
   fileReferences?(id: string, query: string): Promise<{ path: string; name: string }[]>;
   models(): Promise<ModelCatalog>;
+  usage?(options?: { fresh?: boolean }): Promise<import('./usage.js').AgentUsage>;
   skills(id: string): Promise<SkillChoice[]>;
   plugins(id: string): Promise<PluginChoice[]>;
   validateSelection(id: string, skills: string[], plugins: string[]): Promise<void>;

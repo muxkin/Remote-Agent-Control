@@ -8,6 +8,9 @@ import { DEFAULT_BACKEND } from '../shared/backends.js';
 import type { Operation, OperationState } from '../shared/types.js';
 
 export class Operations extends EventEmitter {
+  get dispatching() {
+    return this.busy.size > 0;
+  }
   private onState = (id: string, state: OperationObservation[]) => this.reconcile(id, state);
   private onCreated = (requestId: string, conversationId: string) => {
     const operation = this.store.operation(requestId, undefined, this.backendId);

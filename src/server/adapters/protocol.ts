@@ -12,6 +12,7 @@ type RemoteMethods =
   | 'inlineMedia'
   | 'fullMessage'
   | 'controls'
+  | 'usage'
   | 'exportLog'
   | 'fileReferences'
   | 'models'
@@ -36,6 +37,7 @@ export const METHODS = [
   'inlineMedia',
   'fullMessage',
   'controls',
+  'usage',
   'exportLog',
   'fileReferences',
   'models',
@@ -58,6 +60,7 @@ export interface RemoteError {
   kind: 'delivery' | 'selection' | 'error';
   notSent?: boolean;
   outcome?: 'failed';
+  code?: 'ENOENT';
 }
 export interface HostSnapshot {
   generation: number;
@@ -66,7 +69,7 @@ export interface HostSnapshot {
 }
 export interface Ready extends HostSnapshot {
   maxUploadBytes?: number;
-  optionalMethods: ('controls' | 'exportLog' | 'fileReferences' | 'attachment')[];
+  optionalMethods: ('controls' | 'exportLog' | 'fileReferences' | 'attachment' | 'usage')[];
 }
 export const initialize = new RequestType<
   { generation: number; sdk: 1; context: AdapterContext },

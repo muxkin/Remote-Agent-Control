@@ -152,7 +152,7 @@ it('enforces Node WebSocket traffic in both directions without closing the share
     webRoot: '/nonexistent',
     assetOrigin: null,
     uploadOrigins: [],
-    messaging: { resourcePolicy: { resolve: async () => policy } },
+    messaging: { humanContacts: true, resourcePolicy: { resolve: async () => policy } },
   });
   const url = await relay.app.listen({ host: '127.0.0.1', port: 0 }),
     sockets: WebSocket[] = [];
@@ -307,6 +307,7 @@ it('exports decrypted bytes and preserves encrypted message verification after c
     uploadOrigins: [],
     enrollmentSecret: 'resource-test-enrollment-secret-32',
     messaging: {
+      humanContacts: true,
       database: path,
       resourcePolicy: { resolve: async () => ({ ...policy, storageBytes: 1024 }) },
     },

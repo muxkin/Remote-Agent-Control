@@ -63,7 +63,7 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const errors: string[] = [],
   checks: string[] = [];
 page.on('pageerror', (error) => errors.push(error.message));
-const title = page.locator('.chat-head h2');
+const title = page.locator('.chat-head .conversation-title');
 const draft = page.getByLabel('消息', { exact: true });
 const current = () => new URL(page.url()).searchParams.get('thread');
 async function openFirst() {

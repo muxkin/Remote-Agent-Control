@@ -50,6 +50,18 @@ async function selectChat() {
   await page.getByRole('button', { name: /测试会话/ }).click();
   await expect(page.getByLabel('消息', { exact: true })).toBeEnabled({ timeout: 20000 });
 }
+async function previewTestAttachment() {
+  await page.getByRole('button', { name: '测试附件', exact: true }).click();
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup'),
+    page
+      .getByRole('dialog', { name: '附件操作：fixture.txt' })
+      .getByRole('button', { name: '预览', exact: true })
+      .click(),
+  ]);
+  await popup.waitForURL('blob:**', { timeout: 30000 });
+  return popup;
+}
 try {
   const pair = store.mintPairing();
   await page.goto(`${config.origin}/#pair=${pair.code}&host=${host.identity.peerId}`);
@@ -72,10 +84,7 @@ try {
   expect(await page.evaluate(() => (window as any).__qa.peers.length)).toBe(peers);
   report.checks.connectionReusedAcrossChats = true;
   const before = relay.counters.bulkBytes;
-  const popupPromise = context.waitForEvent('page');
-  await page.getByRole('button', { name: '测试附件', exact: true }).click();
-  const popup = await popupPromise;
-  await popup.waitForURL('blob:**', { timeout: 30000 });
+  const popup = await previewTestAttachment();
   await expect.poll(() => popup.evaluate(() => document.body.innerText.length)).toBeGreaterThan(1000000);
   expect(relay.counters.bulkBytes).toBe(before);
   await popup.close();
@@ -142,10 +151,7 @@ try {
   expect(relay.counters.bulkBytes).toBeGreaterThan(beforeRelayUpload + 2 * 1024 * 1024);
   report.checks.freshUploadOverEncryptedRelay = true;
   const beforeCache = relay.counters.bulkBytes;
-  const secondPopup = context.waitForEvent('page');
-  await page.getByRole('button', { name: '测试附件', exact: true }).click();
-  const second = await secondPopup;
-  await second.waitForURL('blob:**');
+  const second = await previewTestAttachment();
   await second.close();
   expect(relay.counters.bulkBytes).toBe(beforeCache);
   report.checks.attachmentCacheAvoidsDownload = true;

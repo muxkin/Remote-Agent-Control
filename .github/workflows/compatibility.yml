@@ -98,5 +98,9 @@ jobs:
       - run: npm run test:conversation-replay
       - run: npm run test:messaging
       - run: npm run test:messaging-design
+      - run: npm run test:im-calls
+      - run: npm run test:browser
       - run: npm run test:composer
       - run: npm run test:frontend
+      - run: npm run test:layout
+      - run: npm run test:controls

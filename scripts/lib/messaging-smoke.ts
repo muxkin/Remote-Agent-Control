@@ -10,6 +10,14 @@ export async function saveRecoveryCode(page: Page) {
   await page.getByRole('button', { name: '保存后继续', exact: true }).click();
 }
 
+export async function openChatMore(page: Page, item: '发起交互请求') {
+  await page.getByRole('button', { name: '更多功能', exact: true }).click();
+  await page
+    .getByRole('menu', { name: '更多功能' })
+    .getByRole('menuitem', { name: item, exact: true })
+    .click();
+}
+
 export async function registerAgentFixture(
   origin: string,
   registration: { invitation: string; username: string; displayName: string },

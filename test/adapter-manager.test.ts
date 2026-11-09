@@ -1,9 +1,10 @@
-import { afterEach, expect, it } from 'vitest';
-import { mkdtempSync, cpSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { afterEach, expect, it, vi } from 'vitest';
+import { mkdtempSync, cpSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { AdapterManager } from '../src/server/adapters/manager.js';
+import type { AdapterProxy } from '../src/server/adapters/proxy.js';
 import { adapterDirectory, loadCatalog, saveCatalog, writeJson } from '../src/server/adapters/catalog.js';
 import { fixtureConfig } from './helpers.js';
 import { readInstances } from '../src/server/adapters/config.js';
@@ -40,30 +41,37 @@ it('applies per-instance upgrades and rollback through the supervisor while an i
   await manager.start();
   expect(manager.get('missing').status().connected).toBe(false);
   expect(manager.get('one').status().connected).toBe(true);
-  const two = (manager.get('two') as any).pid;
-  async function change(target: string) {
+  const one = manager.get('one') as AdapterProxy,
+    two = (manager.get('two') as AdapterProxy).pid;
+  function queue(target: string, from?: string) {
     const name = `${randomUUID()}.json`;
-    writeJson(join(adapterDirectory(config), 'requests', name), { instanceId: 'one', target });
-    await expect
-      .poll(
-        () => {
-          try {
-            return JSON.parse(readFileSync(join(adapterDirectory(config), 'results', name), 'utf8'));
-          } catch {
-            return null;
-          }
-        },
-        { timeout: 20000 },
-      )
-      .toMatchObject({ ok: true });
+    writeJson(join(adapterDirectory(config), 'requests', name), { instanceId: 'one', target, from });
+    return join(adapterDirectory(config), 'results', name);
   }
-  await change('test-adapter@1.1.0');
+  function result(path: string) {
+    return expect.poll(() => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null), {
+      timeout: 20000,
+    });
+  }
+  const oldPid = one.pid;
+  const busy = vi.spyOn(one, 'activeWrites', 'get').mockReturnValue(1);
+  const automatic = queue('test-adapter@1.1.0', 'test-adapter@1.0.0');
+  try {
+    await expect.poll(() => busy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(existsSync(automatic)).toBe(false);
+    expect(one.pid).toBe(oldPid);
+  } finally {
+    busy.mockRestore();
+  }
+  await result(automatic).toMatchObject({ ok: true });
   expect(loadCatalog(config).instances.one).toEqual({
     current: 'test-adapter@1.1.0',
     previous: 'test-adapter@1.0.0',
   });
-  await change('test-adapter@1.0.0');
-  expect((manager.get('two') as any).pid).toBe(two);
+  await result(queue('test-adapter@1.0.0')).toMatchObject({ ok: true });
+  await result(queue('test-adapter@1.1.0', 'test-adapter@0.9.0')).toMatchObject({ ok: false });
+  expect(loadCatalog(config).instances.one.current).toBe('test-adapter@1.0.0');
+  expect((manager.get('two') as AdapterProxy).pid).toBe(two);
   const status = readFileSync(join(adapterDirectory(config), 'status.json'), 'utf8');
   expect(status).not.toContain('config');
 }, 60000);

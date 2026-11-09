@@ -69,6 +69,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   private subscriptions = new Map<string, Subscription>();
   private stopped = true;
   private reconnect?: NodeJS.Timeout;
+  private appToolsProbe?: NodeJS.Timeout;
   private attempt = 0;
   private version: string | null = null;
   private ready = false;
@@ -100,7 +101,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
         questions: writesEnabled,
         approvals: writesEnabled,
         permissionRequests: writesEnabled ? 'experimental' : false,
-        openThread: writesEnabled && profile.nativeOpen,
+        openThread: writesEnabled && (profile.nativeOpen || this.appTools.has('navigate_to_codex_page')),
         elicitationForms: writesEnabled ? 'experimental' : false,
         newThread: writesEnabled && this.appTools.available,
         queue: writesEnabled,
@@ -122,6 +123,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
       transport.on('broadcast', (message) => this.receive(message));
       transport.on('disconnect', (reason: string) => {
         if (this.transport !== transport) return;
+        clearTimeout(this.appToolsProbe);
         this.ready = false;
         this.lastError = reason;
         for (const [id, sub] of this.subscriptions) {
@@ -139,10 +141,11 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
         return;
       }
       this.ready = true;
-      await this.appTools.probe().catch(() => {});
       this.lastError = null;
       this.attempt = 0;
-      this.emit('status', this.status());
+      const status = this.status();
+      this.emit('status', status);
+      void this.probeAppTools(transport, status.capabilities);
       await Promise.allSettled([...this.subscriptions.keys()].map((id) => this.discover(id)));
     } catch (error) {
       this.ready = false;
@@ -150,6 +153,17 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
       this.emit('status', this.status());
       this.scheduleReconnect();
     }
+  }
+  private async probeAppTools(transport: RpcTransport, previous: GatewayStatus['capabilities']) {
+    if (this.stopped || !this.ready || this.transport !== transport) return;
+    await this.appTools.probe().catch(() => {});
+    if (this.stopped || !this.ready || this.transport !== transport) return;
+    const status = this.status();
+    const current = status.capabilities;
+    if (current.openThread !== previous.openThread || current.newThread !== previous.newThread)
+      this.emit('status', status);
+    this.appToolsProbe = setTimeout(() => void this.probeAppTools(transport, current), 5000);
+    this.appToolsProbe.unref();
   }
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnect) return;
@@ -363,6 +377,9 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   disabledPlugins(id: string): string[] {
     return this.subscriptions.get(id)?.state?.latestThreadSettings?.disabledPluginIds ?? [];
   }
+  usage(anchor: string, fresh?: boolean) {
+    return this.appTools.usage(anchor, fresh);
+  }
   async openThread(id: string): Promise<void> {
     if (!this.status().writesEnabled || !z.string().uuid().safeParse(id).success)
       throw new DeliveryError('桌面未连接或版本不兼容', true);
@@ -373,10 +390,15 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
       return !!view?.owner && view.synchronized && view.runtimeStatus !== 'notLoaded';
     };
     if (ready()) return;
+    let navigationError: DeliveryError | undefined;
     try {
-      await connectorFor(this.config).openThread(id);
-    } catch {
-      throw new DeliveryError('本机桌面链接处理程序不可用', true);
+      const requested = await this.appTools.openThread(id);
+      if (ready()) return;
+      if (!requested) await connectorFor(this.config).openThread(id);
+    } catch (error) {
+      if (!(error instanceof DeliveryError) || error.notSent) throw error;
+      // An inconclusive reply may still be followed by a valid desktop snapshot.
+      navigationError = error;
     }
     const deadline = Date.now() + 12000;
     while (Date.now() < deadline) {
@@ -385,7 +407,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
       if (ready()) return;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new DeliveryError('已请求桌面打开，但尚未取得会话状态');
+    throw navigationError ?? new DeliveryError('已请求桌面打开，但尚未取得会话状态');
   }
   async control(
     id: string,
@@ -765,6 +787,8 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
     this.stopped = true;
     this.appTools.close();
     clearTimeout(this.reconnect);
+    this.reconnect = undefined;
+    clearTimeout(this.appToolsProbe);
     for (const [id, sub] of this.subscriptions) this.follow(id, sub, false);
     this.transport?.close();
     this.ready = false;

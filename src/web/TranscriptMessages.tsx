@@ -8,12 +8,14 @@ export function TranscriptMessages({
   activeTurnId,
   requests = [],
   agent,
+  codex,
 }: {
   messages: Message[];
   threadId: string;
   activeTurnId?: string | null;
   requests?: ConversationRequest[];
   agent: { name: string; avatar?: string };
+  codex: boolean;
 }) {
   const groups: { key: string; tools: boolean; messages: Message[] }[] = [];
   for (const original of messages) {
@@ -25,7 +27,7 @@ export function TranscriptMessages({
       const suffix = question.questions!.map((q) => q.question).join('\n\n');
       if (message.text.endsWith(suffix))
         message = { ...message, text: message.text.slice(0, -suffix.length).trimEnd() };
-      if (!message.text && !message.attachments?.length) continue;
+      if (!message.text && !message.attachments?.length && !message.codex) continue;
     }
     // Viewed images belong to their original tool activity, just like command output.
     const tools = message.role === 'tool';
@@ -41,7 +43,7 @@ export function TranscriptMessages({
         )}
         {m.role === 'user' ? '你' : m.role === 'assistant' ? agent.name : '工具活动'}
       </div>
-      <MessageContent message={m} threadId={threadId} streaming={m.turnId === activeTurnId} />
+      <MessageContent message={m} threadId={threadId} streaming={m.turnId === activeTurnId} codex={codex} />
     </article>
   );
   return groups.map((group) =>
