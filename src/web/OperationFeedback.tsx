@@ -8,6 +8,8 @@ const actions: Record<Operation['kind'], string> = {
   queue: '加入队列',
   'queue-remove': '移除排队',
   create: '创建会话',
+  rename: '会话改名',
+  fork: '创建分支',
   open: '打开会话',
   interrupt: '停止任务',
   respond: '提交回复',

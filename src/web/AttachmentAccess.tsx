@@ -1,6 +1,7 @@
 import { createContext, useContext } from 'react';
 export interface AttachmentResource {
   url: string;
+  blob?: Blob;
   name: string;
   mime: string;
   size: number;

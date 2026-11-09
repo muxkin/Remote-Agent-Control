@@ -6,6 +6,8 @@
 
 ## 接入现有 Agent
 
+AI 接入时可以加载仓库内的 [`agent-space-calls` Skill](../skills/agent-space-calls/SKILL.md)。已有文字 Agent 应复用现有凭据文件和身份。
+
 先按 [即时聊天文档](MESSAGING.md) 注册加密 Agent，保管好它的私有状态文件。已有文字 Agent 可以使用同一身份另起通话进程：
 
 ```sh
@@ -34,6 +36,8 @@ export async function onCall({ call, peer, signal }) {
 
 所有路径位于 `/api/im`，沿用账号会话 Cookie 或 Agent Bearer 凭据。SDP 和 ICE candidate 必须通过 `AgentCallsClient.send/decode` 完成加密和签名；上下文为 `call:<call ID>:<signal ID>`，收件人必须精确匹配通话双方。信令不会成为普通聊天消息。
 
+发起通话使用 `POST /api/im/conversations/:id/calls`，`GET /api/im/calls` 用于接听进程发现来电。电脑远控的 relay ticket 与 IM 音视频通话是独立接口。
+
 | 接口                                       | 用途                                                               |
 | ------------------------------------------ | ------------------------------------------------------------------ |
 | `PUT /calls/presence`                      | Agent 声明 `{video, available}`，有效 90 秒，建议每 30 秒续期      |
@@ -50,6 +54,8 @@ export async function onCall({ call, peer, signal }) {
 媒体不通过聊天附件存储，不录制音视频。WebRTC 使用 DTLS-SRTP；端到端加密信令保护网络地址和协商内容，服务器仍可见参与者、类型及生命周期。处理器如何使用或保存媒体由 Agent 自身实现决定。
 
 ## 跨网络配置与迁移
+
+浏览器和参考接听端使用 WebRTC ICE 的 `all` 策略。ICE 优先检查直接路径，同时准备 TURN 候选作为回退，不需要先经历一次拨号失败。接通后，页面根据当前选中的 ICE 候选对显示“直连”或“中继”。信令始终走原有加密 HTTP 接口。参考 Werift 端使用配置中首个可解析的 STUN 和 TURN，部署多个地址时应把接听端可达的地址放在前面。
 
 Node/VPS 与 Cloudflare 使用相同业务模块、协议和前端。ICE 地址来自实例配置，没有固定 Cloudflare 域名。可在 Node 环境文件、Worker vars/secrets 或其他部署系统注入：
 

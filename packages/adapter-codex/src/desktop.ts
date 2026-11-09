@@ -7,6 +7,7 @@ import { PluginCatalog } from './plugins.js';
 import { SelectionError } from '../../../src/server/selection-error.js';
 import { asyncReply } from './async-questions.js';
 import { DesktopAppTools } from './app-tools.js';
+import { forkCodexReply, replyForkExecutable } from './reply-fork.js';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { applyPatches, enablePatches, type Patch } from 'immer';
@@ -64,6 +65,7 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   }
   private transport: RpcTransport | null = null;
   private appTools: DesktopAppTools;
+  private replyForkExecutable?: string;
   private skillCatalog: SkillCatalog;
   private pluginCatalog: PluginCatalog;
   private subscriptions = new Map<string, Subscription>();
@@ -104,6 +106,9 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
         openThread: writesEnabled && (profile.nativeOpen || this.appTools.has('navigate_to_codex_page')),
         elicitationForms: writesEnabled ? 'experimental' : false,
         newThread: writesEnabled && this.appTools.available,
+        renameThread: writesEnabled && this.appTools.has('set_thread_title'),
+        forkThread: writesEnabled && this.appTools.has('fork_thread'),
+        forkFromTurn: writesEnabled && !!this.replyForkExecutable,
         queue: writesEnabled,
       },
     };
@@ -115,9 +120,12 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
   private async connect(): Promise<void> {
     if (this.stopped) return;
     try {
-      this.version = await connectorFor(this.config)
-        .version(this.config.desktopRoot)
-        .catch(() => null);
+      [this.version, this.replyForkExecutable] = await Promise.all([
+        connectorFor(this.config)
+          .version(this.config.desktopRoot)
+          .catch(() => null),
+        replyForkExecutable(this.config),
+      ]);
       const transport = this.factory();
       this.transport = transport;
       transport.on('broadcast', (message) => this.receive(message));
@@ -160,7 +168,12 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
     if (this.stopped || !this.ready || this.transport !== transport) return;
     const status = this.status();
     const current = status.capabilities;
-    if (current.openThread !== previous.openThread || current.newThread !== previous.newThread)
+    if (
+      current.openThread !== previous.openThread ||
+      current.newThread !== previous.newThread ||
+      current.renameThread !== previous.renameThread ||
+      current.forkThread !== previous.forkThread
+    )
       this.emit('status', status);
     this.appToolsProbe = setTimeout(() => void this.probeAppTools(transport, current), 5000);
     this.appToolsProbe.unref();
@@ -418,6 +431,15 @@ export class DesktopAdapter extends EventEmitter implements DesktopBackend {
     if (kind === 'create') {
       if (!this.status().writesEnabled) throw new DeliveryError('桌面未连接或处于只读模式', true);
       return this.appTools.create(id, requestId, JSON.parse(input));
+    }
+    if (kind === 'rename' || kind === 'fork') {
+      if (!this.status().writesEnabled || !z.string().uuid().safeParse(id).success)
+        throw new DeliveryError('桌面未连接、处于只读模式，或会话标识无效', true);
+      const value = JSON.parse(input);
+      if (kind === 'rename') return this.appTools.rename(id, requestId, value.title);
+      if (value.lastTurnId === undefined) return this.appTools.fork(id, requestId);
+      if (!this.replyForkExecutable) throw new DeliveryError('当前桌面版本暂不支持从回复创建分支', true);
+      return forkCodexReply(this.replyForkExecutable, this.config.codexHome, id, value.lastTurnId);
     }
     const sub = this.subscriptions.get(id);
     const view = this.view(id);

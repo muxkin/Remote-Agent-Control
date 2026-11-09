@@ -105,7 +105,7 @@ class VerifiedAppPipe {
     this.child.kill();
   }
 }
-/** A second Desktop-owned socket, restricted to explicit project, creation, navigation and read-only usage tools. No general tool forwarding. */
+/** A second Desktop-owned socket with an allowlist of Desktop tools. */
 export class DesktopAppTools {
   get available() {
     return this.has('create_thread') && this.has('list_projects');
@@ -162,7 +162,13 @@ export class DesktopAppTools {
     client: VerifiedAppPipe,
     anchor: string,
     requestId: string,
-    tool: 'list_projects' | 'create_thread' | 'get_usage_limits' | 'navigate_to_codex_page',
+    tool:
+      | 'list_projects'
+      | 'create_thread'
+      | 'get_usage_limits'
+      | 'navigate_to_codex_page'
+      | 'set_thread_title'
+      | 'fork_thread',
     args: any,
   ) {
     const result = await client.request(
@@ -181,7 +187,7 @@ export class DesktopAppTools {
       tool !== 'get_usage_limits',
     );
     if (result?.success !== true) throw new DeliveryError('桌面未确认该会话操作，请检查桌面消息');
-    if (tool === 'navigate_to_codex_page') return;
+    if (tool === 'navigate_to_codex_page' || tool === 'set_thread_title') return;
     const text = result.contentItems?.find((item: any) => item.type === 'inputText')?.text;
     try {
       return JSON.parse(text);
@@ -287,6 +293,24 @@ export class DesktopAppTools {
     if (!id.success || result.hostId !== 'local')
       throw new DeliveryError('桌面尚未返回本机会话标识，请在列表核对');
     return id.data;
+  }
+  async rename(id: string, requestId: string, title: string) {
+    const client = await this.connect();
+    if (!this.has('set_thread_title')) throw new DeliveryError('此桌面版本未提供会话改名接口', true);
+    await this.call(client, id, requestId, 'set_thread_title', { source: 'codex', threadId: id, title });
+    return null;
+  }
+  async fork(id: string, requestId: string) {
+    const client = await this.connect();
+    if (!this.has('fork_thread')) throw new DeliveryError('此桌面版本未提供会话分支接口', true);
+    const result = await this.call(client, id, requestId, 'fork_thread', {
+      threadId: id,
+      environment: { type: 'same-directory' },
+    });
+    const branch = z.string().uuid().safeParse(result?.threadId);
+    if (!branch.success || branch.data === id || (result.hostId && result.hostId !== 'local'))
+      throw new DeliveryError('桌面尚未返回本机分支标识，请在会话列表核对');
+    return branch.data;
   }
   close() {
     this.generation++;

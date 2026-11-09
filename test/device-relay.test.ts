@@ -152,6 +152,33 @@ async function connect(
   return DeviceLink.authenticate(channel, auth);
 }
 describe('device relay and shared business dispatcher', () => {
+  it('cancels a chat watch even while its history lookup is still pending', async () => {
+    const { config, pairing, identity, host, registry } = await setup();
+    const backend = registry.get();
+    const summary = await backend.history.get(THREAD);
+    let resolveLookup!: (value: typeof summary) => void;
+    const lookup = new Promise<typeof summary>((resolve) => {
+      resolveLookup = resolve;
+    });
+    const get = vi.spyOn(backend.history, 'get').mockReturnValueOnce(lookup);
+    const acquire = vi.spyOn(backend, 'acquire');
+    const link = await connect(
+      config.origin,
+      identity.peerId,
+      await createIdentity(),
+      createHash('sha256').update(pairing.code).digest('hex'),
+      { type: 'pair', protocol: 2, sessionId: crypto.randomUUID(), code: pairing.code, name: 'switch-test' },
+    );
+    const watching = link.request('watch', { threadId: THREAD });
+    await vi.waitFor(() => expect(get).toHaveBeenCalledOnce());
+    await link.request('unwatch', { threadId: THREAD });
+    resolveLookup(summary);
+    await watching;
+    const session = [...(host as any).sessions.values()][0] as any;
+    expect(session.subscriptions.size).toBe(0);
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
   it('allows rapid page reloads without waiting for disconnected sessions to expire', async () => {
     const { config, pairing, identity, host } = await setup();
     const phone = await createIdentity();

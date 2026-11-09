@@ -260,16 +260,21 @@ it('encrypts Agent streams and group membership changes without granting new mem
   const { conversation } = await alice.group('Group', [b.account.user!.id, registered.user.id]);
   const cid = conversation.id;
   const original = await agent.send(cid, '', 'stream-stable', { state: 'streaming' });
-  await agent.updateMessage(cid, original.message.id, 1, 'stream-private-content');
+  const activities = [{ kind: 'search', status: 'in_progress' }] as const;
+  await agent.updateMessage(cid, original.message.id, 1, 'stream-private-content', 'streaming', [
+    ...activities,
+  ]);
   const retried = await agent.send(cid, '', 'stream-stable', { state: 'streaming' });
   expect(retried.message.text).toBe('stream-private-content');
   await agent.updateMessage(cid, original.message.id, 1, 'stream-private-content');
-  expect((await bob.history(cid)).messages[0].text).toBe('stream-private-content');
+  expect((await bob.history(cid)).messages[0]).toMatchObject({ text: 'stream-private-content', activities });
   await alice.request(`/groups/${cid}`, 'PATCH', { add: [c.account.user!.id] });
   expect((await carol.history(cid)).messages[0].text).toContain('无法解密');
   await alice.request(`/groups/${cid}`, 'PATCH', { remove: b.account.user!.id });
   await agent.updateMessage(cid, original.message.id, 2, 'after-membership-change', 'complete');
   const raw = await alice.raw<{ message: any }>(`/conversations/${cid}/messages/${original.message.id}`);
+  expect(raw.message.activities).toBeUndefined();
+  expect((await carol.history(cid)).messages[0].activities).toEqual(activities);
   expect(Object.keys(parseEnvelope(raw.message.text).recipients)).not.toContain(b.account.user!.id);
   expect((await carol.history(cid)).messages[0].text).toBe('after-membership-change');
   await expect(bob.history(cid)).rejects.toThrow();

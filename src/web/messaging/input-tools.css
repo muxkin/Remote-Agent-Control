@@ -2,6 +2,28 @@
 .send-mobile-label {
   display: none;
 }
+.im-agent-activities {
+  max-width: 320px;
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.im-agent-activities summary {
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  cursor: pointer;
+}
+.im-agent-activities ul {
+  margin: 4px 0 0;
+  padding: 0 9px;
+  list-style: none;
+}
+.im-agent-activities li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
 .im-message.from-agent:not(.mine) .im-bubble {
   background: transparent;
   border: 0;

@@ -13,11 +13,12 @@ import {
 } from '../shared/files';
 import { deviceSession as session } from './device-session';
 import { uploadToStorage } from './storage-upload';
+import type { AttachmentResource } from './AttachmentAccess';
 
 const owners = new Map<string, string>();
 const inflight = new Map<string, Promise<Uint8Array>>();
 const providers = new Map<string, { threadId: string; manifest: FileManifest }>();
-const urls = new Map<string, string>();
+const urls = new Map<string, Pick<AttachmentResource, 'url' | 'blob'>>();
 const waited = new Set<string>();
 let generation = 0;
 function fileGuard(backendId = session.backendId) {
@@ -34,7 +35,7 @@ export function clearFileProviders() {
   owners.clear();
   inflight.clear();
   waited.clear();
-  for (const url of urls.values()) if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+  for (const { url } of urls.values()) if (url.startsWith('blob:')) URL.revokeObjectURL(url);
   urls.clear();
   providers.clear();
 }
@@ -292,7 +293,7 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
   const metadata = { name: manifest.name, mime: manifest.mime, size: manifest.size, expiresAt: 0 };
   const key = session.contentKey(`url:${manifest.sha256}:${manifest.mime}`, backendId),
     old = urls.get(key);
-  if (old) return { url: old, ...metadata };
+  if (old) return { ...old, ...metadata };
   if (manifest.size > 8 * BLOCK_SIZE && !navigator.serviceWorker?.controller) {
     if ('serviceWorker' in navigator)
       await new Promise<void>((resolve) => {
@@ -316,7 +317,7 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
     const id = crypto.randomUUID();
     providers.set(id, { manifest, threadId });
     const url = `/local-files/${id}`;
-    urls.set(key, url);
+    urls.set(key, { url });
     return { url, ...metadata };
   }
   const parts: BlobPart[] = [],
@@ -328,14 +329,15 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
   }
   if (bytesToHex(hash.digest()) !== manifest.sha256) throw Error('附件整体校验失败');
   check();
-  const url = URL.createObjectURL(new Blob(parts, { type: manifest.mime }));
-  urls.set(key, url);
+  const blob = new Blob(parts, { type: manifest.mime });
+  const url = URL.createObjectURL(blob);
+  urls.set(key, { url, blob });
   if (urls.size > 32) {
     const entry = urls.entries().next().value!;
-    if (entry[1].startsWith('blob:')) URL.revokeObjectURL(entry[1]);
+    if (entry[1].url.startsWith('blob:')) URL.revokeObjectURL(entry[1].url);
     urls.delete(entry[0]);
   }
-  return { url, ...metadata };
+  return { url, blob, ...metadata };
 }
 
 /** Both Blob and streaming downloads keep the original Unicode filename and extension. */

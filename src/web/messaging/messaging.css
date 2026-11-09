@@ -461,15 +461,18 @@
   font-size: 13px;
   padding: 40px;
 }
-.im-jump {
+.im-compose-wrap > .im-jump {
   position: absolute;
-  right: 24px;
-  bottom: 160px;
-  box-shadow: 0 2px 10px #0001;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  right: 20px;
+  bottom: 100%;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: 0 2px 8px var(--shadow);
 }
 .im-compose-wrap {
   flex-shrink: 0;

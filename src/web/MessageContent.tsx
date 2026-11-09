@@ -3,6 +3,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import type { Message } from '../shared/types';
 import { codexDisplayMessage } from '../shared/codex-transcript';
 import { MemoryCitations } from './CodexTranscriptMetadata';
+import { CodexReplyActions } from './CodexReplyActions';
 import { DiffView } from './DiffView';
 const UserAttachments = lazy(() => import('./UserAttachments'));
 const RichMessage = lazy(() => import('./RichMessage'));
@@ -12,11 +13,15 @@ export function MessageContent({
   threadId,
   streaming,
   codex,
+  onFork,
+  forkDisabled,
 }: {
   message: Message;
   threadId: string;
   streaming: boolean;
   codex: boolean;
+  onFork?: () => void;
+  forkDisabled?: boolean;
 }) {
   const [full, setFull] = useState<Message | null>(null);
   const [busy, setBusy] = useState(false);
@@ -27,26 +32,23 @@ export function MessageContent({
   }, [message.id, message.text, message.details]);
   const displayed = (full && codex ? codexDisplayMessage(full) : full) ?? message;
   const metadata = displayed.codex ?? message.codex;
+  const contentPath = `/threads/${encodeURIComponent(threadId)}/content?messageId=${encodeURIComponent(message.id)}`;
+  async function fetchFull(backendId: string): Promise<Message> {
+    const response = await remoteFetch(`/api${contentPath}`, undefined, backendId);
+    const data = await response.json();
+    if (!response.ok) throw Error(data.error ?? '无法获取完整内容');
+    return data.message;
+  }
   async function expand() {
     const backendId = deviceSession.backendId;
     setBusy(true);
     try {
-      const cached = await deviceSession.cached<{ message: Message }>(
-        `/threads/${encodeURIComponent(threadId)}/content?messageId=${encodeURIComponent(message.id)}`,
-        backendId,
-      );
+      const cached = await deviceSession.cached<{ message: Message }>(contentPath, backendId);
       if (cached) {
         setFull(cached.message);
         setBusy(false);
       }
-      const response = await remoteFetch(
-        `/api/threads/${encodeURIComponent(threadId)}/content?messageId=${encodeURIComponent(message.id)}`,
-        undefined,
-        backendId,
-      );
-      const data = await response.json();
-      if (!response.ok) throw Error(data.error ?? '无法获取完整内容');
-      setFull(data.message);
+      setFull(await fetchFull(backendId));
       setError('');
     } catch (error) {
       setError((error as Error).message);
@@ -121,6 +123,22 @@ export function MessageContent({
           </button>
           {error && <p role="alert">{error}</p>}
         </div>
+      )}
+      {codex && displayed.role === 'assistant' && !streaming && (displayed.text || onFork) && (
+        <CodexReplyActions
+          text={displayed.text}
+          loadText={
+            displayed.truncated
+              ? async () => {
+                  const full = codexDisplayMessage(await fetchFull(deviceSession.backendId));
+                  if (!full?.text || full.truncated) throw Error('无法获取完整回复');
+                  return full.text;
+                }
+              : undefined
+          }
+          onFork={onFork}
+          forkDisabled={forkDisabled}
+        />
       )}
     </>
   );

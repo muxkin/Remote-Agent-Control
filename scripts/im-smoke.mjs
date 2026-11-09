@@ -128,37 +128,74 @@ try {
     (c) => c.kind === 'group',
   );
   const id = group.id;
+  const csvSource = 'sample,energy\ndemo_a,-0.31\n"demo_b, replicate",-0.29\n';
   await page.getByLabel('聊天消息').fill('请整理这批演示数据，给出检查思路。');
   await page.locator('input[type=file]').setInputFiles({
     name: '计算结果.csv',
     mimeType: 'text/csv',
-    buffer: Buffer.from('sample,energy\ndemo_a,-0.31\ndemo_b,-0.29\n'),
+    buffer: Buffer.from(csvSource),
   });
   await expect(page.getByRole('button', { name: '发送消息', exact: true })).toBeEnabled();
+  let releaseSend;
+  const holdSend = new Promise((resolve) => {
+    releaseSend = resolve;
+  });
+  const sendPath = `**/api/im/conversations/${id}/messages`;
+  const holdPost = async (route) => {
+    if (route.request().method() === 'POST') await holdSend;
+    await route.continue();
+  };
+  await page.route(sendPath, holdPost);
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
-  await expect(page.getByText('请整理这批演示数据，给出检查思路。', { exact: true })).toBeVisible();
+  const outgoing = page.locator('.im-message.outgoing-message');
+  const composer = page.getByLabel('聊天消息');
+  await expect(outgoing.getByRole('status')).toHaveText('正在发送…');
+  await expect(outgoing).toContainText('计算结果.csv');
+  await expect(composer).toHaveValue('');
+  await expect(composer).toBeEditable();
+  await expect(page.locator('.im-compose-wrap .send-button')).toHaveAttribute('aria-busy', 'true');
+  await composer.fill('另一条待写消息');
+  await page.screenshot({ path: out + '/desktop-sending.png' });
+  releaseSend();
+  await expect(outgoing).toHaveCount(0);
+  await page.unroute(sendPath, holdPost);
+  await expect(composer).toHaveValue('另一条待写消息');
+  await composer.clear();
+  checks.sendingKeepsNewDraft = true;
+  await expect(page.getByRole('log').getByText('请整理这批演示数据，给出检查思路。', { exact: true })).toBeVisible();
   await expect(page.locator('.im-message .file-attachment-card')).toBeVisible();
   let stream = (
     await api(
       `/conversations/${id}/messages`,
       'POST',
-      { clientId: 'stream-' + suffix, state: 'streaming', text: '已收到文件，正在检查…' },
+      { clientId: 'stream-' + suffix, state: 'streaming', text: '…' },
       agent.token,
     )
   ).message;
   await expect(page.getByText('正在回复…', { exact: true }).last()).toBeVisible();
+  await api(
+    `/conversations/${id}/messages/${stream.id}`,
+    'PATCH',
+    { revision: 1, text: '', state: 'streaming', activities: [{ kind: 'search', status: 'in_progress' }] },
+    agent.token,
+  );
+  const progress = page.locator(`[data-message-id="${stream.id}"] .im-agent-activities`);
+  await expect(progress.locator('summary')).toHaveText('正在搜索资料…');
+  await progress.locator('summary').click();
+  await expect(progress.getByText('进行中', { exact: true })).toBeVisible();
   const text =
     '已收到计算结果文件。这是一组演示数据，下面展示整理流程。\n\n### 检查思路\n\n1. 核对样本名称、单位与缺失值。\n2. 汇总能量分布，保留来源标识。\n\n```python\nimport pandas as pd\n\ndf = pd.read_csv("计算结果.csv")\nsummary = df["energy"].describe()\nprint(summary)\n```';
   stream = (
     await api(
       `/conversations/${id}/messages/${stream.id}`,
       'PATCH',
-      { revision: 1, text, state: 'streaming' },
+      { revision: 2, text, state: 'streaming', activities: [{ kind: 'search', status: 'completed' }] },
       agent.token,
     )
   ).message;
   await expect(page.getByRole('heading', { name: '检查思路', exact: true })).toBeVisible();
   await expect(page.locator('.im-message pre')).toContainText('import pandas');
+  await expect(progress.getByText('已完成', { exact: true })).toBeVisible();
   await noOverflow();
   await page.screenshot({ path: out + '/desktop-chat.png' });
   checks.groupAndStreaming = true;
@@ -173,7 +210,7 @@ try {
   await page.getByLabel('提及成员').selectOption(agent.user.username);
   await page.getByLabel('聊天消息').fill(`@${agent.user.username} 请继续核对来源。`);
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
-  await expect(page.locator('.im-message.mine .im-quote')).toHaveCount(1);
+  await expect(page.locator('.im-message.mine[data-message-id] .im-quote')).toHaveCount(1);
   const messages = (await api(`/conversations/${id}/messages`, 'GET', undefined, agent.token)).messages;
   expect(messages.at(-1)).toMatchObject({ replyTo: stream.id, mentions: [agent.user.id] });
   checks.replyAndMention = true;
@@ -206,7 +243,17 @@ try {
   await page.getByLabel('聊天消息').fill('保留的草稿');
   await page.getByRole('button', { name: '返回消息列表' }).click();
   await expect(page.getByRole('navigation', { name: '主要功能' })).toBeVisible();
-  await page.getByRole('button', { name: /研究讨论组/ }).click();
+  expect(new URL(page.url()).searchParams.get('conversation')).toBeNull();
+  await nav('联系人');
+  await nav('消息');
+  await expect(page.getByRole('heading', { name: '研究讨论组', exact: true })).toBeVisible();
+  await expect(page.getByLabel('聊天消息')).toHaveValue('保留的草稿');
+  await page.goBack();
+  await expect(page.getByRole('navigation', { name: '主要功能' })).toBeVisible();
+  expect(new URL(page.url()).searchParams.get('conversation')).toBeNull();
+  await page.goBack();
+  expect(new URL(page.url()).searchParams.get('page')).toBe('contacts');
+  await nav('消息');
   await expect(page.getByLabel('聊天消息')).toHaveValue('保留的草稿');
   await page.getByLabel('聊天消息').fill('');
   await page.setViewportSize({ width: 320, height: 740 });
@@ -262,8 +309,10 @@ try {
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
   const image = page.locator('.im-message img[alt="演示图片.png"]');
   await expect(image).toBeVisible();
+  await expect(page.getByRole('button', { name: '附件操作：演示图片.png', exact: true })).toHaveCount(0);
   await image.click();
   await expect(page.getByRole('button', { name: '关闭图片预览' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '下载图片', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '关闭图片预览' }).click();
   const csv = page.locator('.im-message').filter({ hasText: '请整理这批演示数据，给出检查思路。' });
   await csv.getByRole('button', { name: '附件操作：计算结果.csv', exact: true }).click();
@@ -271,7 +320,7 @@ try {
     page.waitForEvent('download'),
     page.getByRole('button', { name: '下载文件', exact: true }).click(),
   ]);
-  expect(await readFile(await download.path(), 'utf8')).toBe('sample,energy\ndemo_a,-0.31\ndemo_b,-0.29\n');
+  expect(await readFile(await download.path(), 'utf8')).toBe(csvSource);
   await page.getByRole('button', { name: '关闭', exact: true }).click();
   checks.imageAndDownload = true;
   await image.evaluate((element) => element.decode());
@@ -282,12 +331,16 @@ try {
   await image.evaluate((element) => element.decode());
   expect(imageDownloads).toBe(downloadsBefore);
   checks.encryptedImageReload = true;
-  const [popup] = await Promise.all([
-    page.waitForEvent('popup'),
-    csv.getByRole('button', { name: '计算结果.csv 电子表格 · 预览', exact: true }).click(),
-  ]);
-  await expect(popup.locator('body')).toContainText('demo_a,-0.31');
-  await popup.close();
+  await csv.getByRole('button', { name: '计算结果.csv 电子表格 · 预览', exact: true }).click();
+  const preview = page.getByRole('dialog', { name: '计算结果.csv', exact: true });
+  const table = preview.getByRole('table', { name: '表格预览' });
+  await expect(table.getByRole('cell', { name: 'demo_a', exact: true })).toBeVisible();
+  await expect(table.getByRole('cell', { name: '-0.31', exact: true })).toBeVisible();
+  await expect(table.getByRole('cell', { name: 'demo_b, replicate', exact: true })).toBeVisible();
+  await preview.screenshot({ path: `${out}/desktop-file-preview.png` });
+  await preview.getByRole('button', { name: '查看原文', exact: true }).click();
+  await expect(preview.locator('pre')).toContainText('demo_a,-0.31');
+  await preview.getByRole('button', { name: '关闭', exact: true }).click();
   checks.textPreview = true;
   // Questions reuse the workspace answer panel; authorization remains recipient-scoped.
   const asked = (
@@ -409,6 +462,28 @@ try {
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
   await expect(friendPage.getByRole('log').getByText('A😊B', { exact: true })).toBeVisible();
   checks.emoji = true;
+  const attemptedIds = [];
+  const loseReceipt = async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    attemptedIds.push(route.request().postDataJSON().clientId);
+    if (attemptedIds.length === 1)
+      return route.fulfill({ status: 503, json: { error: '测试网络中断' } });
+    return route.continue();
+  };
+  await page.route(sendPath, loseReceipt);
+  await composer.fill('需要核对的消息');
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await expect(outgoing.getByRole('alert')).toContainText('发送结果待确认');
+  await composer.fill('重试时继续编辑');
+  await outgoing.getByRole('button', { name: '重试', exact: true }).click();
+  await expect(outgoing).toHaveCount(0);
+  await expect(page.getByRole('log').getByText('需要核对的消息', { exact: true })).toHaveCount(1);
+  expect(attemptedIds).toHaveLength(2);
+  expect(attemptedIds[1]).toBe(attemptedIds[0]);
+  await expect(composer).toHaveValue('重试时继续编辑');
+  await composer.clear();
+  await page.unroute(sendPath, loseReceipt);
+  checks.sendingRetryReusesId = true;
   await page.getByRole('button', { name: '收藏表情 演示图片.png' }).click();
   await expressions.click();
   await page.getByRole('tab', { name: '收藏', exact: true }).click();
@@ -530,6 +605,15 @@ try {
   );
   await expect(page.getByRole('log').getByText('scroll test updated', { exact: true })).toHaveCount(1);
   expect(await page.locator('.im-transcript').evaluate((el) => el.scrollTop)).toBe(scrollBefore);
+  const jump = page.getByRole('button', { name: '跳到最新消息', exact: true });
+  await expect(jump).toBeVisible();
+  await expect(jump).toHaveText('');
+  expect(await jump.evaluate((button) => {
+    const { width, height } = button.getBoundingClientRect();
+    return width === height;
+  })).toBe(true);
+  await jump.click();
+  await expect(jump).toHaveCount(0);
   checks.scrollStaysWhileReading = true;
   // The CLI exercises group mutation, files and ordered streaming against the same fixture.
   const credentials = join(state, 'agent.json');

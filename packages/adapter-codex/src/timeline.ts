@@ -1,5 +1,5 @@
 import { codexPermissionState } from './codex-permissions.js';
-import { userContent } from './user-content.js';
+import { userAttachments } from './user-content.js';
 import { asyncRequests, asyncQuestionRequest, userMessageText } from './async-questions.js';
 import type { Message, ThreadView, ConversationRequest } from '../../../src/shared/types.js';
 import {
@@ -77,14 +77,20 @@ export function messagesOf(state: Json, full = false): Message[] {
   for (const turn of turnsOf(state)) {
     const turnId = turn.turnId ?? turn.id;
     const items = orderedEntities(turn.items);
+    let finalReply: Message | undefined;
     // The opening input belongs before the assistant, including partial snapshots.
     const opening = textOf(turn.params?.input);
-    if (opening && !isCodexWorkspaceContext(opening) && !items.some((x) => x.type === 'userMessage')) {
+    const openingMedia = itemMedia(turn.params?.input);
+    if (
+      (opening || openingMedia.length) &&
+      !isCodexWorkspaceContext(opening) &&
+      !items.some((x) => x.type === 'userMessage')
+    ) {
       messages.push({
         id: `${turnId}:input`,
         role: 'user',
-        ...userContent(opening),
         text: userMessageText(opening),
+        attachments: userAttachments(opening, openingMedia),
         turnId,
         clientMessageId: turn.params?.clientUserMessageId,
         skills: skillsOf(turn.params?.input),
@@ -95,14 +101,11 @@ export function messagesOf(state: Json, full = false): Message[] {
       const type = item.type;
       if (type === 'reasoning') continue;
       const media = itemMedia(item);
-      for (const [number, source] of media.entries())
+      const user = type === 'userMessage' || type === 'steeringUserMessage';
+      for (const [number, source] of (user ? [] : media).entries())
         messages.push({
           id: `${item.id ?? `${turnId}:${index}`}:media:${number}`,
-          role: ['userMessage', 'steeringUserMessage'].includes(type)
-            ? 'user'
-            : type === 'imageView'
-              ? 'tool'
-              : 'assistant',
+          role: type === 'imageView' ? 'tool' : 'assistant',
           text: `![${type === 'imageView' ? '查看的图片' : '会话附件'}](<${mediaReference(source).replace(/</g, '%3C').replace(/>/g, '%3E')}>)`,
           turnId,
         });
@@ -110,12 +113,12 @@ export function messagesOf(state: Json, full = false): Message[] {
       let text = '';
       let attachments: Message['attachments'];
       let codex: Message['codex'];
-      if (type === 'userMessage' || type === 'steeringUserMessage') {
+      if (user) {
         role = 'user';
         const raw = textOf(item.content ?? item.input ?? item.text);
         if (!isCodexWorkspaceContext(raw)) {
           text = userMessageText(raw);
-          attachments = userContent(raw).attachments?.filter((file) => !media.includes(file.path));
+          attachments = userAttachments(raw, media);
         }
       } else if (type === 'agentMessage') {
         role = 'assistant';
@@ -142,8 +145,8 @@ export function messagesOf(state: Json, full = false): Message[] {
         role = 'tool';
         text = `${type ?? '活动'} · ${item.status ?? '已记录'}`;
       }
-      if (text || attachments?.length || codex)
-        messages.push({
+      if (text || attachments?.length || codex) {
+        const message: Message = {
           id: String(item.id ?? `${turnId}:${index}`),
           role,
           text,
@@ -190,8 +193,14 @@ export function messagesOf(state: Json, full = false): Message[] {
                   2,
                 )
               : undefined,
-        });
+        };
+        messages.push(message);
+        if (user) finalReply = undefined;
+        if (type === 'agentMessage' && (item.phase === 'final_answer' || !item.phase)) finalReply = message;
+      }
     }
+    if (finalReply && turn.status === 'completed' && typeof turnId === 'string')
+      finalReply.turnBoundary = true;
   }
   return messages.slice(-500).map((message) => {
     if (full || (message.text.length <= 100000 && (message.details?.length ?? 0) <= 100000)) return message;

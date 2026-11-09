@@ -1,3 +1,5 @@
+import type { AgentActivity } from './agent-activity.js';
+
 /** Messaging identities never authorize desktop control or device pairing. */
 export interface ChatUser {
   /** Permanent, arbitrary-length decimal UID. Never convert to a number. */
@@ -80,6 +82,8 @@ export interface ChatMessage {
   replyTo: string | null;
   interaction?: ChatInteraction;
   sticker?: boolean;
+  /** Public activity milestones from the signed, encrypted Agent reply. */
+  activities?: AgentActivity[];
 }
 export interface ChatMember extends ChatUser {
   role: 'owner' | 'member';
@@ -141,6 +145,7 @@ export interface MessagingClient {
     revision: number,
     text: string,
     state: MessageState,
+    activities?: AgentActivity[],
   ): Promise<{ message: ChatMessage }>;
   read(id: string, sequence: number): Promise<{ ok: boolean }>;
   sync(cursor: number, wait?: number, signal?: AbortSignal): Promise<ChatSync>;

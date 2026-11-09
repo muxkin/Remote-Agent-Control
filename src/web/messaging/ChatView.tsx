@@ -1,5 +1,6 @@
 import { uploadItems, type UploadItem } from '../UploadProgress';
 import { ConversationHeader } from '../shell/ConversationHeader';
+import { backTo } from '../shell/routes';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type {
   ChatAttachment,
@@ -12,9 +13,11 @@ import { FileAttachment } from '../FileAttachment';
 import { Media } from '../MediaAttachment';
 import { AttachmentAccessContext, type AttachmentAccess } from '../AttachmentAccess';
 import { Icon } from '../Icon';
+import { OutgoingContent, OutgoingStatus } from '../OutgoingMessage';
 import { browserId } from '../browser-id';
+import { MessagingError } from '../../client/messaging';
 import { messaging, useMessaging } from './context';
-import { readDraft, writeDraft, type MessagingDraft } from './drafts';
+import { readDraft, subscribeDrafts, updateDraft, type MessagingDraft, type PendingMessage } from './drafts';
 import { Avatar, Dialog, Notice, errorText, time, type Navigate } from './ui';
 import { loadMessagingMedia } from './media-cache';
 import { GroupDetails } from './Groups';
@@ -26,6 +29,15 @@ import { VoiceRecorder } from './VoiceRecorder';
 const Expressions = lazy(() => import('./Expressions').then((m) => ({ default: m.Expressions })));
 const RichMessage = lazy(() => import('../RichMessage'));
 const mobileComposer = window.matchMedia('(max-width: 700px)');
+const activityNames = {
+  read: '读取资料',
+  search: '搜索资料',
+  fetch: '获取资料',
+  execute: '运行工具',
+  edit: '编辑内容',
+  other: '处理任务',
+};
+const activityStates = { pending: '待执行', in_progress: '进行中', completed: '已完成', failed: '失败' };
 function subscribeComposerLayout(listener: () => void) {
   mobileComposer.addEventListener('change', listener);
   return () => mobileComposer.removeEventListener('change', listener);
@@ -130,8 +142,8 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
   const { user, conversations, recovery, updates } = useMessaging(),
     conversation = conversations.find((c) => c.id === id);
   const [messages, setMessages] = useState<ChatMessage[]>([]),
-    [before, setBefore] = useState<number>(),
-    [draft, setDraft] = useState<MessagingDraft>(() => readDraft(id));
+    [before, setBefore] = useState<number>();
+  const draft = useSyncExternalStore(subscribeDrafts, () => readDraft(id));
   const [tool, setTool] = useState<'expressions' | 'voice' | 'interaction'>();
   const [insertText, setInsertText] = useState<{ key: string; text: string; focus?: boolean }>();
   const [savedSticker, setSavedSticker] = useState('');
@@ -155,7 +167,6 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     scroll = useRef<HTMLDivElement>(null),
     follow = useRef(true),
     initialized = useRef(false),
-    draftRef = useRef(draft),
     uploadAbort = useRef<AbortController | null>(null);
   const access = useMemo<AttachmentAccess>(
     () => ({
@@ -173,10 +184,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     [id, user!.id],
   );
   function change(update: Partial<MessagingDraft>) {
-    const next = { ...draftRef.current, ...update };
-    draftRef.current = next;
-    setDraft(next);
-    writeDraft(id, next);
+    updateDraft(id, (current) => ({ ...current, ...update }));
   }
   useEffect(
     () => () => {
@@ -240,8 +248,20 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
   const last = messages.at(-1),
     active = messages.filter((m) => m.state === 'streaming'),
     hasDraft = !!draft.text.trim() || !!draft.files.length,
+    pending = draft.pending,
+    sending = !!pending && !pending.error,
+    echoed = !!pending && messages.some((m) => m.clientId === pending.id && m.senderId === user!.id),
     composerToolsDisabled =
-      busy || uploading || loading || unavailable || !!conversation?.closed || !!conversation?.readOnlyReason;
+      busy ||
+      sending ||
+      uploading ||
+      loading ||
+      unavailable ||
+      !!conversation?.closed ||
+      !!conversation?.readOnlyReason;
+  useEffect(() => {
+    if (pending && echoed) finishSend(pending.id);
+  }, [pending?.id, echoed]);
   const compactComposer = useSyncExternalStore(subscribeComposerLayout, () => mobileComposer.matches);
   const canRequestInteraction = conversation?.members.some((m) => m.id !== user!.id && m.kind === 'human');
   useEffect(() => {
@@ -250,7 +270,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
   }, [visible, last?.sequence, conversation?.readSequence, id]);
   useEffect(() => {
     if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [messages]);
+  }, [messages, pending?.id, pending?.error]);
   useEffect(() => {
     const root = scroll.current;
     if (!root) return;
@@ -281,7 +301,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
   async function upload(files: FileList | File[] | null) {
     if (!files?.length || uploadAbort.current) return false;
     const list = Array.from(files);
-    if (list.length + draftRef.current.files.length > 6) {
+    if (list.length + readDraft(id).files.length > 6) {
       setError('每条消息最多 6 个附件');
       return false;
     }
@@ -307,7 +327,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
             update(i, progress),
           );
           if (abort.signal.aborted) return false;
-          change({ files: [...draftRef.current.files, file] });
+          change({ files: [...readDraft(id).files, file] });
           update(i, { state: 'done' });
         } catch (e) {
           if (abort.signal.aborted) return false;
@@ -322,15 +342,18 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     return succeeded;
   }
   async function remove(file: ChatAttachment) {
-    change({ files: draftRef.current.files.filter((f) => f.id !== file.id) });
+    change({ files: readDraft(id).files.filter((f) => f.id !== file.id) });
     void messaging.request(`/conversations/${id}/files/${file.id}`, 'DELETE').catch(() => {});
   }
-  async function send() {
-    if (!hasDraft || busy || uploading) return;
-    setBusy(true);
-    setError('');
-    const current = draftRef.current,
-      text = current.text.trim(),
+  function finishSend(clientId: string) {
+    updateDraft(id, (current) =>
+      current.pending?.id === clientId ? { ...current, pending: undefined } : current,
+    );
+  }
+  async function send(retry?: PendingMessage) {
+    const current = readDraft(id);
+    if (composerToolsDisabled || (retry ? current.pending !== retry : !!current.pending || !hasDraft)) return;
+    const text = current.text.trim(),
       mentions =
         conversation?.members
           .filter((m) =>
@@ -339,21 +362,44 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
             ),
           )
           .map((m) => m.id) ?? [];
-    const options = { attachmentIds: current.files.map((f) => f.id), mentions, replyTo: current.reply?.id },
-      key = JSON.stringify({ text, ...options });
-    const request = current.pending?.key === key ? current.pending : { key, id: browserId() };
-    change({ pending: request });
+    const request: PendingMessage = retry
+      ? { ...retry, error: undefined, rejected: undefined }
+      : {
+          id: browserId(),
+          createdAt: Date.now(),
+          text,
+          files: current.files,
+          reply: current.reply,
+          options: { attachmentIds: current.files.map((f) => f.id), mentions, replyTo: current.reply?.id },
+        };
+    setError('');
+    follow.current = true;
+    setFollowing(true);
+    updateDraft(id, () =>
+      retry ? { ...current, pending: request } : { text: '', files: [], pending: request },
+    );
+    if (!retry) setUploadJobs([]);
     try {
-      const { message } = await messaging.send(id, text, request.id, options);
-      follow.current = true;
-      setFollowing(true);
+      const { message } = await messaging.send(id, request.text, request.id, request.options);
       setMessages((old) => merge(old, [message]));
-      change({ text: '', files: [], reply: undefined, pending: undefined });
-      setUploadJobs([]);
+      finishSend(request.id);
     } catch (e) {
-      setError(`${errorText(e)}；草稿已保留，可以重试。`);
-    } finally {
-      setBusy(false);
+      updateDraft(id, (draft) =>
+        draft.pending === request
+          ? {
+              ...draft,
+              pending: {
+                ...request,
+                error: errorText(e),
+                rejected:
+                  e instanceof MessagingError &&
+                  e.status >= 400 &&
+                  e.status < 500 &&
+                  ![408, 409, 429].includes(e.status),
+              },
+            }
+          : draft,
+      );
     }
   }
   async function cancel(message: ChatMessage) {
@@ -376,7 +422,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
     specialRequest.current = undefined;
   }
   async function sendVoice(file: File) {
-    if (busy || uploading || unavailable || conversation?.closed || conversation?.readOnlyReason)
+    if (busy || sending || uploading || unavailable || conversation?.closed || conversation?.readOnlyReason)
       throw new Error('当前无法发送语音，请稍后重试。');
     const request =
       voiceRequest.current?.file === file
@@ -415,7 +461,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
           className="im-chat-header"
           title={conversation?.name ?? '聊天'}
           backLabel="返回消息列表"
-          onBack={() => navigate({ page: 'messages' })}
+          onBack={() => backTo({ page: 'messages' }, navigate)}
           subtitle={
             conversation?.kind === 'group'
               ? `${conversation.members.length} 位成员${conversation.closed ? ' · 已解散' : ''}`
@@ -461,13 +507,14 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
             </button>
           )}
           {loading && <p className="page-loading">正在加载消息…</p>}
-          {!loading && !messages.length && !unavailable && (
+          {!loading && !messages.length && !pending && !unavailable && (
             <p className="im-start">发送第一条消息，开始聊天。</p>
           )}
           {messages.map((message, index) => {
             const mine = message.senderId === user!.id,
               sender = conversation?.members.find((m) => m.id === message.senderId) ?? message.sender;
             const previous = messages[index - 1];
+            const currentActivity = message.activities?.findLast(({ status }) => status === 'in_progress');
             const newDay =
               !previous ||
               new Date(previous.createdAt).toDateString() !== new Date(message.createdAt).toDateString();
@@ -516,16 +563,44 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                           </span>
                         </button>
                       )}
-                      {message.text && !message.interaction && (
-                        <Suspense fallback={<div className="im-plain">{message.text}</div>}>
-                          <RichMessage
-                            preserveLineBreaks={sender?.kind !== 'agent'}
-                            text={message.text}
-                            threadId={id}
-                            streaming={message.state === 'streaming'}
-                          />
-                        </Suspense>
+                      {!!message.activities?.length && (
+                        <details className="im-agent-activities">
+                          <summary>
+                            {message.state === 'streaming' && currentActivity
+                              ? `正在${activityNames[currentActivity.kind]}…`
+                              : `查看 ${message.activities.length} 项处理进度`}
+                          </summary>
+                          <ul>
+                            {message.activities.map(({ kind, status }, index) => (
+                              <li key={index}>
+                                <span>{activityNames[kind]}</span>
+                                <small>
+                                  {message.state !== 'streaming' &&
+                                  (status === 'pending' || status === 'in_progress')
+                                    ? '未确认结果'
+                                    : activityStates[status]}
+                                </small>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
                       )}
+                      {message.text &&
+                        !message.interaction &&
+                        !(
+                          message.state === 'streaming' &&
+                          sender?.kind === 'agent' &&
+                          /^(?:…+|\.{3,})$/.test(message.text.trim())
+                        ) && (
+                          <Suspense fallback={<div className="im-plain">{message.text}</div>}>
+                            <RichMessage
+                              preserveLineBreaks={sender?.kind !== 'agent'}
+                              text={message.text}
+                              threadId={id}
+                              streaming={message.state === 'streaming'}
+                            />
+                          </Suspense>
+                        )}
                       {message.interaction && (
                         <InteractionCard
                           message={message}
@@ -602,15 +677,73 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               </div>
             );
           })}
+          {pending && !echoed && (
+            <article className="im-message mine outgoing-message" data-outgoing-id={pending.id}>
+              <Avatar user={user} />
+              <div className="im-message-main">
+                <div className="im-message-author">
+                  <strong>{user!.displayName}</strong>
+                  <time>{time(pending.createdAt)}</time>
+                </div>
+                <div className="im-bubble">
+                  <OutgoingContent text={pending.text} files={pending.files}>
+                    {pending.reply && (
+                      <div className="im-quote">
+                        <Icon name="chat" size={14} />
+                        <span>{pending.reply.text.slice(0, 100) || '引用消息'}</span>
+                      </div>
+                    )}
+                  </OutgoingContent>
+                </div>
+                <OutgoingStatus activity={sending ? '正在发送…' : undefined}>
+                  {pending.error && (
+                    <>
+                      <span role="alert">
+                        {pending.rejected ? '未能发送' : '发送结果待确认'} · {pending.error}
+                      </span>
+                      <div className="outgoing-actions">
+                        <button
+                          type="button"
+                          disabled={composerToolsDisabled}
+                          onClick={() => void send(pending)}
+                        >
+                          重试
+                        </button>
+                        {pending.rejected && !hasDraft && !draft.reply && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateDraft(id, (current) =>
+                                current.pending === pending &&
+                                !current.text.trim() &&
+                                !current.files.length &&
+                                !current.reply
+                                  ? { text: pending.text, files: pending.files, reply: pending.reply }
+                                  : current,
+                              )
+                            }
+                          >
+                            移回输入框
+                          </button>
+                        )}
+                        <button type="button" onClick={() => finishSend(pending.id)}>
+                          移除发送记录
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </OutgoingStatus>
+              </div>
+            </article>
+          )}
         </div>
-        {!following && (
-          <button className="im-jump secondary" onClick={jump}>
-            <Icon name="down" size={16} />
-            最新消息
-          </button>
-        )}
         <Notice text={error} />
         <footer className="im-compose-wrap">
+          {!following && (
+            <button className="im-jump icon-button" type="button" aria-label="跳到最新消息" onClick={jump}>
+              <Icon name="down" size={18} />
+            </button>
+          )}
           {draft.reply && (
             <div className="im-reply-draft">
               <span>
@@ -626,7 +759,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
             </div>
           )}
           <ChatComposer
-            activity={busy ? '正在发送…' : undefined}
+            activity={busy || sending ? '正在发送…' : undefined}
             mobileSendLabel="发送"
             insertText={insertText}
             value={{
@@ -636,13 +769,15 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
               plugins: [],
             }}
             onChange={(update) => {
-              const current = { text: draftRef.current.text, uploads: [], skills: [], plugins: [] };
+              const current = { text: readDraft(id).text, uploads: [], skills: [], plugins: [] };
               const next = typeof update === 'function' ? update(current) : update;
               change({ text: next.text ?? current.text });
             }}
-            disabled={busy || unavailable || !!conversation?.closed || !!conversation?.readOnlyReason}
+            disabled={unavailable || !!conversation?.closed || !!conversation?.readOnlyReason}
             sendDisabled={
               busy ||
+              sending ||
+              (!!pending && hasDraft) ||
               uploading ||
               loading ||
               unavailable ||
@@ -754,7 +889,7 @@ export default function ChatView({ id, navigate }: { id: string; navigate: Navig
                       onChange={(e) => {
                         if (e.target.value)
                           change({
-                            text: `${draftRef.current.text}${draftRef.current.text && !draftRef.current.text.endsWith(' ') ? ' ' : ''}@${e.target.value} `,
+                            text: `${readDraft(id).text}${readDraft(id).text && !readDraft(id).text.endsWith(' ') ? ' ' : ''}@${e.target.value} `,
                           });
                       }}
                     >

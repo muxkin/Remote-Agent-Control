@@ -34,29 +34,39 @@ describe('Native attachment messages', () => {
     ])
       expect(userContent(text)).toEqual({ text });
   });
-  it('retains existing thumbnails exactly once while removing legacy JSON from live and history text', () => {
+  it('keeps native images together under their owning text in live and stored history', () => {
+    const extra = '/tmp/wide-screenshot.png';
+    const content = [
+      { type: 'text', text: raw },
+      { type: 'localImage', path },
+      { type: 'localImage', path: extra },
+    ];
+    const expected = {
+      text: '说明',
+      attachments: [
+        { ...file, media: 'image' },
+        { name: 'wide-screenshot.png', path: extra, media: 'image' },
+      ],
+    };
     const snapshot = state();
     snapshot.turnHistory.history.entitiesByKey.one.items = [
       {
         id: 'image',
         type: 'userMessage',
-        content: [
-          { type: 'text', text: raw },
-          { type: 'localImage', path },
-        ],
+        content,
       },
     ];
     const messages = messagesOf(snapshot);
-    expect(messages.filter((m) => m.id.includes(':media:'))).toHaveLength(1);
-    expect(messages.find((m) => m.id === 'image')).toMatchObject({ text: '说明', attachments: [] });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject(expected);
     expect(
       rolloutMessage(
         {
           type: 'response_item',
-          payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: raw }] },
+          payload: { type: 'message', role: 'user', content },
         },
         'old',
       ),
-    ).toMatchObject({ text: '说明', attachments: [file] });
+    ).toMatchObject(expected);
   });
 });

@@ -45,6 +45,9 @@ export const statusSchema = z.object({
     openThread: z.boolean(),
     elicitationForms: z.union([z.literal(false), z.literal('experimental')]),
     newThread: z.boolean(),
+    renameThread: z.boolean().optional(),
+    forkThread: z.boolean().optional(),
+    forkFromTurn: z.boolean().optional(),
     queue: z.boolean(),
   }),
 });

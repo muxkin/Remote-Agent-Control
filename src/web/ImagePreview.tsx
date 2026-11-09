@@ -12,6 +12,8 @@ export function ImagePreview({
   onError,
   onRetry,
   onCopy,
+  onDownload,
+  returnFocus,
 }: {
   src: string;
   label: string;
@@ -21,6 +23,8 @@ export function ImagePreview({
   onError: () => void;
   onRetry: () => void;
   onCopy?: () => Promise<void>;
+  onDownload?: () => void | Promise<void>;
+  returnFocus?: HTMLElement | null;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const stage = useRef<HTMLDivElement>(null),
@@ -28,6 +32,7 @@ export function ImagePreview({
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
   const [copyState, setCopyState] = useState('');
   const [copying, setCopying] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const current = useRef(view);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ view: typeof view; x: number; y: number; distance: number } | null>(null);
@@ -130,13 +135,13 @@ export function ImagePreview({
   const titleId = useId();
   useLayoutEffect(() => {
     const dialog = ref.current!;
-    const trigger = document.activeElement;
+    const trigger = returnFocus ?? document.activeElement;
     dialog.showModal();
     return () => {
       dialog.close();
       if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true });
     };
-  }, []);
+  }, [returnFocus]);
   useLayoutEffect(() => {
     const element = stage.current!;
     const wheel = (event: WheelEvent) => {
@@ -184,6 +189,26 @@ export function ImagePreview({
           <Icon name="copy" size={18} />
           {copying ? '正在复制…' : '复制图片'}
         </button>
+        {onDownload && (
+          <button
+            className="icon-button"
+            aria-label="下载图片"
+            disabled={downloading}
+            onClick={async () => {
+              setDownloading(true);
+              setCopyState('');
+              try {
+                await onDownload();
+              } catch {
+                setCopyState('图片下载失败，请重试');
+              } finally {
+                setDownloading(false);
+              }
+            }}
+          >
+            <Icon name="download" />
+          </button>
+        )}
         <button className="icon-button" aria-label="关闭图片预览" onClick={onClose}>
           <Icon name="close" />
         </button>

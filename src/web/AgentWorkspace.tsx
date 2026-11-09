@@ -41,9 +41,10 @@ import { Icon } from './Icon';
 import { PairScanner } from './PairScanner';
 import { ChatComposer } from './ChatComposer';
 import { OperationFeedback, operationActivity } from './OperationFeedback';
+import { OutgoingContent, OutgoingStatus } from './OutgoingMessage';
 import { ThreadNavigation } from './ThreadNavigation';
-import { useChatDrafts } from './chat-drafts';
-import type { AppRoute } from './shell/routes';
+import { useChatDrafts, type ChatDraft } from './chat-drafts';
+import { backTo, type AppRoute } from './shell/routes';
 
 const subscribeConnection = (notify: () => void) => deviceSession.onChange(notify);
 const connectionSnapshot = () => deviceSession.online;
@@ -117,6 +118,13 @@ export default function AgentWorkspace({
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [threadAction, setThreadAction] = useState<{
+    kind: 'rename' | 'fork';
+    threadId: string;
+    title: string;
+    lastTurnId?: string;
+    requestId?: string;
+  }>();
   const [configOpen, setConfigOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
@@ -154,7 +162,11 @@ export default function AgentWorkspace({
         ? selectedState
         : (threads.find((thread) => thread.id === route.thread) ?? null)
       : null;
-  useEffect(() => setControlRequest(undefined), [selected?.id]);
+  useEffect(() => {
+    setControlRequest(undefined);
+    setToolsOpen(false);
+    setThreadAction(undefined);
+  }, [selected?.id]);
   function setSelected(thread: ThreadSummary | null) {
     creationRequest.current = undefined;
     updateSelected(thread);
@@ -206,7 +218,7 @@ export default function AgentWorkspace({
   const stream = useSyncExternalStore(subscribeConnection, connectionSnapshot);
   const [hostId, setHostId] = useState(() => new URLSearchParams(location.hash.slice(1)).get('host') ?? '');
   const drafts = useChatDrafts(deviceId, selected?.id ?? null);
-  const submittedDrafts = useRef(new Map<string, { thread: string; draft: typeof drafts.draft }>());
+  const dispatchingDraft = useRef(false);
   const { text: draft, uploads, skills: selectedSkills, plugins: selectedPlugins } = drafts.draft;
   function setSelectedSkills(value: SkillChoice[] | ((old: SkillChoice[]) => SkillChoice[])) {
     if (selected)
@@ -258,6 +270,7 @@ export default function AgentWorkspace({
   const followBottom = useRef(true);
   const viewRef = useRef<ThreadView | null>(null);
   const operationSnapshots = useRef(new Map<string, Operation>());
+  const recoveredDraft = useRef<string>(undefined);
   function receiveOperation(operation: Operation) {
     const previous = operationSnapshots.current.get(operation.id);
     // Apply the same ordering rule before journal writes and draft side effects.
@@ -269,18 +282,20 @@ export default function AgentWorkspace({
     if (operationSnapshots.current.size > 256)
       operationSnapshots.current.delete(operationSnapshots.current.keys().next().value!);
     rememberOperation(deviceId, operation);
-    const submission = submittedDrafts.current.get(operation.id);
-    if (submission && ['accepted', 'completed', 'interrupted'].includes(operation.state)) {
-      drafts.update(submission.thread, (current) =>
-        JSON.stringify(current) === JSON.stringify(submission.draft)
-          ? { text: '', uploads: [], skills: [], plugins: [] }
-          : current,
-      );
-      if (selectedId.current === submission.thread) setUploadJobs([]);
-      submittedDrafts.current.delete(operation.id);
-    } else if (['rejected', 'failed'].includes(operation.state)) submittedDrafts.current.delete(operation.id);
+    drafts.settle(operation);
+    if (operation.kind === 'rename' && operation.state === 'completed' && previous?.state !== 'completed') {
+      void api<{ thread: ThreadSummary }>(`/threads/${encodeURIComponent(operation.threadId)}`)
+        .then(({ thread }) => {
+          updateSelected((old) => (old?.id === thread.id ? thread : old));
+          setThreads((old) => old.map((item) => (item.id === thread.id ? thread : item)));
+          setThreadAction((old) => (old?.requestId === operation.id ? undefined : old));
+        })
+        .catch(() => {
+          if (selectedId.current === operation.threadId) setError('改名已确认，请刷新会话列表查看。');
+        });
+    }
     if (
-      operation.kind === 'create' &&
+      (operation.kind === 'create' || operation.kind === 'fork') &&
       creationRequest.current === operation.id &&
       operation.state === 'completed' &&
       operation.resultThreadId &&
@@ -288,10 +303,12 @@ export default function AgentWorkspace({
       !openedCreations.current.has(operation.id)
     ) {
       openedCreations.current.add(operation.id);
-      try {
-        localStorage.removeItem(deviceSession.contentKey(`new-conversation:${operation.threadId}`));
-      } catch {
-        /* Keep live confirmation usable when storage is unavailable. */
+      if (operation.kind === 'create') {
+        try {
+          localStorage.removeItem(deviceSession.contentKey(`new-conversation:${operation.threadId}`));
+        } catch {
+          /* Keep live confirmation usable when storage is unavailable. */
+        }
       }
       void api<{ thread: ThreadSummary }>(`/threads/${encodeURIComponent(operation.resultThreadId)}`)
         .then((result) => {
@@ -452,9 +469,15 @@ export default function AgentWorkspace({
       | RequestResponse
       | NewConversationInput
       | { messageId: string }
+      | { title: string }
+      | { lastTurnId: string }
       | { control: ControlAction },
+    retryDraft?: ChatDraft,
   ) {
-    if (!selected || (!view && kind !== 'create')) return;
+    if (!selected || (!view && !['create', 'rename', 'fork'].includes(kind))) return;
+    const isSend = kind === 'send' || kind === 'steer' || kind === 'queue';
+    if (isSend && dispatchingDraft.current) return;
+    const submitted = retryDraft ?? drafts.draft;
     setBusy(true);
     setError('');
     const requestId = crypto.randomUUID();
@@ -462,24 +485,24 @@ export default function AgentWorkspace({
       kind === 'open'
         ? { requestId }
         : kind === 'queue'
-          ? { requestId, text: draft, expectedQueueFingerprint: view?.queueFingerprint }
+          ? { requestId, text: submitted.text, expectedQueueFingerprint: view?.queueFingerprint }
           : kind === 'queue-remove'
             ? { requestId, ...settings, expectedQueueFingerprint: view?.queueFingerprint }
-            : kind === 'control' || kind === 'settings' || kind === 'respond' || kind === 'create'
+            : ['control', 'settings', 'respond', 'create', 'rename', 'fork'].includes(kind)
               ? { requestId, ...settings }
               : kind === 'send'
                 ? {
                     requestId,
-                    text: draft,
-                    uploadIds: uploads.map((u) => u.id),
-                    skillIds: selectedSkills.map((s) => s.id),
-                    pluginIds: selectedPlugins.map((s) => s.id),
+                    text: submitted.text,
+                    uploadIds: submitted.uploads.map((u) => u.id),
+                    skillIds: submitted.skills.map((s) => s.id),
+                    pluginIds: submitted.plugins.map((s) => s.id),
                   }
                 : kind === 'steer'
                   ? {
                       requestId,
-                      text: draft,
-                      uploadIds: uploads.map((u) => u.id),
+                      text: submitted.text,
+                      uploadIds: submitted.uploads.map((u) => u.id),
                       expectedTurnId: view?.activeTurnId,
                     }
                   : { requestId, expectedTurnId: view?.activeTurnId };
@@ -494,13 +517,26 @@ export default function AgentWorkspace({
       updatedAt: Date.now(),
     };
     try {
-      if (kind === 'create') creationRequest.current = requestId;
-      if (['send', 'steer', 'queue'].includes(kind))
-        submittedDrafts.current.set(requestId, { thread: selected.id, draft: drafts.draft });
+      if (kind === 'create' || kind === 'fork') creationRequest.current = requestId;
+      if (kind === 'rename' || kind === 'fork') {
+        setThreadAction((old) => (old?.kind === kind ? { ...old, requestId } : old));
+      }
       receiveOperation(pendingOperation);
+      if (isSend) {
+        drafts.submit(pendingOperation, submitted, !!retryDraft);
+        dispatchingDraft.current = true;
+        followBottom.current = true;
+        if (!retryDraft) setUploadJobs([]);
+      }
     } catch {
       if (creationRequest.current === requestId) creationRequest.current = undefined;
-      setError('浏览器无法保存请求标识，本次消息未发送');
+      if (operationSnapshots.current.has(requestId)) {
+        // The request was never dispatched. Clean up its journal entry if the draft write failed.
+        try {
+          receiveOperation({ ...pendingOperation, state: 'rejected', updatedAt: Date.now() });
+        } catch {}
+      }
+      setError('浏览器无法保存草稿或请求标识，本次操作未发送');
       setBusy(false);
       return;
     }
@@ -526,6 +562,7 @@ export default function AgentWorkspace({
         });
       }
     } finally {
+      if (isSend) dispatchingDraft.current = false;
       setBusy(false);
     }
     return requestId;
@@ -588,7 +625,12 @@ export default function AgentWorkspace({
     }
   }
   const currentOperations = operations.filter((operation) => operation.threadId === selected?.id);
-  const pending = currentOperations.some((x) => ['received', 'dispatching', 'uncertain'].includes(x.state));
+  const threadActionOperation = currentOperations.find(
+    (operation) => operation.id === threadAction?.requestId,
+  );
+  const pending = [drafts.outgoing?.operation, ...currentOperations].some(
+    (x) => x && ['received', 'dispatching', 'uncertain'].includes(x.state),
+  );
   const delivery =
     currentOperations.find((x) => ['received', 'dispatching', 'uncertain'].includes(x.state)) ??
     currentOperations[0];
@@ -597,8 +639,58 @@ export default function AgentWorkspace({
   const codex = backend?.product === 'codex' || (!backend && backendId === DEFAULT_BACKEND);
   const combined = view ? [...older.filter((x) => !currentIds.has(x.id)), ...view.messages] : [];
   const messages = codex
-    ? combined.flatMap((message) => codexDisplayMessage(message, message.turnId === view?.activeTurnId) ?? [])
+    ? combined.flatMap(
+        (message) =>
+          codexDisplayMessage(message, !!view?.activeTurnId && message.turnId === view.activeTurnId) ?? [],
+      )
     : combined;
+  const outgoing = drafts.outgoing;
+  const outgoingOperation = outgoing?.operation;
+  useEffect(() => {
+    if (
+      !outgoingOperation ||
+      outgoingOperation.state !== 'uncertain' ||
+      !stream ||
+      operationSnapshots.current.has(outgoingOperation.id) ||
+      recoveredDraft.current === outgoingOperation.id ||
+      readPending(deviceId, outgoingOperation.threadId).some((x) => x.id === outgoingOperation.id)
+    )
+      return;
+    // A receipt can remove the journal entry just before the browser saves the updated draft.
+    recoveredDraft.current = outgoingOperation.id;
+    void api<Operation>(`/operations/${outgoingOperation.id}`)
+      .then(receiveOperation)
+      .catch(() => {});
+  }, [deviceId, outgoingOperation, stream]);
+  const hasOutgoingFailure = outgoingOperation?.state === 'rejected' || outgoingOperation?.state === 'failed';
+  const echoed =
+    outgoingOperation &&
+    messages.some(
+      (message) =>
+        message.role === 'user' &&
+        (message.clientMessageId === outgoingOperation.id ||
+          (outgoingOperation.kind === 'send' &&
+            !!outgoingOperation.turnId &&
+            message.turnId === outgoingOperation.turnId)),
+    );
+  useEffect(() => {
+    if (outgoingOperation?.state === 'accepted' && echoed) drafts.clearOutgoing(outgoingOperation);
+  }, [outgoingOperation, echoed]);
+  useEffect(() => {
+    if (outgoingOperation && followBottom.current && transcriptRef.current)
+      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
+  }, [outgoingOperation]);
+  const canEdit =
+    stream &&
+    !!view?.synchronized &&
+    (canCompose || (!!outgoingOperation && view.owner && !!status?.writesEnabled));
+  const composerDelivery = delivery?.id === outgoingOperation?.id ? undefined : delivery;
+  const draftHasContent = !!(
+    draft.trim() ||
+    uploads.length ||
+    selectedSkills.length ||
+    selectedPlugins.length
+  );
   useEffect(() => {
     onBusy(busy || uploading || pending);
   }, [busy, uploading, pending, onBusy]);
@@ -754,7 +846,7 @@ export default function AgentWorkspace({
           level={2}
           title={selected?.title || '选择一个会话'}
           backLabel="返回会话列表"
-          onBack={() => setSelected(null)}
+          onBack={() => backTo({ page: 'workbench', backend: backendId }, navigate)}
           subtitle={
             <>
               <Icon name="folder" size={14} />
@@ -829,8 +921,82 @@ export default function AgentWorkspace({
                   activeTurnId={view?.activeTurnId}
                   requests={view?.requests}
                   codex={codex}
+                  onFork={
+                    status?.capabilities.forkFromTurn
+                      ? (lastTurnId) =>
+                          setThreadAction({
+                            kind: 'fork',
+                            threadId: selected.id,
+                            title: selected.title,
+                            lastTurnId,
+                          })
+                      : undefined
+                  }
+                  forkDisabled={!stream || busy || pending}
                 />
-                {view && messages.length === 0 && <p className="muted center">此会话暂时没有可显示的消息</p>}
+                {outgoing && !echoed && (
+                  <article className="message user outgoing-message" data-outgoing-id={outgoing.operation.id}>
+                    <div className="message-role">你</div>
+                    <OutgoingContent text={outgoing.draft.text} files={outgoing.draft.uploads}>
+                      {(!!outgoing.draft.skills.length || !!outgoing.draft.plugins.length) && (
+                        <div className="selected-skills">
+                          {[...outgoing.draft.skills, ...outgoing.draft.plugins].map((item) => (
+                            <span className="skill-chip" key={item.id}>
+                              {item.name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </OutgoingContent>
+                    <OutgoingStatus activity={operationActivity(outgoing.operation)}>
+                      {outgoing.operation.state === 'accepted' && <span>已发送</span>}
+                      <OperationFeedback
+                        operation={outgoing.operation}
+                        onCheck={async () =>
+                          receiveOperation(await api<Operation>(`/operations/${outgoing.operation.id}`))
+                        }
+                        onRetry={
+                          outgoing.operation.state === 'rejected' &&
+                          canCompose &&
+                          !busy &&
+                          !pending &&
+                          (outgoing.operation.kind !== 'queue' || !!view?.queueFingerprint) &&
+                          (!view?.activeTurnId ||
+                            (!outgoing.draft.skills.length && !outgoing.draft.plugins.length))
+                            ? () =>
+                                void act(
+                                  outgoing.operation.kind === 'queue'
+                                    ? 'queue'
+                                    : view?.activeTurnId
+                                      ? 'steer'
+                                      : 'send',
+                                  undefined,
+                                  outgoing.draft,
+                                )
+                            : undefined
+                        }
+                      />
+                      {hasOutgoingFailure && (
+                        <div className="outgoing-actions">
+                          {outgoing.operation.state === 'rejected' && !draftHasContent && (
+                            <button
+                              type="button"
+                              onClick={() => drafts.clearOutgoing(outgoing.operation, true)}
+                            >
+                              移回输入框
+                            </button>
+                          )}
+                          <button type="button" onClick={() => drafts.clearOutgoing(outgoing.operation)}>
+                            移除发送记录
+                          </button>
+                        </div>
+                      )}
+                    </OutgoingStatus>
+                  </article>
+                )}
+                {view && messages.length === 0 && !outgoing && (
+                  <p className="muted center">此会话暂时没有可显示的消息</p>
+                )}
                 {!!view?.requests?.length && (
                   <RequestCards
                     threadId={selected.id}
@@ -885,10 +1051,10 @@ export default function AgentWorkspace({
                 <p className="hint">已选插件和技能将在下一轮使用，请等当前任务结束后发送。</p>
               )}
               <ChatComposer
-                activity={operationActivity(delivery)}
+                activity={operationActivity(outgoingOperation) ?? operationActivity(composerDelivery)}
                 feedback={
                   <OperationFeedback
-                    operation={delivery}
+                    operation={composerDelivery}
                     onCheck={
                       delivery
                         ? async () => receiveOperation(await api<Operation>(`/operations/${delivery.id}`))
@@ -909,9 +1075,9 @@ export default function AgentWorkspace({
                 threadId={selected.id}
                 value={drafts.draft}
                 onChange={(change) => drafts.update(selected.id, change)}
-                disabled={!stream || !canCompose || pending || busy}
+                disabled={!canEdit}
                 placeholder={
-                  canCompose
+                  canEdit
                     ? view?.activeTurnId
                       ? '给当前任务追加指令…'
                       : `给 ${agentName} 发消息…`
@@ -931,6 +1097,7 @@ export default function AgentWorkspace({
                   !selectedPlugins.length
                     ? busy || !stream || !view.canInterrupt
                     : busy ||
+                      hasOutgoingFailure ||
                       uploading ||
                       pending ||
                       !stream ||
@@ -1138,6 +1305,85 @@ export default function AgentWorkspace({
                 </button>
               )}
             </ThreadTools>
+            {active && threadAction?.threadId === selected.id && (
+              <ThreadTools
+                open
+                title={selected.title}
+                heading={threadAction.kind === 'rename' ? '会话改名' : '创建会话分支'}
+                onClose={() => {
+                  if (threadAction.kind === 'fork') creationRequest.current = undefined;
+                  setThreadAction(undefined);
+                }}
+              >
+                <form
+                  className="thread-action-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (busy || pending || threadActionOperation?.state === 'completed') return;
+                    if (threadAction.kind === 'rename') {
+                      const title = threadAction.title.trim();
+                      if (!title || title === selected.title) return;
+                      void act('rename', { title });
+                    } else {
+                      const { lastTurnId } = threadAction;
+                      void act('fork', lastTurnId ? { lastTurnId } : undefined);
+                    }
+                  }}
+                >
+                  {threadAction.kind === 'rename' ? (
+                    <label>
+                      会话名称
+                      <input
+                        required
+                        autoFocus
+                        maxLength={160}
+                        value={threadAction.title}
+                        onChange={(event) => {
+                          const title = event.target.value;
+                          setThreadAction((old) => old && { ...old, title });
+                        }}
+                        disabled={busy || pending}
+                      />
+                    </label>
+                  ) : (
+                    <p className="hint">
+                      {threadAction.lastTurnId
+                        ? '保留截至这条回复的历史，在同一目录创建一条独立的 Codex 会话。'
+                        : '使用当前会话历史，在同一目录创建一条独立的 Codex 会话。'}
+                    </p>
+                  )}
+                  <OperationFeedback
+                    operation={threadActionOperation}
+                    onCheck={
+                      threadActionOperation
+                        ? async () =>
+                            receiveOperation(await api<Operation>(`/operations/${threadActionOperation.id}`))
+                        : undefined
+                    }
+                  />
+                  {error && (
+                    <p className="error" role="alert">
+                      {error}
+                    </p>
+                  )}
+                  <button
+                    className="primary"
+                    disabled={
+                      !stream ||
+                      busy ||
+                      pending ||
+                      threadActionOperation?.state === 'completed' ||
+                      (threadAction.kind === 'rename' &&
+                        (!threadAction.title.trim() || threadAction.title.trim() === selected.title))
+                    }
+                    type="submit"
+                  >
+                    {operationActivity(threadActionOperation) ??
+                      (threadAction.kind === 'rename' ? '保存名称' : '创建分支')}
+                  </button>
+                </form>
+              </ThreadTools>
+            )}
             <ThreadTools
               key={`tools:${selected.id}`}
               open={toolsOpen}
@@ -1147,6 +1393,25 @@ export default function AgentWorkspace({
               <p className="hint">
                 {!stream ? '连接中断，正在恢复' : (view?.reason ?? '与原实例共享同一个会话')}
               </p>
+              {(['rename', 'fork'] as const).map(
+                (kind) =>
+                  selected.id !== 'new' &&
+                  status?.capabilities[kind === 'rename' ? 'renameThread' : 'forkThread'] && (
+                    <button
+                      className="secondary"
+                      type="button"
+                      key={kind}
+                      disabled={busy || pending || !stream}
+                      onClick={() => {
+                        setToolsOpen(false);
+                        setError('');
+                        setThreadAction({ kind, threadId: selected.id, title: selected.title });
+                      }}
+                    >
+                      {kind === 'rename' ? '会话改名' : '创建会话分支'}
+                    </button>
+                  ),
+              )}
               {operations[0]?.kind === 'settings' && (
                 <OperationFeedback
                   operation={operations[0]}

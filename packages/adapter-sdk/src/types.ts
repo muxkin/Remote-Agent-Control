@@ -11,6 +11,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'tool';
   text: string;
   turnId?: string;
+  turnBoundary?: true;
   clientMessageId?: string;
   phase?: string;
   details?: string;
@@ -18,7 +19,7 @@ export interface Message {
   deferred?: boolean;
   changes?: FileDiff[];
   output?: string;
-  attachments?: { name: string; path: string }[];
+  attachments?: { name: string; path: string; media?: 'image' | 'video' | 'audio' }[];
   skills?: string[];
   plugins?: string[];
   codex?: CodexMessageMetadata;
@@ -137,6 +138,9 @@ export interface GatewayStatus {
     openThread: boolean;
     elicitationForms: 'experimental' | false;
     newThread: boolean;
+    renameThread?: boolean;
+    forkThread?: boolean;
+    forkFromTurn?: boolean;
     queue: boolean;
   };
 }
@@ -156,6 +160,8 @@ export interface Operation {
     | 'queue-remove'
     | 'open'
     | 'create'
+    | 'rename'
+    | 'fork'
     | 'control';
   state: OperationState;
   resultThreadId?: string;

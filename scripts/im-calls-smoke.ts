@@ -362,6 +362,8 @@ try {
     )
     .toBeGreaterThan(100);
   checks.bidirectionalAudioVideo = { incomingAudio, incomingVideo };
+  await expect(page.locator('.call-timer')).toContainText('直连');
+  checks.directMediaRoute = true;
   await page.getByRole('button', { name: '静音', exact: true }).click();
   expect(
     await page.evaluate(() =>

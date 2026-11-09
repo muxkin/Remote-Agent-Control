@@ -340,6 +340,45 @@ h2 {
   overflow-wrap: anywhere;
   line-height: 1.85;
 }
+.codex-reply-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 6px;
+  color: var(--muted);
+}
+.codex-reply-actions button {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+}
+.codex-reply-actions button:focus-visible,
+.codex-reply-actions button:active:not(:disabled) {
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
+@media (hover: hover) {
+  .codex-reply-actions button:hover:not(:disabled) {
+    background: var(--surface-subtle);
+    color: var(--ink);
+  }
+}
+@media (max-width: 700px), (pointer: coarse) {
+  .codex-reply-actions button {
+    width: 44px;
+    height: 44px;
+  }
+}
+.codex-reply-feedback {
+  font-size: 12px;
+}
 .message.user {
   background: var(--surface-subtle);
   border: 1px solid var(--line);

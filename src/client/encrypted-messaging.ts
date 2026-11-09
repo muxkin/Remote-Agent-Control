@@ -4,6 +4,7 @@ import { HttpMessagingClient } from './messaging.js';
 import { AccountClient } from './account.js';
 import { attachmentMime } from '../shared/attachment-mime.js';
 import { interactionInput, interactionResponse } from '../shared/messaging-validation.js';
+import { agentActivities, type AgentActivity } from '../shared/agent-activity.js';
 import {
   SEALED_PREFIX,
   encryptFor,
@@ -32,6 +33,7 @@ interface Content {
   options: SendMessageOptions;
   state: MessageState;
   request?: { text: string; options: SendMessageOptions };
+  activities?: AgentActivity[];
 }
 interface FileSecret {
   key: string;
@@ -164,6 +166,7 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
     revision: number,
     text: string,
     state: MessageState = 'streaming',
+    activities?: AgentActivity[],
   ) {
     const { message } = await this.request<{ message: ChatMessage }>(
       `/conversations/${id}/messages/${messageId}`,
@@ -177,6 +180,7 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
       },
       state,
       request: message.initialRequest,
+      activities: activities === undefined ? message.activities : agentActivities.parse(activities),
     });
     return this.request<{ message: ChatMessage }>(`/conversations/${id}/messages/${messageId}`, 'PATCH', {
       revision,
@@ -256,6 +260,8 @@ export class EncryptedMessagingClient extends HttpMessagingClient {
           text: content.text,
           initialRequest: content.request,
           interaction,
+          activities:
+            message.sender.kind === 'agent' ? agentActivities.safeParse(content.activities).data : undefined,
           sticker: !!(content.options as any).encryptedSticker,
           attachments: await Promise.all(message.attachments.map((f) => this.decodeFile(f))),
         };

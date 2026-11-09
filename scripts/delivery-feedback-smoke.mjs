@@ -43,7 +43,8 @@ const page = await context.newPage();
 const checks = [],
   errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
-const feedback = page.locator('.composer .delivery-feedback');
+const outgoing = page.locator('.transcript .outgoing-message');
+const feedback = outgoing.locator('.delivery-feedback');
 const send = page.locator('.composer .send-button');
 const draft = page.getByLabel('消息', { exact: true });
 async function submit(text, nextMode) {
@@ -77,6 +78,11 @@ try {
   await expect(send).toBeDisabled();
   await expect(feedback).toHaveCount(0);
   await expect(page.locator('.composer-activity')).toHaveCount(0);
+  await expect(outgoing).toContainText('slow delivery fixture');
+  await expect(outgoing.getByRole('status')).toContainText('正在发送');
+  await expect(draft).toHaveValue('');
+  await expect(draft).toBeEditable();
+  await draft.fill('new draft typed while sending');
   await page.screenshot({ path: join(output, 'sending-mobile.png') });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   expect(await send.locator('.sending-spinner').evaluate((el) => getComputedStyle(el).animationName)).toBe(
@@ -84,15 +90,18 @@ try {
   );
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   release();
-  await expect(draft).toHaveValue('');
+  await expect(send).toHaveAttribute('aria-busy', 'false');
+  await expect(draft).toHaveValue('new draft typed while sending');
   await expect(feedback).toHaveCount(0);
-  checks.push(
-    'slow sends animate only the button; accepted sends clear draft without a success banner; reduced motion',
-  );
+  checks.push('slow sends move into the transcript, preserve a new draft and respect reduced motion');
 
   await submit('unknown outcome fixture', 'uncertain');
   await expect(feedback).toHaveClass(/waiting/);
-  await expect(draft).toHaveValue('unknown outcome fixture');
+  await expect(draft).toHaveValue('');
+  await page.reload();
+  await expect(feedback).toHaveClass(/waiting/);
+  await expect(outgoing).toContainText('unknown outcome fixture');
+  await expect(draft).toHaveValue('');
   await expect(feedback.getByRole('alert')).toHaveCount(0);
   await expect(feedback.getByRole('button', { name: '发送草稿' })).toHaveCount(0);
   const count = executions;
@@ -109,7 +118,9 @@ try {
   await submit('known rejection fixture', 'rejected');
   await expect(feedback).toHaveClass(/failed/);
   await expect(feedback.getByRole('alert')).toContainText('本次消息未发送');
-  await expect(draft).toHaveValue('known rejection fixture');
+  await expect(outgoing).toContainText('known rejection fixture');
+  await expect(draft).toHaveValue('');
+  await draft.fill('keep while retrying');
   for (const width of [320, 390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -117,7 +128,8 @@ try {
   }
   mode = 'accepted';
   await feedback.getByRole('button', { name: '发送草稿', exact: true }).click();
-  await expect(draft).toHaveValue('');
+  await expect(feedback).toHaveCount(0);
+  await expect(draft).toHaveValue('keep while retrying');
   checks.push('known rejection has one actionable error and safe retry at 320/390/1440 widths');
 
   for (const nextMode of ['late-error', 'late-receipt']) {

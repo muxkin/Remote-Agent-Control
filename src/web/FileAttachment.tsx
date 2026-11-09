@@ -1,9 +1,9 @@
-import { useAttachmentAccess } from './AttachmentAccess';
-import { useState, type ReactNode } from 'react';
+import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { attachmentInfo, attachmentPath } from '../shared/attachments';
+import { useAttachmentAccess, type AttachmentResource } from './AttachmentAccess';
 import { mediaContent, downloadFile } from './file-client';
 import { AttachmentActions } from './AttachmentActions';
-import { ImagePreview } from './ImagePreview';
+import { AttachmentPreview } from './AttachmentPreview';
 import { Icon } from './Icon';
 import { AttachmentIdentity } from './AttachmentIdentity';
 import { copyImage, imageBlob } from './image-clipboard';
@@ -26,53 +26,25 @@ export function FileAttachment({
   onRemove?: () => void;
 }) {
   const access = useAttachmentAccess();
-  const load = access ? access.load : mediaContent;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [preview, setPreview] = useState<Awaited<ReturnType<typeof mediaContent>> | null>(null);
-  const [reload, setReload] = useState(0);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [preview, setPreview] = useState(false);
   const info = attachmentInfo(href, displayName);
-  const name = displayName || info.name;
+  const name = info.name;
+  const load = useCallback(
+    (signal?: AbortSignal): Promise<AttachmentResource> =>
+      access ? access.load(threadId, href, signal) : mediaContent(threadId, href),
+    [access, href, threadId],
+  );
   const copyOriginal = () =>
     copyImage(async () => {
-      const file = access
-        ? await access.load(threadId, href, undefined, true)
-        : await mediaContent(threadId, href);
+      const file = access ? await access.load(threadId, href, undefined, true) : await load();
       return imageBlob(file.url);
     });
   async function download() {
-    const file = await load(threadId, href);
-    downloadFile({
-      ...file,
-      url: 'downloadUrl' in file && typeof file.downloadUrl === 'string' ? file.downloadUrl : file.url,
-    });
+    const file = await load();
+    downloadFile({ ...file, url: file.downloadUrl ?? file.url });
   }
-  async function open() {
-    if (busy) return;
-    // Open browser previews within the user gesture; binary files use a named download directly.
-    const textOrPdf = info.previewable && info.media !== 'image';
-    const tab = textOrPdf ? window.open('about:blank', '_blank') : null;
-    if (tab) tab.opener = null;
-    setBusy(true);
-    setError('');
-    try {
-      const file = await load(threadId, href);
-      if (file.mime.startsWith('image/')) {
-        tab?.close();
-        setPreview(file);
-      } else if (tab && /^(text\/plain|application\/(pdf|json))(;|$)/.test(file.mime))
-        tab.location.href = file.url;
-      else {
-        tab?.close();
-        downloadFile(file);
-      }
-    } catch (error) {
-      tab?.close();
-      setError(error instanceof Error ? error.message : '文件不可用');
-    } finally {
-      setBusy(false);
-    }
-  }
+  const open = () => setPreview(true);
   return (
     <span className={card ? 'file-attachment-card' : 'file-attachment-inline'}>
       <AttachmentActions
@@ -80,58 +52,41 @@ export function FileAttachment({
         name={name}
         onDownload={download}
         onCopyImage={info.media === 'image' ? copyOriginal : undefined}
-        onPreview={info.previewable ? open : undefined}
+        onPreview={open}
         onRemove={onRemove}
         surface={compact ? 'compact' : card ? 'card' : 'inline'}
       >
-        {(showDetails) => (
-          <button
-            type="button"
-            className={`file-link ${card ? 'file-card-link' : ''}`}
-            title={attachmentPath(href)}
-            disabled={busy}
-            aria-haspopup={!card ? 'dialog' : undefined}
-            onClick={(event) => (card ? void open() : showDetails(event.currentTarget))}
-          >
-            {card ? (
-              <AttachmentIdentity
-                path={href}
-                name={name}
-                action={
-                  !compact && (
-                    <span className="attachment-primary-hint">
-                      {busy ? '正在读取…' : info.previewable ? '预览' : '下载'}
-                    </span>
-                  )
-                }
-              />
-            ) : (
-              <>
-                <Icon name="document" size={15} />
-                <span>{children ?? name}</span>
-              </>
-            )}
-          </button>
-        )}
+        <button
+          ref={trigger}
+          type="button"
+          className={`file-link ${card ? 'file-card-link' : ''}`}
+          title={attachmentPath(href)}
+          aria-haspopup="dialog"
+          onClick={open}
+        >
+          {card ? (
+            <AttachmentIdentity
+              path={href}
+              name={name}
+              action={!compact && <span className="attachment-primary-hint">预览</span>}
+            />
+          ) : (
+            <>
+              <Icon name={info.media === 'image' ? 'image' : 'document'} size={15} />
+              <span>{children ?? name}</span>
+            </>
+          )}
+        </button>
       </AttachmentActions>
-      {error && (
-        <small className="attachment-error" role="alert">
-          {error}
-        </small>
-      )}
       {preview && (
-        <ImagePreview
-          src={preview.url}
-          label={name}
-          error={error}
-          reload={reload}
-          onClose={() => setPreview(null)}
-          onCopy={copyOriginal}
-          onError={() => setError('图片加载失败，请重试')}
-          onRetry={() => {
-            setReload((value) => value + 1);
-            void open();
-          }}
+        <AttachmentPreview
+          key={`${threadId}:${href}`}
+          path={href}
+          name={name}
+          load={load}
+          trigger={trigger.current}
+          onClose={() => setPreview(false)}
+          onCopyImage={copyOriginal}
         />
       )}
     </span>

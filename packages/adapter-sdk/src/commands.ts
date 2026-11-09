@@ -2,6 +2,8 @@ import type { RequestResponse } from './types.js';
 import type { LocalAttachment } from './backend.js';
 export type BackendCommand =
   | { kind: 'control'; control: import('./controls.js').ControlAction }
+  | { kind: 'rename'; title: string }
+  | { kind: 'fork'; lastTurnId?: string }
   | { kind: 'send'; text: string; attachments: LocalAttachment[]; skillIds: string[]; pluginIds: string[] }
   | { kind: 'steer'; text: string; expectedTurnId: string; attachments?: LocalAttachment[] }
   | { kind: 'interrupt'; expectedTurnId: string }

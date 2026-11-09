@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { HistoryIndex, JsonlTail, rolloutMessage } from '../packages/adapter-codex/src/history.js';
 import { messagesOf } from '../packages/adapter-codex/src/timeline.js';
 import { codexDisplayMessage } from '../src/shared/codex-transcript.js';
-import { fixtureConfig, historyFixture, THREAD } from './helpers.js';
+import { fixtureConfig, historyFixture, THREAD, TURN } from './helpers.js';
 const callbacks: (() => void)[] = [];
 afterEach(() => callbacks.splice(0).forEach((x) => x()));
 function setup() {
@@ -23,6 +23,55 @@ it('reads indexed history without executing or modifying it', async () => {
   const { h } = setup();
   expect(h.list().threads[0].id).toBe(THREAD);
   expect((await h.page(THREAD)).messages[0].text).toBe('历史消息');
+});
+it('marks only a completed final reply, including when the completion arrives after the reply', async () => {
+  const { h, file } = setup();
+  const record = (type: string, payload: object) => JSON.stringify({ type, payload }) + '\n';
+  const reply = (id: string, phase: string) =>
+    record('response_item', {
+      type: 'message',
+      role: 'assistant',
+      id,
+      phase,
+      content: [{ type: 'output_text', text: id }],
+    });
+  const completed = record('event_msg', {
+    type: 'task_complete',
+    turn_id: TURN,
+    last_agent_message: 'final',
+  });
+  appendFileSync(file, reply('progress', 'commentary') + reply('final', 'final_answer'));
+  expect((await h.page(THREAD)).messages.filter((message) => message.turnBoundary)).toEqual([]);
+  appendFileSync(file, completed);
+  expect((await h.page(THREAD)).messages.filter((message) => message.turnBoundary)).toMatchObject([
+    { id: 'final', turnId: TURN },
+  ]);
+});
+
+it('recovers the completed turn for a reply on the previous history page', async () => {
+  const { h, file } = setup();
+  const record = (type: string, payload: object) => JSON.stringify({ type, payload }) + '\n';
+  appendFileSync(
+    file,
+    record('response_item', {
+      type: 'message',
+      role: 'assistant',
+      phase: 'final_answer',
+      id: 'older-reply',
+      content: [{ type: 'output_text', text: 'older' }],
+    }) +
+      record('event_msg', { type: 'token_count', padding: ' '.repeat(300000) }) +
+      record('event_msg', { type: 'task_complete', turn_id: TURN, last_agent_message: 'older' }) +
+      record('event_msg', { type: 'token_count', padding: ' '.repeat(300000) }),
+  );
+  const latest = await h.page(THREAD);
+  expect(latest.nextCursor).toBeTruthy();
+  expect(latest.messages).toHaveLength(0);
+  expect((await h.page(THREAD, latest.nextCursor!)).messages.at(-1)).toMatchObject({
+    id: 'older-reply',
+    turnId: TURN,
+    turnBoundary: true,
+  });
 });
 it('reads compressed desktop rollouts using the existing JSONL index path without changing the source', async () => {
   const { h, file } = setup();

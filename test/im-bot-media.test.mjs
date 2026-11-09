@@ -4,11 +4,34 @@ import { mkdtemp, writeFile, mkdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  createAgentActivityTracker,
   createStreamWriter,
   incomingContent,
   outgoingFiles,
   stripDirectives,
 } from '../scripts/im-bot-media.mjs';
+test('reports ACP tool milestones without raw tool data or model thoughts', () => {
+  const tracker = createAgentActivityTracker();
+  tracker.update({ sessionUpdate: 'agent_thought_chunk', content: { text: 'private thinking' } });
+  tracker.update({ sessionUpdate: 'tool_call', toolCallId: 'hidden', kind: 'think' });
+  tracker.update({ sessionUpdate: 'tool_call_update', toolCallId: 'hidden', status: 'completed' });
+  tracker.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'search',
+    kind: 'search',
+    status: 'in_progress',
+    title: 'private path',
+    rawInput: { secret: 'private' },
+  });
+  assert.deepEqual(tracker.snapshot(), [{ kind: 'search', status: 'in_progress' }]);
+  tracker.update({
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'search',
+    status: 'completed',
+    rawOutput: 'private',
+  });
+  assert.deepEqual(tracker.snapshot(), [{ kind: 'search', status: 'completed' }]);
+});
 test('serializes chunks and final commit with committed revisions', async () => {
   let active = 0,
     max = 0,

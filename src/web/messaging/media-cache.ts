@@ -19,7 +19,7 @@ const database =
         },
       }).catch(() => undefined);
 const metadata = new Map<string, { until: number; promise: Promise<MediaResource> }>();
-const memory = new Map<string, { url: string; size: number }>();
+const memory = new Map<string, { url: string; size: number; blob?: Blob }>();
 const inflight = new Map<string, Promise<string>>();
 const decrypted = new Map<string, { name: string; mime: string; size: number }>();
 const decrypting = new Map<string, Promise<void>>();
@@ -161,8 +161,9 @@ export async function loadMessagingMedia(
             },
           });
           if (ticketEpoch !== epoch) throw new DOMException('Aborted', 'AbortError');
-          const url = URL.createObjectURL(new Blob([file.data], { type: file.mime }));
-          memory.set(blobKey, { url, size: file.size });
+          const blob = new Blob([file.data], { type: file.mime });
+          const url = URL.createObjectURL(blob);
+          memory.set(blobKey, { url, size: file.size, blob });
           decrypted.set(blobKey, { name: file.name, mime: file.mime, size: file.size });
           let total = [...memory.values()].reduce((sum, v) => sum + v.size, 0);
           for (const [old, value] of memory) {
@@ -184,8 +185,8 @@ export async function loadMessagingMedia(
       await pending;
     }
     if (ticketEpoch !== epoch || signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    const cached = memory.get(blobKey)!.url;
-    return { ...resource, ...decrypted.get(blobKey)!, url: cached, downloadUrl: cached, expiresAt: 0 };
+    const { url, blob } = memory.get(blobKey)!;
+    return { ...resource, ...decrypted.get(blobKey)!, url, blob, downloadUrl: url, expiresAt: 0 };
   }
   if (!resource.mime.startsWith('image/')) return resource;
   const blobKey = `${accountId}:${resource.cacheKey}`;

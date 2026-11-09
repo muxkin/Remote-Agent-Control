@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import type { SkillChoice, PluginChoice } from '../shared/types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { Operation, SkillChoice, PluginChoice } from '../shared/types';
 export type ChatDraft = {
   text: string;
   uploads: { id: string; name: string; path?: string }[];
@@ -7,32 +7,52 @@ export type ChatDraft = {
   plugins: PluginChoice[];
 };
 const empty: ChatDraft = { text: '', uploads: [], skills: [], plugins: [] };
+type Outgoing = { draft: ChatDraft; operation: Operation };
+type DraftSlot = { draft: ChatDraft; outgoing?: Outgoing };
+
+function hasContent(draft: ChatDraft) {
+  return !!(draft.text.trim() || draft.uploads.length || draft.skills.length || draft.plugins.length);
+}
+
 export function useChatDrafts(device: string, thread: string | null) {
-  const [state, setState] = useState<{ device: string; drafts: Record<string, ChatDraft> }>({
+  const [state, setState] = useState<{ device: string; drafts: Record<string, DraftSlot> }>({
     device: '',
     drafts: {},
   });
+  const stateRef = useRef(state);
   useEffect(() => {
     if (!device) return;
-    let drafts: Record<string, ChatDraft> = {};
+    const drafts: Record<string, DraftSlot> = {};
     try {
       const parsed = JSON.parse(
         (localStorage.getItem(`pocket-drafts:${device}`) ??
           sessionStorage.getItem(`pocket-drafts:${device}`)) ||
           '{}',
       );
-      for (const [id, d] of Object.entries(parsed) as [string, any][])
+      for (const [id, entry] of Object.entries(parsed) as [string, DraftSlot & ChatDraft][]) {
+        const d = entry?.draft ?? entry;
         if (
           typeof d?.text === 'string' &&
           Array.isArray(d.uploads) &&
           Array.isArray(d.skills) &&
           Array.isArray(d.plugins)
         )
-          drafts[id] = d;
+          drafts[id] = {
+            draft: d,
+            outgoing: entry.outgoing && {
+              ...entry.outgoing,
+              operation: ['received', 'dispatching'].includes(entry.outgoing.operation.state)
+                ? { ...entry.outgoing.operation, state: 'uncertain' }
+                : entry.outgoing.operation,
+            },
+          };
+      }
     } catch {
       /* Memory drafts still work if browser storage is unavailable. */
     }
-    setState({ device, drafts });
+    const next = { device, drafts };
+    stateRef.current = next;
+    setState(next);
   }, [device]);
   useEffect(() => {
     if (!device || state.device !== device) return;
@@ -42,27 +62,69 @@ export function useChatDrafts(device: string, thread: string | null) {
       /* Reload notice still protects unsaved input. */
     }
   }, [device, state]);
-  const update = useCallback(
-    (id: string, change: Partial<ChatDraft> | ((d: ChatDraft) => ChatDraft)) =>
-      setState((old) => {
-        const current = old.drafts[id] ?? empty;
-        return {
-          device,
-          drafts: {
-            ...old.drafts,
-            [id]: typeof change === 'function' ? change(current) : { ...current, ...change },
-          },
-        };
-      }),
+  const updateSlot = useCallback(
+    (id: string, change: (slot: DraftSlot) => DraftSlot, durable = false) => {
+      const old = stateRef.current;
+      if (old.device !== device) {
+        if (durable) throw Error('草稿尚未就绪');
+        return;
+      }
+      const current = old.drafts[id] ?? { draft: empty };
+      const next = change(current);
+      if (next === current) return;
+      const state = {
+        device,
+        drafts: { ...old.drafts, [id]: next },
+      };
+      if (durable) localStorage.setItem(`pocket-drafts:${device}`, JSON.stringify(state.drafts));
+      stateRef.current = state;
+      setState(state);
+    },
     [device],
   );
-  const draft = thread && state.device === device ? (state.drafts[thread] ?? empty) : empty;
+  const slot = thread && state.device === device ? state.drafts[thread] : undefined;
+  const update = (id: string, change: Partial<ChatDraft> | ((d: ChatDraft) => ChatDraft)) =>
+    updateSlot(id, (current) => ({
+      ...current,
+      draft: typeof change === 'function' ? change(current.draft) : { ...current.draft, ...change },
+    }));
   return {
-    draft,
+    draft: slot?.draft ?? empty,
+    outgoing: slot?.outgoing,
     update,
-    clear: () => setState({ device, drafts: {} }),
+    submit: (operation: Operation, draft: ChatDraft, retry: boolean) =>
+      updateSlot(
+        operation.threadId,
+        (current) => ({
+          draft: retry ? current.draft : empty,
+          outgoing: { operation, draft },
+        }),
+        true,
+      ),
+    settle: (operation: Operation) =>
+      updateSlot(operation.threadId, (current) => {
+        const outgoing = current.outgoing;
+        if (outgoing?.operation.id !== operation.id) return current;
+        if (
+          ['completed', 'interrupted'].includes(operation.state) ||
+          (operation.state === 'accepted' && operation.kind !== 'send')
+        )
+          return { draft: current.draft };
+        return { ...current, outgoing: { ...outgoing, operation } };
+      }),
+    clearOutgoing: (operation: Operation, restore = false) =>
+      updateSlot(operation.threadId, (current) => {
+        if (current.outgoing?.operation.id !== operation.id || (restore && hasContent(current.draft)))
+          return current;
+        return { draft: restore ? current.outgoing.draft : current.draft };
+      }),
+    clear: () => {
+      const next = { device, drafts: {} };
+      stateRef.current = next;
+      setState(next);
+    },
     hasDraft: Object.values(state.drafts).some(
-      (d) => d.text.trim() || d.uploads.length || d.skills.length || d.plugins.length,
+      ({ draft, outgoing }) => hasContent(draft) || (!!outgoing && outgoing.operation.state !== 'accepted'),
     ),
   };
 }

@@ -52,15 +52,9 @@ async function selectChat() {
 }
 async function previewTestAttachment() {
   await page.getByRole('button', { name: '测试附件', exact: true }).click();
-  const [popup] = await Promise.all([
-    page.waitForEvent('popup'),
-    page
-      .getByRole('dialog', { name: '附件操作：fixture.txt' })
-      .getByRole('button', { name: '预览', exact: true })
-      .click(),
-  ]);
-  await popup.waitForURL('blob:**', { timeout: 30000 });
-  return popup;
+  const preview = page.getByRole('dialog', { name: 'fixture.txt', exact: true });
+  await expect(preview.locator('pre')).toContainText('private-file-fixture', { timeout: 30000 });
+  return preview;
 }
 try {
   const pair = store.mintPairing();
@@ -84,10 +78,12 @@ try {
   expect(await page.evaluate(() => (window as any).__qa.peers.length)).toBe(peers);
   report.checks.connectionReusedAcrossChats = true;
   const before = relay.counters.bulkBytes;
-  const popup = await previewTestAttachment();
-  await expect.poll(() => popup.evaluate(() => document.body.innerText.length)).toBeGreaterThan(1000000);
+  const preview = await previewTestAttachment();
+  await expect(preview.getByText('仅显示部分内容，可下载完整文件。')).toBeVisible();
+  expect((await preview.locator('pre').textContent())?.length).toBe(256 * 1024);
   expect(relay.counters.bulkBytes).toBe(before);
-  await popup.close();
+  await page.screenshot({ path: '/tmp/pocket-v2-mobile-file-preview.png' });
+  await preview.getByRole('button', { name: '关闭', exact: true }).click();
   report.checks.directFilesNoRelayBody = true;
   await page.locator('audio').scrollIntoViewIfNeeded();
   await page.locator('audio').evaluate((element: HTMLAudioElement) => {
@@ -152,7 +148,7 @@ try {
   report.checks.freshUploadOverEncryptedRelay = true;
   const beforeCache = relay.counters.bulkBytes;
   const second = await previewTestAttachment();
-  await second.close();
+  await second.getByRole('button', { name: '关闭', exact: true }).click();
   expect(relay.counters.bulkBytes).toBe(beforeCache);
   report.checks.attachmentCacheAvoidsDownload = true;
   report.checks.mobileNoHorizontalOverflow = await page.evaluate(

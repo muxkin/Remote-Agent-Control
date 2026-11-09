@@ -12,9 +12,9 @@ export function createStreamWriter({ initial, patch, read, onCancelled = () => {
   let revision = initial.revision,
     ended = false,
     chain = Promise.resolve();
-  async function commit(text, state) {
+  async function commit(text, state, activities) {
     if (ended) throw Error('Stream ended');
-    const desired = { revision: revision + 1, text, state };
+    const desired = { revision: revision + 1, text, state, activities };
     try {
       const result = await patch(desired);
       revision = result.revision;
@@ -23,7 +23,11 @@ export function createStreamWriter({ initial, patch, read, onCancelled = () => {
     } catch (error) {
       const current = await read();
       revision = current.revision;
-      if (current.text === text && current.state === state) {
+      if (
+        current.text === text &&
+        current.state === state &&
+        (activities === undefined || JSON.stringify(current.activities) === JSON.stringify(activities))
+      ) {
         ended = state !== 'streaming';
         return current;
       }
@@ -33,20 +37,45 @@ export function createStreamWriter({ initial, patch, read, onCancelled = () => {
         throw Error('Stream ended');
       }
       // Resolve an ambiguous response or another writer before one ordered retry.
-      const result = await patch({ revision: revision + 1, text, state });
+      const result = await patch({ ...desired, revision: revision + 1 });
       revision = result.revision;
       ended = result.state !== 'streaming';
       return result;
     }
   }
   return {
-    write(text, state = 'streaming') {
-      const next = chain.then(() => commit(text, state));
+    write(text, state = 'streaming', activities) {
+      const next = chain.then(() => commit(text, state, activities));
       chain = next.catch(() => {});
       return next;
     },
     get ended() {
       return ended;
+    },
+  };
+}
+
+/** ACP tool milestones use a closed vocabulary and omit titles, inputs, output and thoughts. */
+export function createAgentActivityTracker() {
+  const calls = new Map();
+  const visibleKinds = new Set(['read', 'search', 'fetch', 'execute', 'edit']);
+  const states = new Set(['pending', 'in_progress', 'completed', 'failed']);
+  return {
+    update(event) {
+      const { sessionUpdate, toolCallId, kind, status } = event;
+      if (!['tool_call', 'tool_call_update'].includes(sessionUpdate) || !toolCallId) return false;
+      const previous = calls.get(toolCallId);
+      if (sessionUpdate === 'tool_call_update' && !previous) return false;
+      if (kind === 'think') return false;
+      const nextKind = kind ? (visibleKinds.has(kind) ? kind : 'other') : (previous?.kind ?? 'other');
+      const nextStatus = states.has(status) ? status : (previous?.status ?? 'pending');
+      if (previous?.kind === nextKind && previous.status === nextStatus) return false;
+      calls.set(toolCallId, { kind: nextKind, status: nextStatus });
+      if (calls.size > 8) calls.delete(calls.keys().next().value);
+      return true;
+    },
+    snapshot() {
+      return [...calls.values()];
     },
   };
 }

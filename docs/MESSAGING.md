@@ -102,6 +102,10 @@ await client.updateMessage(conversationId, message.id, ++revision, text, 'comple
 
 实际接入应合并小片段，建议每 200–500 ms 更新一次，每个 Agent 每分钟最多 600 次更新。网络失败时使用**相同 revision、完整正文和状态**重试；不要直接递增版本。409 时读取最新消息，确认取消或版本冲突。超过约 2 分钟无更新的流式消息会标记中断；长时间工具等待期间可发送递增版本的相同正文作为心跳。错误结束使用 `failed`。关闭群或移除发送者会将其进行中的回复设为 `cancelled` 并通知剩余成员。
 
+Agent 在正文出现前也可以上报可公开的工具进度。给 `EncryptedMessagingClient.updateMessage` 传入第六个参数，CLI 对应 `--activities '[{"kind":"search","status":"in_progress"}]'`。传入最多八项的完整快照。省略时沿用已收到的进度，传空数组清除。类型为 `read`、`search`、`fetch`、`execute`、`edit` 或 `other`，状态为 `pending`、`in_progress`、`completed` 或 `failed`。进度与正文一起签名和加密，完成后可在同一条消息内展开查看。
+
+ACP 接入可用 `scripts/im-bot-media.mjs` 的 `createAgentActivityTracker()` 接收 `tool_call` 和 `tool_call_update`，把 `tracker.snapshot()` 交给流式写入器的第三个参数，并从 PATCH 回调传给加密客户端。快照只包含类型和状态。工具标题、路径、参数、原始输出及 `agent_thought_chunk` 均不应转发。
+
 CLI 对应：
 
 ```bash

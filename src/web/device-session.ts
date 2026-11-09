@@ -299,13 +299,25 @@ export class DeviceSession {
       }
     });
     link.onEvent((event) => {
+      if (generation !== this.generation || this.links.get(key) !== link) return;
       if (event.type === 'usage') {
         if (generation === this.generation && this.online && this.link() === link)
           this.usageWatchers.get(event.backendId)?.(event.snapshot);
         return;
       }
+      const watchKey =
+        event.type === 'sync'
+          ? conversationKey(event.backendId ?? DEFAULT_BACKEND, event.threadId)
+          : undefined;
+      const listeners = watchKey ? this.watchers.get(watchKey) : undefined;
+      // Do not queue large snapshots for chats that were already left.
+      if (watchKey && !listeners) return;
       this.processing = this.processing
-        .then(() => (generation === this.generation ? this.receive(event) : undefined))
+        .then(() => {
+          if (generation !== this.generation || this.links.get(key) !== link) return;
+          if (watchKey && this.watchers.get(watchKey) !== listeners) return;
+          return this.receive(event);
+        })
         .catch(() => {
           this.metrics.resyncs++;
           void this.resume();
@@ -331,9 +343,12 @@ export class DeviceSession {
     } else if (event.type === 'sync') {
       const backendId = event.backendId ?? DEFAULT_BACKEND,
         key = conversationKey(backendId, event.threadId);
-      const old =
-        this.views.get(key) ??
-        (await this.cache.get<CachedThread>(this.key(`thread:${event.threadId}`, backendId)));
+      const listeners = this.watchers.get(key),
+        generation = this.generation;
+      if (!listeners) return;
+      const cacheKey = this.key(`thread:${event.threadId}`, backendId);
+      const old = this.views.get(key) ?? (await this.cache.get<CachedThread>(cacheKey));
+      if (generation !== this.generation || this.watchers.get(key) !== listeners) return;
       let next = old ?? null;
       for (const update of event.updates) {
         next = applySync(next, update);
@@ -346,8 +361,8 @@ export class DeviceSession {
         return;
       }
       this.views.set(key, next);
-      this.cache.put(this.key(`thread:${event.threadId}`, backendId), next);
-      for (const fn of this.watchers.get(key) ?? []) fn({ type: 'thread', thread: next.view });
+      this.cache.put(cacheKey, next);
+      for (const fn of listeners) fn({ type: 'thread', thread: next.view });
     } else if (event.type === 'event') {
       const backendId = event.backendId ?? DEFAULT_BACKEND;
       if (event.event.type === 'status') {
@@ -364,6 +379,7 @@ export class DeviceSession {
   }
   subscribe(threadId: string, fn: (event: ServerEvent) => void, backendId = this.backendId) {
     const key = conversationKey(backendId, threadId);
+    const generation = this.generation;
     const listeners = this.watchers.get(key) ?? new Set();
     listeners.add(fn);
     this.watchers.set(key, listeners);
@@ -371,7 +387,8 @@ export class DeviceSession {
       const cached =
         this.views.get(key) ??
         (await this.cache.get<CachedThread>(this.key(`thread:${threadId}`, backendId)));
-      if (!listeners.has(fn)) return;
+      if (generation !== this.generation || this.watchers.get(key) !== listeners || !listeners.has(fn))
+        return;
       if (cached) {
         this.views.set(key, cached);
         fn({
@@ -389,8 +406,10 @@ export class DeviceSession {
     })().catch(() => {});
     return () => {
       listeners.delete(fn);
-      if (!listeners.size) {
+      if (!listeners.size && this.watchers.get(key) === listeners) {
         this.watchers.delete(key);
+        // SyncStore retains the history on disk and has its own bounded memory cache.
+        this.views.delete(key);
         clearTimeout(this.watchRetries.get(key));
         this.watchRetries.delete(key);
         if (this.online)

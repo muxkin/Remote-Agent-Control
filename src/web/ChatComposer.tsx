@@ -120,6 +120,7 @@ export function ChatComposer({
   const hintId = useId();
   const { text, uploads, skills, plugins } = value;
   const hasDraft = !!text.trim() || !!uploads.length || !!skills.length || !!plugins.length;
+  const canSubmit = !disabled && !sendDisabled && !activity && hasDraft;
   useEffect(() => {
     const el = textareaRef.current;
     if (el) {
@@ -148,7 +149,7 @@ export function ChatComposer({
       className="composer-box"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!disabled && !sendDisabled && hasDraft) onSubmit();
+        if (canSubmit) onSubmit();
       }}
     >
       {attachmentPreview}
@@ -238,8 +239,7 @@ export function ChatComposer({
           // Keep native modified-Enter behavior (such as Shift+Enter for a newline).
           if (event.shiftKey || event.altKey || event.metaKey) return;
           event.preventDefault();
-          if (!event.repeat && !disabled && !sendDisabled && hasDraft)
-            event.currentTarget.form?.requestSubmit();
+          if (!event.repeat && canSubmit) event.currentTarget.form?.requestSubmit();
         }}
         onPaste={(event) => {
           const files = clipboardFiles(event.clipboardData);
@@ -284,7 +284,12 @@ export function ChatComposer({
           </label>
         )}
         {actions}
-        <div className="composer-send">
+        <div
+          className="composer-send"
+          onMouseDown={(event) => {
+            if (document.activeElement === textareaRef.current) event.preventDefault();
+          }}
+        >
           <SendButton
             activity={activity}
             mobileLabel={mobileSendLabel}

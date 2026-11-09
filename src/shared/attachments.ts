@@ -55,13 +55,14 @@ const fileFormats: FileFormat[] = [
   { extensions: 'mp3 wav ogg m4a flac', kind: '音频', media: 'audio' },
   { extensions: 'doc docx', kind: 'Word 文档' },
   { extensions: 'xls xlsx ods', kind: '电子表格' },
-  { extensions: 'csv', kind: '电子表格', previewable: true },
+  { extensions: 'csv tsv', kind: '电子表格', previewable: true },
   { extensions: 'ppt pptx odp', kind: '演示文稿' },
   { extensions: 'pdf', kind: 'PDF 文档', previewable: true },
   { extensions: 'odt', kind: '文档' },
   { extensions: 'zip gz tgz tar 7z rar xz bz2 tar.gz tar.xz tar.bz2', kind: '压缩包' },
   {
-    extensions: 'txt text md markdown log tsv json jsonl yaml yml toml ini py js jsx ts tsx sh sql tex',
+    extensions:
+      'txt text md markdown log json jsonl yaml yml toml ini py js jsx ts tsx sh sql tex rs c cpp h',
     kind: '文本文件',
     previewable: true,
   },
@@ -76,7 +77,9 @@ const formatsByExtension = new Map(
 export function attachmentInfo(path: string, displayName?: string) {
   // Encrypted transport URLs intentionally hide the filename; use the decrypted name for presentation.
   const name = displayName || attachmentName(path);
-  const extension = /(?:\.)(tar\.(?:gz|xz|bz2)|[a-z0-9]{1,10})$/i.exec(name)?.[1].toLowerCase() ?? '';
+  const extensionOf = (value: string) =>
+    /(?:\.)(tar\.(?:gz|xz|bz2)|[a-z0-9]{1,10})$/i.exec(value)?.[1].toLowerCase();
+  const extension = extensionOf(name) ?? extensionOf(attachmentName(path)) ?? '';
   const format = path.startsWith('dsh-image:') ? imageFormat : formatsByExtension.get(extension);
   return {
     name,

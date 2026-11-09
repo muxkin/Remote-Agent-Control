@@ -62,13 +62,14 @@ export function messagingFixtureRequest(
     return client.send(message[1], String(text), String(clientId), options as SendMessageOptions);
   }
   if (message && method === 'PATCH' && message[2]) {
-    const { revision, text, state } = body!;
+    const { revision, text, state, activities } = body!;
     return client.updateMessage(
       message[1],
       message[2],
       Number(revision),
       String(text),
       state as MessageState,
+      activities as Parameters<EncryptedMessagingClient['updateMessage']>[5],
     );
   }
   return client.request(path, method, body);

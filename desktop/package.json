@@ -1,6 +1,6 @@
 {
   "name": "agent-space-desktop",
-  "version": "0.4.2",
+  "version": "0.4.4",
   "private": true,
   "description": "Agent 空间电脑适配器",
   "desktopName": "org.agent-space.adapter.desktop",

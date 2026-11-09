@@ -7,12 +7,14 @@ export function Dialog({
   title,
   titleIcon,
   className,
+  returnFocus,
   onClose,
   children,
 }: {
   title: string;
   titleIcon?: ReactNode;
   className?: string;
+  returnFocus?: HTMLElement | null;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -20,13 +22,13 @@ export function Dialog({
     id = useId();
   useLayoutEffect(() => {
     const dialog = ref.current!,
-      trigger = document.activeElement;
+      trigger = returnFocus ?? document.activeElement;
     dialog.showModal();
     return () => {
       dialog.close();
       if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true });
     };
-  }, []);
+  }, [returnFocus]);
   return createPortal(
     <dialog
       className={className ? `im-dialog ${className}` : 'im-dialog'}

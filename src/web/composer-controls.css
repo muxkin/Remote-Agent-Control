@@ -314,3 +314,50 @@
   .composer-actions :is(.permission-trigger, .composer-tool-trigger) > svg:first-child { width: 20px; height: 20px; }
   .composer-actions .composer-model { flex: 1; min-width: 0; }
 }
+
+.outgoing-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.outgoing-text { white-space: pre-wrap; }
+.outgoing-files {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.outgoing-files li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.outgoing-files svg { flex: 0 0 auto; }
+.outgoing-status {
+  color: var(--muted);
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.outgoing-status > [role='status'] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.outgoing-status .sending-spinner { width: 12px; height: 12px; }
+.outgoing-status .delivery-feedback { margin: 0; text-align: start; }
+.outgoing-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+.outgoing-actions button {
+  color: var(--accent);
+  min-height: 36px;
+  padding: 4px;
+}
+.im-message.mine .outgoing-status { text-align: end; }
+.im-message.mine .outgoing-actions { justify-content: flex-end; }

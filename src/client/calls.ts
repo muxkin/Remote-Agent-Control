@@ -20,8 +20,8 @@ export class AgentCallsClient {
       signal,
     );
   }
-  ready(video: boolean, available = true) {
-    return this.messaging.raw<{ expiresAt: number }>('/calls/presence', 'PUT', { video, available });
+  ready(video: boolean, available = true, signal?: AbortSignal) {
+    return this.messaging.raw<{ expiresAt: number }>('/calls/presence', 'PUT', { video, available }, signal);
   }
   ice(signal?: AbortSignal) {
     return this.messaging.raw<{ iceServers: CallIceServer[] }>('/calls/ice', 'GET', undefined, signal);

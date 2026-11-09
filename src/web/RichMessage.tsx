@@ -9,7 +9,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import DOMPurify from 'dompurify';
-import { localReference, remarkFileCitations } from '../shared/attachments';
+import { attachmentInfo, localReference, remarkFileCitations } from '../shared/attachments';
 import { FileAttachment as LocalLink } from './FileAttachment';
 import { Media } from './MediaAttachment';
 import { useVisible } from './useVisible';
@@ -219,7 +219,30 @@ export default memo(function RichMessage({
           </a>
         );
       },
-      p: ({ children }) => <div className="markdown-paragraph">{children}</div>,
+      p: ({ children, node }) => {
+        const elements = node?.children.filter((child) => child.type !== 'text' || child.value.trim());
+        const link = elements?.length === 1 ? elements[0] : undefined;
+        if (link?.type === 'element' && link.tagName === 'a') {
+          const href = link.properties.href;
+          if (typeof href === 'string' && localReference(href) && attachmentInfo(href).media === 'image') {
+            const label = link.children
+              .map((child) => (child.type === 'text' ? child.value : ''))
+              .join('')
+              .trim();
+            return (
+              <div className="markdown-paragraph">
+                <Media
+                  src={href}
+                  label={label || attachmentInfo(href).name}
+                  threadId={threadId}
+                  mediaType="image"
+                />
+              </div>
+            );
+          }
+        }
+        return <div className="markdown-paragraph">{children}</div>;
+      },
     }),
     [threadId, streaming],
   );

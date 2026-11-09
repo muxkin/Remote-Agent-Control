@@ -104,3 +104,27 @@ it('does not retry an ambiguous native creation', async () => {
   expect(client.request).toHaveBeenCalledOnce();
   expect(requests).toHaveLength(0);
 });
+it('renames and forks the explicit local Codex thread through the Desktop tools', async () => {
+  const { app, requests, client } = setup();
+  const branch = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  vi.mocked(app.has).mockImplementation((tool) => ['set_thread_title', 'fork_thread'].includes(tool));
+  await expect(app.rename(THREAD, 'rename-request', '新名称')).resolves.toBeNull();
+  client.request.mockResolvedValueOnce({
+    success: true,
+    contentItems: [{ type: 'inputText', text: JSON.stringify({ threadId: branch, hostId: 'local' }) }],
+  });
+  await expect(app.fork(THREAD, 'fork-request')).resolves.toBe(branch);
+  expect(requests[0]).toMatchObject({
+    tool: 'set_thread_title',
+    threadId: THREAD,
+    callId: 'pocket-rename-request',
+    arguments: { source: 'codex', threadId: THREAD, title: '新名称' },
+  });
+  expect(client.request.mock.calls[1][1]).toMatchObject({
+    tool: 'fork_thread',
+    threadId: THREAD,
+    callId: 'pocket-fork-request',
+    arguments: { threadId: THREAD, environment: { type: 'same-directory' } },
+  });
+  await expect(app.fork(THREAD, 'bad-result')).rejects.toThrow('分支标识');
+});

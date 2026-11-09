@@ -1,8 +1,8 @@
-import { userContent } from './user-content.js';
+import { userAttachments } from './user-content.js';
 import { userMessageText } from './async-questions.js';
 import { DatabaseSync } from 'node:sqlite';
 import { open, realpath, mkdir, writeFile, rename, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join, sep } from 'node:path';
 import { textOf, skillsOf, pluginsOf } from './timeline.js';
 import type { Message, ThreadSummary } from '../../../src/shared/types.js';
@@ -16,13 +16,70 @@ import { viewedImage } from './recovered-images.js';
 const PAGE_BYTES = 512 * 1024;
 const MAX_LINE = 4 * 1024 * 1024;
 type HistoryPage = { messages: Message[]; nextCursor: string | null };
+type TurnEnd = { id: string; answer?: string };
+function answerHash(text: string): string {
+  return createHash('sha256').update(text).digest('base64url');
+}
+
+// A page can start between a reply and its completion event. Carry just the
+// boundary and a digest for legacy replies whose phase was not recorded.
+class RolloutPageMessages {
+  reply = -1;
+  leadingEnd?: TurnEnd;
+  private sawTurnContent = false;
+  constructor(readonly messages: Message[] = []) {}
+  complete(end: TurnEnd) {
+    const candidate = this.messages[this.reply];
+    if (
+      candidate &&
+      (candidate.phase === 'final_answer' ||
+        (!candidate.phase && end.answer && answerHash(candidate.text) === end.answer))
+    )
+      this.messages[this.reply] = { ...candidate, turnId: end.id, turnBoundary: true };
+    if (!this.sawTurnContent) this.leadingEnd = end;
+    this.sawTurnContent = true;
+    this.reply = -1;
+  }
+  append(record: any, fallbackId: string) {
+    if (record.type === 'event_msg') {
+      const event = record.payload;
+      if (event?.type === 'task_complete' && typeof event.turn_id === 'string' && event.turn_id) {
+        this.complete({
+          id: event.turn_id,
+          answer:
+            typeof event.last_agent_message === 'string'
+              ? answerHash(codexAnswer(event.last_agent_message).text)
+              : undefined,
+        });
+      } else if (['task_started', 'task_complete', 'turn_aborted'].includes(event?.type)) {
+        this.sawTurnContent = true;
+        this.reply = -1;
+      }
+    }
+    const message = rolloutMessage(record, fallbackId);
+    if (!message) return;
+    if (message.role !== 'tool') this.sawTurnContent = true;
+    if (message.role === 'user') this.reply = -1;
+    if (message.role === 'assistant' && (message.phase === 'final_answer' || !message.phase))
+      this.reply = this.messages.length;
+    this.messages.push(message);
+  }
+}
 export class HistoryIndex {
   private files = new RolloutFiles();
   private db: DatabaseSync | null = null;
   private pendingLatest = new Map<string, Promise<HistoryPage>>();
   private latest = new Map<
     string,
-    { file: string; identity: string; start: number; size: number; tail: JsonlTail; page: HistoryPage }
+    {
+      file: string;
+      identity: string;
+      start: number;
+      size: number;
+      tail: JsonlTail;
+      page: HistoryPage;
+      reply: number;
+    }
   >();
   private projectIndex: ProjectIndex;
   constructor(
@@ -168,18 +225,20 @@ export class HistoryIndex {
         info.size >= cached.size &&
         info.size - cached.start <= 2 * PAGE_BYTES
       ) {
-        const appended: Message[] = [];
+        const projection = new RolloutPageMessages([...cached.page.messages]);
+        projection.reply = cached.reply;
         const result = await cached.tail.read(file, (record, offset) => {
-          const message = rolloutMessage(record, `${id}:${offset}`);
-          if (message) appended.push(message);
+          projection.append(record, `${id}:${offset}`);
         });
         if (!result.reset) {
           cached.size = info.size;
-          cached.page = { ...cached.page, messages: [...cached.page.messages, ...appended] };
+          cached.reply = projection.reply;
+          cached.page = { ...cached.page, messages: projection.messages };
           return cached.page;
         }
       }
       let end = info.size;
+      let trailingEnd: TurnEnd | undefined;
       if (cursor) {
         let parsed;
         try {
@@ -195,6 +254,11 @@ export class HistoryIndex {
         )
           throw new Error('History changed; reload from the latest page');
         end = parsed.end;
+        if (typeof parsed.turnEnd?.id === 'string' && parsed.turnEnd.id.length <= 200)
+          trailingEnd = {
+            id: parsed.turnEnd.id,
+            answer: typeof parsed.turnEnd.answer === 'string' ? parsed.turnEnd.answer : undefined,
+          };
       }
       let start = Math.max(0, end - PAGE_BYTES);
       let bytes: Buffer;
@@ -210,29 +274,41 @@ export class HistoryIndex {
         start = Math.max(0, start - PAGE_BYTES);
       }
       const nextEnd = start + begin;
-      const messages: Message[] = [];
+      const projection = new RolloutPageMessages();
       let offset = nextEnd;
       const completeEnd = bytes.lastIndexOf(10) + 1;
       for (const line of bytes.subarray(begin, completeEnd).toString('utf8').split('\n')) {
         const lineOffset = offset;
         offset += Buffer.byteLength(line) + 1;
         try {
-          const message = rolloutMessage(JSON.parse(line), `${id}:${lineOffset}`);
-          if (message) messages.push(message);
+          projection.append(JSON.parse(line), `${id}:${lineOffset}`);
         } catch {
           /* partial tail or malformed record */
         }
       }
+      if (trailingEnd) projection.complete(trailingEnd);
       const page = {
-        messages,
+        messages: projection.messages,
         nextCursor:
-          nextEnd > 0 ? Buffer.from(JSON.stringify({ identity, end: nextEnd })).toString('base64url') : null,
+          nextEnd > 0
+            ? Buffer.from(
+                JSON.stringify({ identity, end: nextEnd, turnEnd: projection.leadingEnd }),
+              ).toString('base64url')
+            : null,
       };
       if (!cursor) {
         const tail = new JsonlTail();
         tail.seed(identity, start + bytes.length, bytes.subarray(completeEnd));
         this.latest.delete(id);
-        this.latest.set(id, { file, identity, start: nextEnd, size: info.size, tail, page });
+        this.latest.set(id, {
+          file,
+          identity,
+          start: nextEnd,
+          size: info.size,
+          tail,
+          page,
+          reply: projection.reply,
+        });
         if (this.latest.size > 8) this.latest.delete(this.latest.keys().next().value!);
       }
       return page;
@@ -346,12 +422,12 @@ export function rolloutMessage(record: any, fallbackId: string): Message | null 
       ),
     };
   }
-  const media = itemMedia(item).map(mediaReference);
+  const media = itemMedia(item);
   if (media.length && item.type !== 'message')
     return {
       id: `${item.id ?? fallbackId}:media:history`,
       role: 'tool',
-      text: media.map((ref) => `![附件](<${ref}>)`).join('\n'),
+      text: media.map((source) => `![附件](<${mediaReference(source)}>)`).join('\n'),
     };
   if (
     [
@@ -391,18 +467,15 @@ export function rolloutMessage(record: any, fallbackId: string): Message | null 
     role: item.role,
     ...(item.role === 'user'
       ? {
-          ...userContent(text),
           text: userMessageText(text),
-          ...(media.length
-            ? {
-                attachments: [
-                  ...(userContent(text).attachments ?? []),
-                  ...media.map((path) => ({ name: '附件', path })),
-                ],
-              }
-            : {}),
+          attachments: userAttachments(text, media),
         }
-      : { text: [text, ...media.map((ref) => `![附件](<${ref}>)`)].filter(Boolean).join('\n'), codex }),
+      : {
+          text: [text, ...media.map((source) => `![附件](<${mediaReference(source)}>)`)]
+            .filter(Boolean)
+            .join('\n'),
+          codex,
+        }),
     phase: item.phase ?? item.channel,
     ...(item.role === 'user' ? { skills: skillsOf(item.content) } : {}),
     ...(item.role === 'user' ? { plugins: pluginsOf(item.content) } : {}),

@@ -137,6 +137,7 @@ export function Media({
       name={name}
       onDownload={download}
       onCopyImage={media === 'image' ? copyOriginal : undefined}
+      hideMore={media === 'image'}
       surface={compact ? 'compact' : 'media'}
       onRemove={onRemove}
     >
@@ -248,6 +249,7 @@ export function Media({
             onError={() => failed()}
             onRetry={() => renew()}
             onCopy={copyOriginal}
+            onDownload={download}
           />
         )}
       </div>

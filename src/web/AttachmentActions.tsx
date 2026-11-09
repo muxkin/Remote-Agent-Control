@@ -14,6 +14,7 @@ export function AttachmentActions({
   onPreview,
   onRemove,
   onCopyImage,
+  hideMore = false,
   surface = 'card',
   children,
 }: {
@@ -23,6 +24,7 @@ export function AttachmentActions({
   onPreview?: () => void | Promise<void>;
   onRemove?: () => void;
   onCopyImage?: () => Promise<void>;
+  hideMore?: boolean;
   surface?: 'inline' | 'card' | 'media' | 'compact';
   children: ReactNode | ((open: OpenDetails) => ReactNode);
 }) {
@@ -105,6 +107,7 @@ export function AttachmentActions({
           <Icon name="close" size={16} />
         </button>
       ) : (
+        !hideMore &&
         surface !== 'inline' && (
           <button
             type="button"

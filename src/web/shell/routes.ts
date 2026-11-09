@@ -61,6 +61,13 @@ export function routeURL(route: AppRoute): string {
   }
   return `/?${query}`;
 }
+
+/** Return to the parent without pushing the detail page back onto the history stack. */
+export function backTo(route: AppRoute, navigate: (route: AppRoute, replace?: boolean) => void) {
+  if (history.state?.pocket && history.state.previousRoute === routeURL(route)) history.back();
+  else navigate(route, true);
+}
+
 export function parentRoute(route: AppRoute): AppRoute {
   if (route.page === 'messages') return { page: 'messages' };
   if (route.page === 'integrations') return { page: 'contacts' };

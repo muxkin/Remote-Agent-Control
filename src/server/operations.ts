@@ -43,10 +43,10 @@ export class Operations extends EventEmitter {
     const { id, threadId, kind } = operation;
     try {
       // Creation is an adapter operation; it needs no existing conversation subscription.
-      if (kind === 'create') {
+      if (kind === 'create' || kind === 'fork' || kind === 'rename') {
         this.update(id, 'dispatching');
         const resultId = await this.desktop.execute(threadId, commandInput(kind, input), id);
-        if (resultId) this.store.resultThread(id, resultId, this.backendId);
+        if (kind !== 'rename' && resultId) this.store.resultThread(id, resultId, this.backendId);
         this.update(id, 'completed');
         return;
       }

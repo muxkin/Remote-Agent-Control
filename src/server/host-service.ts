@@ -455,8 +455,6 @@ export class HostService {
   ) {
     const backend = this.registry.get(backendId),
       key = conversationKey(backendId, threadId);
-    const thread = await backend.history.get(threadId);
-    if (!thread) throw new RpcError('找不到此会话', 404);
     const existing = session.subscriptions.get(key);
     if (existing) {
       existing.known = known;
@@ -467,7 +465,18 @@ export class HostService {
     }
     if (session.subscriptions.size >= 8) throw new RpcError('订阅数量过多', 429);
     const sub: Subscription = { known, cancelled: false, backendId, threadId };
+    // Register before the first await so a rapid unwatch can cancel the pending lookup.
     session.subscriptions.set(key, sub);
+    let thread;
+    try {
+      thread = await backend.history.get(threadId);
+      if (sub.cancelled) return;
+      if (!thread) throw new RpcError('找不到此会话', 404);
+    } catch (error) {
+      if (sub.cancelled) return;
+      this.unwatch(session, key);
+      throw error;
+    }
     const preview = async () => {
       if (sub.cancelled || backend.view(threadId)?.synchronized) return;
       const summary = thread;

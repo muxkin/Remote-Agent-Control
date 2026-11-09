@@ -1,10 +1,12 @@
 /** Frontend regression on an isolated simulated desktop; never approves a real task. */
 import { chromium, expect } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { config, host, store, native, close } from './v2-fixture.js';
 import { THREAD, TURN } from '../test/helpers.js';
 import { saveRecoveryCode } from './lib/messaging-smoke.js';
 import { mathCopyFixture, verifyMathCopy } from './lib/math-copy-smoke.js';
+import sharp from 'sharp';
 const report: any = { fixture: true, checks: {}, errors: [], physicalPhone: false };
 const browser = await chromium.launch({
   channel: 'chrome',
@@ -67,7 +69,64 @@ try {
   native.snapshot();
   await page.setViewportSize({ width: 1440, height: 900 });
   await verifyMathCopy(page, page.locator('.message.assistant').filter({ hasText: '起始 前文' }));
+  const images = await Promise.all(
+    ['#246f5c', '#5971a0', '#ab763e', '#8a5b74', '#285d77'].map(async (background, index) => {
+      const png = await sharp({
+        create: { width: index % 2 ? 200 : 640, height: index % 2 ? 640 : 220, channels: 3, background },
+      })
+        .png()
+        .toBuffer();
+      return { type: 'input_image', image_url: `data:image/png;base64,${png.toString('base64')}` };
+    }),
+  );
+  native.current.turnHistory.history.entitiesByKey.one.items.push({
+    type: 'userMessage',
+    id: 'media-gallery-fixture',
+    content: [{ type: 'text', text: '比较这些参考图片' }, ...images],
+  });
+  native.revision++;
+  native.snapshot();
+  const galleryMessage = page.locator('[data-user-turn="media-gallery-fixture"]');
+  await expect(galleryMessage.getByText('比较这些参考图片')).toBeVisible();
+  const thumbnails = galleryMessage.locator('.attachment-gallery .image-thumbnail');
+  await expect(thumbnails).toHaveCount(5);
+  expect(
+    await thumbnails.evaluateAll(
+      (elements) => new Set(elements.map((el) => el.getBoundingClientRect().y)).size,
+    ),
+  ).toBe(1);
+  await galleryMessage.screenshot({ path: '.test-output/v3/desktop-attachment-gallery.png' });
+  await thumbnails.first().click();
+  await expect(page.getByRole('button', { name: '关闭图片预览' })).toBeVisible();
+  await page.getByRole('button', { name: '关闭图片预览' }).click();
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect
+    .poll(() =>
+      thumbnails.evaluateAll((elements) => new Set(elements.map((el) => el.getBoundingClientRect().y)).size),
+    )
+    .toBeGreaterThan(1);
+  await galleryMessage.screenshot({ path: '.test-output/v3/mobile-attachment-gallery.png' });
+  report.checks.imageGallery = true;
+  const linkedImage = join(config.desktopRoot, 'desktop-preview.png');
+  await writeFile(linkedImage, Buffer.from(images[0].image_url.split(',')[1], 'base64'));
+  native.current.turnHistory.history.entitiesByKey.one.items.push({
+    type: 'agentMessage',
+    id: 'linked-image-fixture',
+    text: `可以查看 [桌面预览](<${linkedImage}>)。\n\n[单独展示的图片](<${linkedImage}>)`,
+  });
+  native.revision++;
+  native.snapshot();
+  const imageLink = page.getByRole('button', { name: '桌面预览', exact: true });
+  await imageLink.click();
+  const linkedPreview = page.getByRole('dialog', { name: 'desktop-preview.png', exact: true });
+  await expect(linkedPreview.getByRole('img')).toBeVisible();
+  await linkedPreview.getByRole('img').evaluate((element: HTMLImageElement) => element.decode());
+  await page.keyboard.press('Escape');
+  await expect(imageLink).toBeFocused();
+  const linkedThumbnail = page.getByRole('button', { name: '放大预览：单独展示的图片', exact: true });
+  await expect(linkedThumbnail.getByRole('img')).toBeVisible();
+  await linkedThumbnail.getByRole('img').evaluate((element: HTMLImageElement) => element.decode());
+  report.checks.imageLinks = true;
   report.checks.mathCopy = true;
   await page.getByLabel('消息', { exact: true }).fill('draft-kept-between-modules');
   expect(new URL(page.url()).searchParams.get('host')).toBe(host.identity.peerId);

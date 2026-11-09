@@ -1,4 +1,6 @@
 import type { Message } from '../../../src/shared/types.js';
+import { attachmentInfo, attachmentName } from '../../../src/shared/attachments.js';
+import { mediaReference } from '../../../src/server/content-media.js';
 
 export type Attachment = { name: string; path: string };
 type NativeInput =
@@ -77,4 +79,20 @@ export function userContent(raw: string): Pick<Message, 'text' | 'attachments'> 
     }
   }
   return { text, ...(attachments.length ? { attachments } : {}) };
+}
+
+/** Keep native media with its owning input, using names from the upload envelope when available. */
+export function userAttachments(raw: string, sources: string[]): Message['attachments'] {
+  const files = new Map(userContent(raw).attachments?.map((file) => [file.path, file]));
+  for (const source of sources) {
+    const path = mediaReference(source);
+    const original = files.get(source) ?? files.get(path);
+    const media = attachmentInfo(path).media ?? 'image';
+    files.set(path, {
+      path,
+      media,
+      name: original?.name ?? (path.startsWith('pocket-inline:') ? '会话附件' : attachmentName(path)),
+    });
+  }
+  return files.size ? [...files.values()] : undefined;
 }

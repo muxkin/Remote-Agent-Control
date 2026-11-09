@@ -17,6 +17,7 @@ import { creationBody } from './control-schemas.js';
 import { responseBody } from './control-schemas.js';
 import {
   uuid,
+  conversationId,
   params,
   pageQuery,
   sendBody,
@@ -43,10 +44,9 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
   const operations = new Operations(desktop, store, backendId);
   const submit = operations.submit.bind(operations);
   operations.submit = (...args) => {
-    requireCapability(
-      desktop,
-      args[3] === 'control' ? 'settings' : args[3] === 'queue-remove' ? 'queue' : args[3],
-    );
+    const kind = args[3];
+    if (kind !== 'rename' && kind !== 'fork')
+      requireCapability(desktop, kind === 'control' ? 'settings' : kind === 'queue-remove' ? 'queue' : kind);
     return submit(...args);
   };
   const media = new MediaService({ ...scopedConfig, media: undefined });
@@ -187,6 +187,40 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
           JSON.stringify({ control: body.control }),
         ),
       );
+  });
+  app.post('/api/threads/:id/rename', async (req, reply) => {
+    const { id } = params.parse(req.params);
+    const { requestId, title } = z
+      .object({
+        requestId: uuid,
+        title: z
+          .string()
+          .trim()
+          .min(1)
+          .max(160)
+          .regex(/^[^\x00-\x1f\x7f]+$/),
+      })
+      .strict()
+      .parse(req.body);
+    if (!(await history.get(id))) return reply.code(404).send({ error: '找不到此会话' });
+    if (!desktop.status().capabilities.renameThread)
+      return reply.code(409).send({ error: '当前桌面暂不可改名' });
+    return reply
+      .code(202)
+      .send(operations.submit(req.device.id, id, requestId, 'rename', JSON.stringify({ title })));
+  });
+  app.post('/api/threads/:id/fork', async (req, reply) => {
+    const { id } = params.parse(req.params);
+    const { requestId, lastTurnId } = z
+      .object({ requestId: uuid, lastTurnId: conversationId.optional() })
+      .strict()
+      .parse(req.body);
+    if (!(await history.get(id))) return reply.code(404).send({ error: '找不到此会话' });
+    if (!desktop.status().capabilities[lastTurnId === undefined ? 'forkThread' : 'forkFromTurn'])
+      return reply.code(409).send({ error: '当前桌面暂不可创建会话分支' });
+    return reply
+      .code(202)
+      .send(operations.submit(req.device.id, id, requestId, 'fork', JSON.stringify({ lastTurnId })));
   });
   app.get('/api/threads/:id/references', async (req, reply) => {
     const { id } = params.parse(req.params);

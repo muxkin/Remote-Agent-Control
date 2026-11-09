@@ -9,6 +9,8 @@ export function TranscriptMessages({
   requests = [],
   agent,
   codex,
+  onFork,
+  forkDisabled,
 }: {
   messages: Message[];
   threadId: string;
@@ -16,6 +18,8 @@ export function TranscriptMessages({
   requests?: ConversationRequest[];
   agent: { name: string; avatar?: string };
   codex: boolean;
+  onFork?: (turnId: string) => void;
+  forkDisabled?: boolean;
 }) {
   const groups: { key: string; tools: boolean; messages: Message[] }[] = [];
   for (const original of messages) {
@@ -43,7 +47,14 @@ export function TranscriptMessages({
         )}
         {m.role === 'user' ? '你' : m.role === 'assistant' ? agent.name : '工具活动'}
       </div>
-      <MessageContent message={m} threadId={threadId} streaming={m.turnId === activeTurnId} codex={codex} />
+      <MessageContent
+        message={m}
+        threadId={threadId}
+        streaming={!!activeTurnId && m.turnId === activeTurnId}
+        codex={codex}
+        onFork={onFork && m.turnBoundary && m.turnId ? () => onFork(m.turnId!) : undefined}
+        forkDisabled={forkDisabled}
+      />
     </article>
   );
   return groups.map((group) =>

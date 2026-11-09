@@ -6,7 +6,7 @@ import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
 import { modules, workspaceTools } from './modules';
-import { parentRoute, readRoute, routeURL, type AppRoute } from './routes';
+import { backTo, parentRoute, readRoute, routeURL, type AppRoute } from './routes';
 import { useAppViewport } from './viewport';
 const AgentWorkspace = lazy(workspaceTools[0].load);
 const MessagingPages = lazy(() => import('../messaging/MessagingPages'));
@@ -28,6 +28,8 @@ export function AppShell() {
   const unread = conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
   const [route, setRoute] = useState(() => readRoute(new URL(location.href)));
   const workbenchRoute = useRef<AppRoute>(route.page === 'workbench' ? route : { page: 'workbench' });
+  const lastChat = useRef<{ account: string; id: string }>(undefined);
+  const accountId = user?.id;
   const [ready, setReady] = useState(false);
   const [hosts, setHosts] = useState<PairedHost[]>([]);
   const [hostId, setHostId] = useState('');
@@ -41,11 +43,47 @@ export function AppShell() {
       next = { ...next, host: deviceSession.host?.hostId };
     if (next.page === 'workbench') workbenchRoute.current = next;
     if (routeURL(next) !== location.pathname + location.search) {
-      history[replace ? 'replaceState' : 'pushState']({ pocket: true }, '', routeURL(next));
+      const current = readRoute(new URL(location.href));
+      let previousRoute = replace ? history.state?.previousRoute : routeURL(current);
+      if (
+        !replace &&
+        next.page !== current.page &&
+        (next.conversation || next.thread) &&
+        matchMedia('(max-width: 700px)').matches
+      ) {
+        const parent = routeURL(parentRoute(next));
+        history.pushState({ pocket: true, previousRoute }, '', parent);
+        previousRoute = parent;
+      }
+      history[replace ? 'replaceState' : 'pushState']({ pocket: true, previousRoute }, '', routeURL(next));
     }
     setRoute(next);
     if (next.page === 'workbench' || next.page === 'pair') setWorkspaceVisited(true);
   }, []);
+  useEffect(() => {
+    if (
+      accountId &&
+      route.page === 'messages' &&
+      route.conversation &&
+      conversations.some(({ id }) => id === route.conversation)
+    ) {
+      lastChat.current = { account: accountId, id: route.conversation };
+      try {
+        sessionStorage.setItem(`pocket-last-chat:${accountId}`, route.conversation);
+      } catch {}
+    }
+  }, [accountId, route.page, route.conversation, conversations]);
+  function resumeMessages(): AppRoute {
+    let id = lastChat.current?.account === accountId ? lastChat.current?.id : undefined;
+    if (accountId && !id) {
+      try {
+        id = sessionStorage.getItem(`pocket-last-chat:${accountId}`) ?? undefined;
+      } catch {}
+    }
+    return id && conversations.some((chat) => chat.id === id)
+      ? { page: 'messages', conversation: id }
+      : { page: 'messages' };
+  }
   useEffect(() => {
     const pop = () => {
       const next = readRoute(new URL(location.href));
@@ -107,7 +145,7 @@ export function AppShell() {
       : route.page === 'integrations'
         ? 'contacts'
         : 'me';
-  const back = () => navigate(parentRoute(route));
+  const back = () => backTo(parentRoute(route), navigate);
   return (
     <AccountSecurity>
       <div
@@ -118,11 +156,7 @@ export function AppShell() {
           {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
             <section className="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
               <Suspense fallback={<PageLoading label="正在打开工作台…" />}>
-                <PageBoundary
-                  page="workbench"
-                  backLabel="返回消息"
-                  onBack={() => navigate({ page: 'messages' })}
-                >
+                <PageBoundary page="workbench" backLabel="返回消息" onBack={() => navigate(resumeMessages())}>
                   <AgentWorkspace
                     key={`${hostId || 'unpaired'}:${backendId}`}
                     active={activeWorkspace}
@@ -202,7 +236,15 @@ export function AppShell() {
                 key={module.id}
                 aria-current={activeModule === module.id ? 'page' : undefined}
                 onClick={() =>
-                  navigate(module.id === 'workbench' ? workbenchRoute.current : { page: module.id })
+                  navigate(
+                    module.id === 'workbench'
+                      ? workbenchRoute.current
+                      : module.id === 'messages'
+                        ? route.page === 'messages'
+                          ? route
+                          : resumeMessages()
+                        : { page: module.id },
+                  )
                 }
               >
                 <Icon name={module.icon} size={24} />

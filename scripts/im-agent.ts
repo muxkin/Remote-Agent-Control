@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { EncryptedMessagingClient } from '../src/client/encrypted-messaging.js';
 import { protectAccount, type AccountSecrets } from '../src/shared/account-crypto.js';
 import type { ChatUser } from '../src/shared/messaging.js';
+import { agentActivities } from '../src/shared/agent-activity.js';
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -27,6 +28,7 @@ const { values, positionals } = parseArgs({
     message: { type: 'string' },
     revision: { type: 'string' },
     status: { type: 'string' },
+    activities: { type: 'string' },
     members: { type: 'string' },
     add: { type: 'string' },
     remove: { type: 'string' },
@@ -66,7 +68,7 @@ async function main() {
       group:
         'group --name NAME --members USER_ID,USER_ID; group-update --conversation ID [--name NAME] [--add IDS] [--remove ID] [--owner ID] [--close]',
       stream:
-        'stream-start --conversation ID --request-id ID [--text TEXT]; stream-update --conversation ID --message ID --revision N --text FULL_TEXT [--status streaming|complete|failed]; cancel --conversation ID --message ID',
+        'stream-start --conversation ID --request-id ID [--text TEXT]; stream-update --conversation ID --message ID --revision N --text FULL_TEXT [--status streaming|complete|failed] [--activities JSON]; cancel --conversation ID --message ID',
       interactions:
         'request --conversation ID --file request.json --request-id STABLE_ID; request-cancel --conversation ID --message ID; responses arrive in message.interaction via sync',
       stickers:
@@ -200,6 +202,7 @@ async function main() {
         number(required(values.revision, '--revision'), 0),
         values.text ?? '',
         status as 'streaming' | 'complete' | 'failed',
+        values.activities === undefined ? undefined : agentActivities.parse(JSON.parse(values.activities)),
       );
     }
     case 'cancel':

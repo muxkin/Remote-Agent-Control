@@ -193,8 +193,11 @@ function CallDialog({
           )}
         </div>
         {phase === 'connected' && (
-          <span className="call-timer" role="timer" aria-label="通话时长">
-            {duration}
+          <span className="call-timer">
+            <span role="timer" aria-label="通话时长">
+              {duration}
+            </span>
+            {view?.route && <span> · {view.route === 'direct' ? '直连' : '中继'}</span>}
           </span>
         )}
         {!started ? (

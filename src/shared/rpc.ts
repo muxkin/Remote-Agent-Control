@@ -21,6 +21,8 @@ export const RPC_ROUTES = {
   'plugins.list': ['GET', '/api/threads/:id/plugins'],
   'creation.projects': ['GET', '/api/threads/:id/projects'],
   'thread.create': ['POST', '/api/threads/:id/create'],
+  'thread.rename': ['POST', '/api/threads/:id/rename'],
+  'thread.fork': ['POST', '/api/threads/:id/fork'],
   'thread.open': ['POST', '/api/threads/:id/open'],
   'message.send': ['POST', '/api/threads/:id/messages'],
   'turn.steer': ['POST', '/api/threads/:id/steer'],

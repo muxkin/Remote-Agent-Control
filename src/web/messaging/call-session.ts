@@ -9,6 +9,7 @@ export interface CallViewState {
   muted: boolean;
   camera: boolean;
   connectedAt?: number;
+  route?: 'direct' | 'relay';
 }
 const endedReason: Record<string, string> = {
   unanswered: 'Agent 暂未接听',
@@ -25,6 +26,7 @@ export class AgentCallSession {
   private id?: string;
   private timer?: ReturnType<typeof setInterval>;
   private deadline?: ReturnType<typeof setTimeout>;
+  private routeTimer?: ReturnType<typeof setInterval>;
   private candidates: RTCIceCandidateInit[] = [];
   private sending = Promise.resolve();
   private stopped = false;
@@ -37,12 +39,29 @@ export class AgentCallSession {
     this.state = { ...this.state, ...value };
     this.changed(this.state);
   }
+  private async checkRoute(pc: RTCPeerConnection) {
+    const report = await pc.getStats().catch(() => undefined);
+    if (!report || this.stopped || pc.connectionState !== 'connected') return;
+    const routes = new Set<string>();
+    report.forEach((transport) => {
+      if (transport.type !== 'transport' || !transport.selectedCandidatePairId) return;
+      const pair = report.get(transport.selectedCandidatePairId);
+      const local = report.get(pair?.localCandidateId)?.candidateType;
+      const remote = report.get(pair?.remoteCandidateId)?.candidateType;
+      if (local && remote) routes.add(local === 'relay' || remote === 'relay' ? 'relay' : 'direct');
+    });
+    const route = routes.has('relay') ? 'relay' : routes.has('direct') ? 'direct' : undefined;
+    if (route !== this.state.route) this.update({ route });
+  }
   async start(cid: string, mode: CallMode) {
     const signal = this.abort.signal;
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection)
         throw Error('当前浏览器不支持安全音视频通话，请使用 HTTPS 页面和支持 WebRTC 的浏览器');
-      const cap = await this.client.capabilities(cid, signal);
+      const [cap, { iceServers }] = await Promise.all([
+        this.client.capabilities(cid, signal),
+        this.client.ice(signal),
+      ]);
       if (!cap[mode])
         throw Error(
           mode === 'video' ? 'Agent 尚未开启视频接听，或目前离线' : 'Agent 尚未开启语音接听，或目前离线',
@@ -57,12 +76,12 @@ export class AgentCallSession {
         return;
       }
       this.update({ local, camera: mode === 'video' });
-      const { iceServers } = await this.client.ice(signal);
       this.id = crypto.randomUUID();
       const { call } = await this.client.create(cid, mode, this.id, signal);
       signal.throwIfAborted();
       this.call = call;
-      const pc = (this.pc = new RTCPeerConnection({ iceServers })),
+      // ICE ranks direct candidates ahead of TURN and can still use TURN when required.
+      const pc = (this.pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: 'all' })),
         remote = new MediaStream();
       this.update({ phase: 'ringing', remote });
       local.getTracks().forEach((t) => pc.addTrack(t, local));
@@ -85,19 +104,23 @@ export class AgentCallSession {
         if (signal.aborted) return;
         if (pc.connectionState === 'connected') {
           clearTimeout(this.deadline);
+          clearInterval(this.routeTimer);
           this.update({
             phase: 'connected',
             error: undefined,
             connectedAt: this.state.connectedAt ?? Date.now(),
           });
+          void this.checkRoute(pc);
+          this.routeTimer = setInterval(() => void this.checkRoute(pc), 5000);
         } else if (pc.connectionState === 'failed') this.close('连接失败，请检查网络或通话中继配置');
         else if (pc.connectionState === 'disconnected') {
-          this.update({ phase: 'connecting' });
+          clearInterval(this.routeTimer);
+          this.update({ phase: 'connecting', route: undefined });
           clearTimeout(this.deadline);
           this.deadline = setTimeout(() => this.close('网络已断开，通话结束'), 15_000);
         }
       };
-      this.deadline = setTimeout(() => this.close('连接超时，Agent 可能未接听或网络无法直连'), 65_000);
+      this.deadline = setTimeout(() => this.close('连接超时，Agent 可能未接听或媒体连接不可用'), 65_000);
       const offer = await pc.createOffer();
       signal.throwIfAborted();
       await pc.setLocalDescription(offer);
@@ -173,7 +196,7 @@ export class AgentCallSession {
           signal.removeEventListener('abort', done);
           resolve();
         };
-        const timer = setTimeout(done, failures ? 2000 : 1000);
+        const timer = setTimeout(done, failures ? 2000 : this.state.phase === 'connecting' ? 350 : 1000);
         signal.addEventListener('abort', done, { once: true });
         if (signal.aborted) done();
       });
@@ -227,6 +250,7 @@ export class AgentCallSession {
     this.stopped = true;
     this.abort.abort();
     clearInterval(this.timer);
+    clearInterval(this.routeTimer);
     clearTimeout(this.deadline);
     this.state.local?.getTracks().forEach((t) => t.stop());
     this.state.remote?.getTracks().forEach((t) => t.stop());
