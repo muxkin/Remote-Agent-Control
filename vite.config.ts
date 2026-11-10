@@ -22,13 +22,21 @@ export default defineConfig(() => {
   addFiles('src/shared');
   addFiles('packages/adapter-sdk/src');
   hash.update(readFileSync('package-lock.json')).update(readFileSync('vite.config.ts'));
+  const nativeVersion = readFileSync('desktop/native/Cargo.toml', 'utf8').match(
+    /^version = "([0-9.]+)"$/m,
+  )?.[1];
+  if (!nativeVersion) throw new Error('Missing native adapter version');
+  hash.update(nativeVersion);
   const buildId = hash.digest('hex').slice(0, 16);
   const themeBoot = readFileSync('src/web/theme/boot.js', 'utf8');
   const startup = readFileSync('src/web/startup.js', 'utf8');
   const startupFile = `assets/startup-${createHash('sha256').update(startup).digest('hex').slice(0, 12)}.js`;
   const themeBootFile = `assets/theme-boot-${createHash('sha256').update(themeBoot).digest('hex').slice(0, 12)}.js`;
   return {
-    define: { __POCKET_WEB_BUILD_ID__: JSON.stringify(buildId) },
+    define: {
+      __POCKET_WEB_BUILD_ID__: JSON.stringify(buildId),
+      __POCKET_NATIVE_VERSION__: JSON.stringify(nativeVersion),
+    },
     root: 'src/web',
     base: assets.base,
     build: {

@@ -1,0 +1,86 @@
+name: Native desktop releases
+on:
+  workflow_dispatch:
+  push:
+    tags: [native-v*]
+  pull_request:
+    paths:
+      - 'desktop/native/**'
+      - 'assets/branding/agent-space.ico'
+      - 'src/web/public/app-icon-*.png'
+      - 'scripts/desktop/native-*.ts'
+      - 'scripts/desktop/native-*.mjs'
+      - '.github/workflows/desktop-native.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            binary: agent-space-native
+          - os: windows-latest
+            platform: win32
+            binary: agent-space-native.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev
+      - run: npm ci --ignore-scripts
+      - name: Build the Ely desktop app
+        working-directory: desktop/native
+        run: cargo build --release --locked
+      - name: Build the console binary for protocol verification
+        working-directory: desktop/native
+        run: cargo build --release --locked --no-default-features --target-dir target/protocol-smoke
+      - name: Verify native peer identity, live controls and file transfers
+        env:
+          POCKET_NATIVE_TEST_IPC: '1'
+        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/protocol-smoke/release/${{ matrix.binary }}
+      - name: Package the native preview
+        run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-space-native-${{ matrix.platform }}-x64
+          path: |
+            dist/desktop-native-preview/AgentSpace-Native-*.zip
+            dist/desktop-native-preview/AgentSpace-Native-*.tar.xz
+            dist/desktop-native-preview/AgentSpace-Native-*.sha256
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/native-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-space-native-*-x64
+          merge-multiple: true
+          path: native-release
+      - name: Verify and publish both portable packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' desktop/native/Cargo.toml)
+          test "$GITHUB_REF_NAME" = "native-v$version"
+          cd native-release
+          linux="AgentSpace-Native-$version-linux-x64.tar.xz"
+          windows="AgentSpace-Native-$version-windows-x64.zip"
+          sha256sum --check "$linux.sha256" "$windows.sha256"
+          gh release create "$GITHUB_REF_NAME" "$linux" "$linux.sha256" "$windows" "$windows.sha256" \
+            --verify-tag --prerelease --title "Agent Space Native $version" \
+            --notes "Rust + Ely portable adapter for Linux and Windows x64. Closing the window keeps the adapter in the system tray. The tray menu can reopen it or quit the adapter. Both platforms use the Agent Space app icon."

@@ -1,5 +1,32 @@
 # 电脑适配器与可迁移的更新分发
 
+## Rust + Ely 原生预览
+
+原生适配器位于 `desktop/native`。Windows 和 Linux 共用 Rust 网关、Noise 协议、SQLite 状态和 Ely 界面。桌面端使用 tray-icon 和 auto-launch 管理托盘与当前用户自启动。服务登记成功后会记住服务地址，接入密钥只在本次进程内使用。
+
+```bash
+cd desktop/native
+cargo build --release --locked
+```
+
+在 Linux 运行 `./target/release/agent-space-native`，在 Windows 运行 `target\release\agent-space-native.exe`。设置页可输入服务地址和接入密钥，也可用 `POCKET_NATIVE_ORIGIN` 和 `POCKET_NATIVE_ENROLLMENT` 预填。用 `--configure` 重新选择服务。登录自启动应在程序放到固定路径后开启。托盘可用时，关闭窗口会从任务栏移除窗口，连接继续运行。托盘可以重新打开界面，也可以退出适配器。登录自启动直接进入托盘。Linux 桌面入口和 Windows 可执行文件均使用 Agent 空间图标。
+
+默认状态目录为平台用户数据目录下的 `agent-space-native-preview`，也可用 `POCKET_NATIVE_STATE_DIR` 选择独立私有目录。Windows 会检查当前用户和 SYSTEM 的 ACL，Linux 会检查目录和文件的属主与权限。用独立目录试用，以免两个网关以同一身份争用中继。
+
+Codex 目录按 `POCKET_NATIVE_CODEX_HOME`、`CODEX_HOME`、`~/.codex` 的顺序选择。适配器可读取 JSONL 和 Zstandard 压缩会话历史，长回复支持按需展开。工作台的「继续此会话」通过桌面工具打开历史会话，取得实时快照后即可发送、追加和中断。上传使用独立加密数据通道，支持分块校验和断点续传。同一配对设备可下载它在该会话中上传的文件，包括已完成且摘要匹配的旧版上传。会话内嵌媒体和明确引用的工作区附件也使用同一加密传输。可用 `POCKET_NATIVE_LEGACY_STATE` 指定旧版状态目录。用 `POCKET_NATIVE_CODEX_SOCKET` 和 `POCKET_NATIVE_CODEX_EXECUTABLE` 覆盖端点和程序路径，或用 `POCKET_NATIVE_READ_ONLY=1` 禁用实时控制。
+
+项目名称和会话归属读取 Codex 的项目表及桌面保存的显式分组。打开、新建、改名、整段会话分支和用量读取使用经过验证的桌面应用工具。模型目录来自本机 Codex 桌面缓存，模型、推理强度、速度、计划模式及会话权限随桌面状态同步。技能和插件来自当前项目及本机已启用的目录，选择后随下一条新消息发送。Linux 自动发现应用工具端点，Windows 可用 `POCKET_NATIVE_CODEX_APP_TOOLS` 指定本机 Named Pipe。
+
+实时会话支持命令和文件审批、按项授权、同步与异步提问、连接器表单、计划确认及原生消息队列。审批回复需匹配当前回合和请求指纹。队列修改前重新读取桌面状态，并在收到桌面确认后同步结果。指定回复分支需要支持 `lastTurnId` 的已验证 Codex CLI。适配器默认查找 Codex 桌面自带的二进制文件，也可用 `POCKET_NATIVE_CODEX_CLI` 指定本机绝对路径。
+
+原生适配器默认尝试 WebRTC，直连和中继共用同一套 Noise 配对协议。可在私有状态目录的 `transport.env` 中设置 `POCKET_NATIVE_P2P=0` 关闭直连，或设置 `POCKET_STUN_URLS` 指定 STUN 服务。配置七牛私有桶后，无法直连时，大附件优先使用对象存储。通过 `POCKET_NATIVE_STORAGE_ENV_FILE` 引用既有网关私有配置，并用 `POCKET_NATIVE_QINIU_UPLOAD_URL` 指定桶所在区域的 HTTPS 上传源。Web 服务的 CSP 和对象存储的 CORS 需要允许该上传路径。对象上传默认按 25 MiB 分组，可用 `POCKET_NATIVE_STORAGE_BATCH_MIB` 调整到 50 MiB。支持该字段的新网页按配置分组，旧网页沿用 15 MiB。1 MiB 校验块保持兼容。
+
+Windows 和 Linux 的构建与协议夹具见 `.github/workflows/desktop-native.yml`。Linux 已运行窗口和协议验收。Windows x64 便携包已交叉构建，Windows 本机协议测试已加入 CI，图形运行仍待 Windows 验收。现阶段 DSH 后端、自动更新和签名安装器仍需迁移。
+
+在仓库根目录运行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts`，可验证旧身份和配对、新配对、历史、原生会话控制、文件传输和重启恢复。设置 `POCKET_NATIVE_TEST_RELAY=cloudflare` 可使用同一个夹具验证 Cloudflare Worker。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
+
+只运行网关时，可以在 Alpine 等原生 musl 构建环境中使用 `cargo build --release --locked --no-default-features --target x86_64-unknown-linux-musl` 生成静态可执行文件。跨目标构建还需要 musl C 编译器来构建 SQLite 等依赖。Ely 图形版需要动态加载系统的 Vulkan 等图形库。Alpine 上已用 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=-crt-static'` 构建并启动窗口，需要该系统的 musl 图形运行库。
+
 ## 用户安装
 
 在网页“我的 → 电脑适配器”选择已发布的平台安装包。Windows 使用每用户 NSIS 安装程序，macOS 使用 DMG，Linux 使用 AppImage（首次运行需允许执行）。安装包内置 Node、Python、编译后的 Gateway 和官方插件，不要求用户克隆源码、安装 npm 依赖或手动升级插件。
@@ -36,6 +63,10 @@ POCKET_DESKTOP_ORIGIN=https://your-instance.example \
 ```
 
 Windows 的 Python 目录包含 `python.exe`；macOS/Linux 包含 `bin/python3` 及其标准库。打包脚本实际执行复制后的 Python 和 Node，验证运行环境可独立启动。发布目录不包含源码、环境文件、用户数据库或凭据。`dist/desktop-payload` 仅为构建中间目录。
+
+电脑包仅包含 Gateway、独立插件宿主和官方插件压缩包；不携带 VPS 服务、数据库迁移工具和完整 Web 前端。桌面窗口从本地资源加载，工作台继续由现有部署提供。打包所需的 Node 依赖以实际入口的构建清单为准。
+
+用 `node --import tsx scripts/desktop/payload-smoke.ts` 检查已准备的目录，也可把安装包解包后的 `resources/gateway` 作为参数传入。该检查使用临时数据库和中继，验证官方插件解包、网关注册、生成二维码和退出，不依赖本机运行的 Agent。
 
 平台路径为 `win32|darwin|linux` 和 `x64|arm64`；各架构使用自己的更新清单。macOS 发布需要 DMG 与更新 ZIP；Windows 需要 EXE 与 blockmap；Linux 使用 AppImage。生产 Windows/macOS 构建必须设置 `CSC_LINK` / `WIN_CSC_LINK` / `CSC_NAME`，并按 electron-builder 文档配置证书密码、macOS notarization 等。无证书时可运行 `npm run desktop:package -- --preview` 生成仅用于验收的包，预览包不启用自动更新。不能把预览包当作正式发布。
 

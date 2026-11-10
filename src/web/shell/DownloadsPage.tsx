@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react';
 import './donation.css';
 import { Icon } from '../Icon';
+
+const version = __POCKET_NATIVE_VERSION__;
+const nativeRelease = `https://github.com/muxkin/Remote-Agent-Control/releases/download/native-v${version}`;
+const nativeDownloads = [
+  { name: 'Windows x64', suffix: 'windows-x64.zip' },
+  { name: 'Linux x64', suffix: 'linux-x64.tar.xz' },
+];
+
 interface Download {
   platform: string;
   arch: string;
@@ -58,11 +66,15 @@ export default function DownloadsPage() {
         </p>
       </section>
       <section className="donation-card">
-        <h3>安装一次，持续连接</h3>
-        <p>
-          内置运行环境，无需安装 Node 或 Python。默认登录时启动，可随时关闭；更新在后台下载，连接空闲后安装。
-        </p>
+        <h3>原生托盘版 v{version}</h3>
+        <p>解压即可运行，无需安装 Node 或 Python。关闭窗口后继续在托盘运行，可在托盘菜单退出。</p>
+        {nativeDownloads.map(({ name, suffix }) => (
+          <p key={suffix}>
+            <a href={`${nativeRelease}/AgentSpace-Native-${version}-${suffix}`}>{name} · 下载便携包</a>
+          </p>
+        ))}
       </section>
+      <h3>原有安装版</h3>
       {loading ? (
         <p role="status">正在读取安装包…</p>
       ) : error ? (

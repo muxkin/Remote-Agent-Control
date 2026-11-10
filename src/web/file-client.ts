@@ -59,9 +59,9 @@ async function route(file: FileManifest) {
     waited.add(file.id);
     if (waited.size > 128) waited.delete(waited.values().next().value!);
     const deadline = Date.now() + 2000;
-    while (!session.direct && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    while (!session.directBulk && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
   }
-  return fileRoute(file.size, session.direct, file.storage);
+  return fileRoute(file.size, session.directBulk, file.storage);
 }
 export async function uploadFile(threadId: string, file: File, progress: (value: UploadProgress) => void) {
   const backendId = session.backendId;
@@ -103,6 +103,15 @@ export async function uploadFile(threadId: string, file: File, progress: (value:
     missing = hashes.map((_, i) => i);
   }
   const path = await route(manifest);
+  const advertised = manifest.storageBatchBlocks;
+  const batchSize =
+    path === 'storage' &&
+    typeof advertised === 'number' &&
+    Number.isInteger(advertised) &&
+    advertised >= 1 &&
+    advertised <= 50
+      ? advertised
+      : 15;
   while (missing.length) {
     progress({
       phase: 'uploading',
@@ -110,10 +119,10 @@ export async function uploadFile(threadId: string, file: File, progress: (value:
       total: file.size,
     });
     const group: number[] = [missing[0]];
-    while (group.length < 15 && missing[group.length] === group.at(-1)! + 1)
+    while (group.length < batchSize && missing[group.length] === group.at(-1)! + 1)
       group.push(missing[group.length]);
     let stored = false;
-    if (path === 'storage' && !session.direct) {
+    if (path === 'storage' && !session.directBulk) {
       try {
         const { value: plan } = await fileCall('storage-plan', threadId, manifest.id, { indices: group });
         const chunks: BlobPart[] = [];
@@ -306,7 +315,8 @@ async function manifestContent(threadId: string, manifest: FileManifest, backend
         navigator.serviceWorker.addEventListener('controllerchange', done, { once: true });
       });
     check();
-    if (!navigator.serviceWorker?.controller) throw Error('流式附件尚未就绪，请刷新页面后重试');
+    if (!navigator.serviceWorker?.controller && manifest.size > 50 * BLOCK_SIZE)
+      throw Error('当前页面无法流式读取大附件，请重新打开应用后重试');
   }
   if (
     navigator.serviceWorker?.controller &&

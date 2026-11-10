@@ -46,11 +46,15 @@ export class DeviceSession {
   get direct() {
     return !!this.links.get('direct:control') && !this.links.get('direct:control')!.closed;
   }
+  get directBulk() {
+    const link = this.links.get('direct:bulk');
+    return !!link && !link.closed;
+  }
   get online() {
     return this.direct || (!!this.links.get('relay:control') && !this.links.get('relay:control')!.closed);
   }
   get establishingDirect() {
-    return !!this.pc && !this.direct;
+    return !!this.pc && !this.directBulk;
   }
   onChange(fn: () => void) {
     this.events.addEventListener('change', fn);
@@ -628,7 +632,9 @@ export class DeviceSession {
     if (!this.online) await this.connect();
     if (bulk && !this.links.get('direct:bulk')) await this.relay('bulk');
     const link = this.link(bulk ? 'bulk' : 'control');
-    const result = await link.request(type, data, bytes, bulk ? 120000 : 30000);
+    const extended =
+      bulk || (type === 'file' && (data.action === 'storage-plan' || data.action === 'storage-import'));
+    const result = await link.request(type, data, bytes, extended ? 120000 : 30000);
     this.metrics[
       link === this.links.get(`direct:${bulk ? 'bulk' : 'control'}`) ? 'directBytes' : 'relayBytes'
     ] += (bytes?.length ?? 0) + (result.bytes?.length ?? 0) + JSON.stringify(result.value ?? null).length;

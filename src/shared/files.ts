@@ -15,6 +15,7 @@ export interface FileManifest {
   key: string;
   nonce: string;
   storage: boolean;
+  storageBatchBlocks?: number;
 }
 export function fileSecret() {
   return {
