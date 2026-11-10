@@ -74,6 +74,11 @@ async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Val
         Ok(reply)
     };
     let scenario = message["text"].as_str().unwrap_or_default();
+    match scenario {
+        "验证加密交互" | "验证旧版卡片" => send_cards(&mut call, message, scenario)?,
+        "Rust 交互卡片" => receive_card(&mut call, message)?,
+        _ => {}
+    }
     if scenario == "验证加密附件" {
         let media = PathBuf::from(
             std::env::var_os("RUST_IM_FIXTURE_MEDIA").context("missing media folder")?,
@@ -264,6 +269,102 @@ async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Val
         assert_eq!(call("message.send", different)?["error"]["status"], 409);
     }
     assert_eq!(call("done", Value::Null)?["result"]["ok"], true);
+    Ok(())
+}
+
+fn send_cards(
+    call: &mut impl FnMut(&str, Value) -> Result<Value>,
+    message: &Value,
+    scenario: &str,
+) -> Result<()> {
+    let id = message["id"].as_str().unwrap();
+    let cards: &[(&str, &str)] = if scenario == "验证旧版卡片" {
+        &[("legacy", "旧 Node 审批")]
+    } else {
+        &[
+            ("allow", "Rust 允许审批"),
+            ("deny", "Rust 拒绝审批"),
+            ("question", "Rust 组合提问"),
+            ("cancel", "Rust 撤销审批"),
+        ]
+    };
+    for (kind, title) in cards {
+        let mut interaction = json!({
+            "kind":"approval","recipientId":message["senderId"],
+            "title":format!("  {title}  "),"description":"  私密说明 · only recipients 🔒  ",
+        });
+        if *kind == "question" {
+            interaction["kind"] = json!("question");
+            interaction["questions"] = json!([
+                {"id":"single","question":"  单选问题  ","options":[{"label":" A "},{"label":"B"}]},
+                {"id":"multiple","question":"多选问题","multiSelect":true,"detail":"仅成员可见",
+                    "options":[{"label":"甲","description":"第一项"},{"label":"乙"}]},
+                {"id":"text","question":"开放提问"},
+            ]);
+        }
+        if *kind == "legacy" {
+            interaction["expiresAt"] = json!(message["createdAt"].as_u64().unwrap() + 3_600_000);
+        }
+        let request = json!({
+            "clientId":format!("fixture-card-{id}-{kind}"),"text":"Rust 交互卡片",
+            "options":{"replyTo":id,"interaction":interaction}
+        });
+        let sent = call("message.send", request.clone())?;
+        assert!(sent["error"].is_null(), "{sent}");
+        let card = &sent["result"];
+        assert_eq!(card["interaction"]["title"], *title);
+        let replay = call("message.send", request.clone())?;
+        assert_eq!(replay["result"]["id"], card["id"]);
+        let mut conflict = request;
+        conflict["options"]["interaction"]["title"] = json!("另一个标题");
+        assert_eq!(call("message.send", conflict)?["error"]["status"], 409);
+        if *kind == "cancel" {
+            for _ in 0..2 {
+                let result = call("interaction.cancel", json!({"messageId":card["id"]}))?;
+                assert_eq!(
+                    result["result"]["interaction"]["status"], "cancelled",
+                    "{result}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn receive_card(
+    call: &mut impl FnMut(&str, Value) -> Result<Value>,
+    message: &Value,
+) -> Result<()> {
+    let card = &message["interaction"];
+    let id = message["id"].as_str().unwrap();
+    let read = call("message.read", json!({"messageId":id}))?;
+    assert_eq!(&read["result"]["interaction"], card);
+    match card["status"].as_str() {
+        Some("approved") => {
+            assert_eq!(card["response"]["decision"], "approve");
+            assert_eq!(card["response"]["comment"], "允许 · 私密备注");
+        }
+        Some("rejected") => {
+            assert_eq!(card["response"]["decision"], "reject");
+            assert_eq!(card["response"]["comment"], "拒绝 · 私密备注");
+        }
+        Some("answered") => assert_eq!(
+            card["response"]["answers"],
+            json!({
+                "single":["A"],"multiple":["甲","乙"],"text":["只在签名密文里"]
+            })
+        ),
+        Some("cancelled") => assert!(card["response"].is_null()),
+        _ => anyhow::bail!("unexpected card notification"),
+    }
+    let sent = call(
+        "message.send",
+        json!({
+            "clientId":format!("fixture-card-ack-{id}"), "text":format!("已读取 {}", card["status"].as_str().unwrap()),
+            "options":{"replyTo":id}
+        }),
+    )?;
+    assert!(sent["error"].is_null(), "{sent}");
     Ok(())
 }
 

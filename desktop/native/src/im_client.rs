@@ -1,5 +1,6 @@
 use crate::{
     im_crypto::{AccountCrypto, Envelope, canonical, same_public_keys},
+    im_interactions::Input as InteractionInput,
     state::private_file,
 };
 use anyhow::{Context, Result, ensure};
@@ -31,6 +32,8 @@ pub(crate) struct SendOptions {
     mentions: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interaction: Option<InteractionInput>,
 }
 
 #[derive(Deserialize)]
@@ -308,47 +311,16 @@ impl Client {
         let mut message = message.clone();
         let cid = required(&message, "conversationId")?;
         let id = required(&message, "id")?;
-        let interaction = &message["interaction"];
-        let signed = &content["options"]["interaction"];
-        if signed.is_object() {
-            ensure!(
-                interaction.is_object()
-                    && interaction["kind"] == signed["kind"]
-                    && interaction["recipientId"] == signed["recipientId"],
-                "交互请求不匹配"
-            );
-            let mut verified = interaction.clone();
-            verified
-                .as_object_mut()
-                .expect("interaction object")
-                .extend(signed.as_object().expect("signed interaction").clone());
-            if matches!(
-                interaction["status"].as_str(),
-                Some("approved" | "rejected" | "answered")
-            ) {
-                let sender = required(interaction, "recipientId")?;
-                ensure!(interaction["respondedBy"] == sender, "交互回复来源不符");
-                let reply = &interaction["response"];
-                let encoded = reply["comment"]
-                    .as_str()
-                    .or_else(|| reply["answers"]["encrypted"][0].as_str())
-                    .context("交互回复缺少签名")?;
-                let context = format!("response:{cid}:{id}:{}", required(interaction, "id")?);
-                let response = self
-                    .decrypt(sender, &context, Envelope::parse(encoded)?)
-                    .await?;
-                let status = match response["decision"].as_str() {
-                    Some("approve") => "approved",
-                    Some("reject") => "rejected",
-                    None if response["answers"].is_object() => "answered",
-                    _ => anyhow::bail!("交互回复格式无效"),
-                };
-                ensure!(interaction["status"] == status, "交互回复状态不匹配");
-                verified["response"] = response;
-            }
+        if let Some(verified) = self
+            .decode_interaction(
+                cid,
+                id,
+                &content["options"]["interaction"],
+                &message["interaction"],
+            )
+            .await?
+        {
             message["interaction"] = verified;
-        } else {
-            ensure!(interaction.is_null(), "交互请求未经签名");
         }
         let cid = required(&message, "conversationId")?.to_owned();
         if let Some(files) = message["attachments"].as_array_mut() {
@@ -408,20 +380,35 @@ impl Client {
             options,
         } = input;
         let state = options.state.unwrap_or(MessageState::Complete);
+        let has_attachments = options
+            .attachment_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty());
         ensure!(
             (1..=128).contains(&client_id.encode_utf16().count())
                 && text.encode_utf16().count() <= 64_000
                 && !matches!(state, MessageState::Failed)
                 && (matches!(state, MessageState::Streaming)
                     || !text.trim().is_empty()
-                    || options
-                        .attachment_ids
-                        .as_ref()
-                        .is_some_and(|ids| !ids.is_empty())),
+                    || has_attachments
+                    || options.interaction.is_some()),
             "消息格式无效"
         );
+        let mut original = serde_json::to_value(options)?;
+        let card = options
+            .interaction
+            .clone()
+            .map(InteractionInput::normalize)
+            .transpose()?;
+        if let Some(card) = &card {
+            ensure!(
+                matches!(state, MessageState::Complete) && !has_attachments,
+                "交互卡片不能包含流式回复或附件"
+            );
+            original["interaction"] = serde_json::to_value(card)?;
+        }
         let endpoint = format!("/conversations/{}", segment(id));
-        let request = json!({"text":text,"options":options});
+        let request = json!({"text":text,"options":original});
         let previous = self
             .get(&format!("{endpoint}/by-client/{}", segment(client_id)))
             .await?;
@@ -432,11 +419,14 @@ impl Client {
             }
             return Ok(message);
         }
-        let content = json!({"text":text,"options":options,"state":state,"request":request});
+        let content = json!({"text":text,"options":original,"state":state,"request":request});
         let encrypted = self
             .seal_message(id, &endpoint, client_id, 0, &content)
             .await?;
-        let mut body = serde_json::to_value(options)?;
+        let mut body = original;
+        if let Some(card) = card {
+            body["interaction"] = card.wire();
+        }
         body["text"] = json!(encrypted);
         body["clientId"] = json!(client_id);
         let response = self
@@ -562,7 +552,7 @@ fn attachment_ids(value: &Value, objects: bool) -> Result<Vec<&str>> {
     Ok(ids)
 }
 
-fn is_uid(id: &str) -> bool {
+pub(crate) fn is_uid(id: &str) -> bool {
     !id.is_empty() && !id.starts_with('0') && id.bytes().all(|c| c.is_ascii_digit())
 }
 

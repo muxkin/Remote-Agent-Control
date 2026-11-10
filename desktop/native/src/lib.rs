@@ -21,6 +21,7 @@ mod im_attachments;
 mod im_calls;
 mod im_client;
 mod im_crypto;
+mod im_interactions;
 mod operations;
 mod plugin_catalog;
 mod plugin_host;

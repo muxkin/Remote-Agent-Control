@@ -21,6 +21,7 @@ import { AgentCallsClient } from '../../src/client/calls.js';
 import { EncryptedMessagingClient } from '../../src/client/encrypted-messaging.js';
 import { platformRuntime } from '../../src/server/platform.js';
 import { buildRelay } from '../../src/server/relay.js';
+import type { ChatMessage } from '../../src/shared/messaging.js';
 import { registerAgentFixture } from '../lib/messaging-smoke.js';
 
 const [binary, handler] = process.argv.slice(2).map((path) => resolve(path));
@@ -271,7 +272,8 @@ try {
   assert(!rawMeta.encrypted.includes('Rust 回传.pdf'));
   await stop();
   await privateJson(progress, { ...original, cursor: mediaCursor });
-  await privateJson(manifest, [{ ...profile, messageProtocol: 'rpc', environmentFile, callHandler: handler }]);
+  const rpcProfile = { ...profile, messageProtocol: 'rpc', environmentFile };
+  await privateJson(manifest, [rpcProfile]);
   start();
   await until(async () => (await readCursor()) >= attachedEvent.sequence);
   const fileReplies = (await human.history(conversation.id)).messages.filter(
@@ -283,6 +285,92 @@ try {
   const { conversation: other } = await human.group('另一个附件会话', [agent.user.id]);
   await human.send(other.id, '跨会话附件验证 ' + file.id, 'rust-file-cross-conversation');
   await until(async () => (await human.history(other.id)).messages.some((message) => message.text === '跨会话读取已拒绝'));
+
+  await stop();
+  const cardsCursor = await readCursor();
+  const oldCardPrompt = await prompt('验证旧版卡片', 'rust-card-legacy');
+  const { message: oldCard } = await legacy.send(
+    conversation.id, 'Rust 交互卡片', `fixture-card-${oldCardPrompt.message.id}-legacy`, {
+      replyTo: oldCardPrompt.message.id,
+      interaction: {
+        kind: 'approval', recipientId: account.user!.id, title: '旧 Node 审批',
+        description: '私密说明 · only recipients 🔒', expiresAt: oldCardPrompt.message.createdAt + 3_600_000,
+      },
+    },
+  );
+  const cardPrompt = await prompt('验证加密交互', 'rust-card-new');
+  start();
+  const cardsFor = async (id: string) => (await human.history(conversation.id)).messages.filter(
+    (message) => message.senderId === agent.user.id && message.replyTo === id && message.interaction,
+  );
+  await until(async () => (await cardsFor(cardPrompt.message.id)).length === 4);
+  await until(async () => (await cardsFor(cardPrompt.message.id)).some(
+    (message) => message.interaction?.status === 'cancelled',
+  ));
+  assert.deepEqual((await cardsFor(oldCardPrompt.message.id)).map(({ id }) => id), [oldCard.id]);
+  const cards = await cardsFor(cardPrompt.message.id);
+  const find = (kind: string) => {
+    const card = cards.find((message) => message.clientId.endsWith('-' + kind));
+    assert(card?.interaction);
+    return card;
+  };
+  const allow = find('allow');
+  const deny = find('deny');
+  const question = find('question');
+  const revoked = find('cancel');
+  assert.equal(allow.interaction?.title, 'Rust 允许审批');
+  assert.equal(allow.interaction?.description, '私密说明 · only recipients 🔒');
+  assert.deepEqual(question.interaction?.questions?.[0], {
+    id: 'single', header: '', question: '单选问题',
+    options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
+  });
+  assert.equal(question.interaction?.questions?.[1].detail, '仅成员可见');
+  assert.deepEqual(question.interaction?.questions?.[2].options, []);
+  const rawMessage = async (message: ChatMessage) => (await human.raw<{ message: ChatMessage }>(
+    `/conversations/${conversation.id}/messages/${message.id}`,
+  )).message;
+  for (const card of [allow, question]) {
+    const raw = await rawMessage(card);
+    assert.equal(raw.interaction?.title, '加密请求');
+    assert.equal(raw.interaction?.description, '请使用支持加密的客户端读取');
+    assert(raw.text.startsWith('pocket-e2ee:1:'));
+    assert(!JSON.stringify(raw).includes('only recipients'));
+  }
+  assert.deepEqual((await rawMessage(question)).interaction?.questions, [
+    { id: 'encrypted', header: '', question: '加密问题', options: [] },
+  ]);
+  const approve = { decision: 'approve', comment: '允许 · 私密备注' } as const;
+  assert.equal((await human.respond(conversation.id, allow.id, approve)).message.interaction?.status, 'approved');
+  assert.equal((await human.respond(conversation.id, oldCard.id, approve)).message.interaction?.status, 'approved');
+  assert.equal((await human.respond(conversation.id, deny.id, {
+    decision: 'reject', comment: '拒绝 · 私密备注',
+  })).message.interaction?.status, 'rejected');
+  const answers = { single: ['A'], multiple: ['甲', '乙'], text: ['只在签名密文里'] };
+  assert.deepEqual((await human.respond(conversation.id, question.id, { answers })).message.interaction?.response, { answers });
+  assert(!JSON.stringify(await rawMessage(question)).includes('只在签名密文里'));
+  await assert.rejects(human.respond(conversation.id, revoked.id, approve), /已处理或已失效/);
+  const outcomes = new Map([
+    [allow.id, 'approved'], [oldCard.id, 'approved'], [deny.id, 'rejected'],
+    [question.id, 'answered'], [revoked.id, 'cancelled'],
+  ]);
+  const acknowledgements = async () => (await human.history(conversation.id)).messages.filter(
+    (message) => message.replyTo && outcomes.has(message.replyTo) && message.clientId.startsWith('fixture-card-ack-'),
+  );
+  await until(async () => (await acknowledgements()).length === outcomes.size);
+  for (const item of await acknowledgements()) assert.equal(item.text, '已读取 ' + outcomes.get(item.replyTo!));
+  const finalCardEvent = (await legacy.sync(cardsCursor, 0)).events.filter(
+    (event) => event.message && outcomes.has(event.message.id) && event.type === 'message.updated',
+  ).at(-1);
+  assert(finalCardEvent);
+  await until(async () => (await readCursor()) >= finalCardEvent.sequence);
+  await stop();
+  await privateJson(progress, { ...original, cursor: cardsCursor });
+  await privateJson(manifest, [{ ...rpcProfile, callHandler: handler }]);
+  start();
+  await until(async () => (await readCursor()) >= finalCardEvent.sequence);
+  assert.deepEqual((await cardsFor(oldCardPrompt.message.id)).map(({ id }) => id), [oldCard.id]);
+  assert.deepEqual(new Set((await cardsFor(cardPrompt.message.id)).map(({ id }) => id)), new Set(cards.map(({ id }) => id)));
+  assert.equal((await acknowledgements()).length, outcomes.size, 'Replaying signed answers duplicated the acknowledgements');
 
   const calls = new AgentCallsClient(human);
   await until(async () => (await calls.capabilities(conversation.id)).video);
@@ -362,7 +450,7 @@ try {
     await until(async () => !(await calls.capabilities(conversation.id)).audio);
   }
   console.log(
-    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messages, streaming and attachment round trip, cross-conversation isolation, replay, signaling, and bidirectional audio/video RTP passed.`,
+    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messages, streaming, attachments, approval and question cards, replay, and bidirectional audio/video RTP passed.`,
   );
 } finally {
   await stop();

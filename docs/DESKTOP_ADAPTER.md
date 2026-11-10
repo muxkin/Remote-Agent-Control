@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.14 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.15 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
@@ -49,7 +49,8 @@ DSH 技能选择使用会话的原生目录，发送前会重新验证。会话�
 - `attachment.upload` 接收本地绝对文件路径 `path`，以及可选的显示名称 `name` 和稳定 UUID `fileId`。文件大小为 1 字节至 10 MiB。上传成功后可将返回的 `id` 放入 `message.send` 的 `attachmentIds`。用同一个 UUID 重试时，适配器会核对所有者、会话、名称和文件内容。
 - `attachment.download` 接收 `fileId` 和目标绝对路径 `path`。适配器验签、解密并校验长度后写入私有文件。已有同内容的私有文件可以复用。需要放弃尚未发送的上传时，可用 `attachment.remove` 传入 `fileId`。
 
-发送与撤销交互卡片的旧处理器接口仍在迁移。
+- `message.send` 的 `options.interaction` 可发送 `approval` 或 `question`。填写 `recipientId`、`title` 和 `description`，提问还需填写 `questions`，可选 `expiresAt` 使用 Unix 毫秒。卡片正文和选项随消息加密。
+- `interaction.cancel` 接收 `messageId`，用于撤销尚待回答的卡片。卡片被指定用户回答、被撤销或过期后，RPC 处理器会收到 `message.updated`。回答通过验签后才会出现在 `message.interaction.response` 中。
 
 通话处理程序负责 WebRTC 对端、编解码和模型接入。适配器负责接听状态、心跳、加密 SDP/ICE 信令和挂断。更新交接会等待正在处理的消息和通话。 [原生通话处理程序接口](AGENT_CALLS.md#原生通话处理程序)
 

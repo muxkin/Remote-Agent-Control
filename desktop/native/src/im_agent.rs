@@ -3,6 +3,7 @@ use crate::{
     im_attachments::{Download, Upload},
     im_calls,
     im_client::{Client, MessageConflict, MessageUpdate, NewMessage, required},
+    im_interactions,
     state::{private_directory, private_file},
     update::UpdateGate,
 };
@@ -279,7 +280,12 @@ async fn listen(
                 continue;
             }
             let message = &event["message"];
-            if message["senderId"] == client.id && message["state"] != "cancelled" {
+            let own = message["senderId"] == client.id;
+            let card_update = own
+                && matches!(profile.message_protocol, MessageProtocol::Rpc)
+                && event["type"] == "message.updated"
+                && im_interactions::terminal(&message["interaction"]);
+            if own && !card_update && message["state"] != "cancelled" {
                 continue;
             }
             let Some(_active) = gate.admit() else {
@@ -289,6 +295,9 @@ async fn listen(
             let cid = required(message, "conversationId")?;
             let mut input = event.clone();
             input["message"] = client.decode_or_redact(message).await;
+            if card_update && !im_interactions::terminal(&input["message"]["interaction"]) {
+                continue;
+            }
             match profile.message_protocol {
                 MessageProtocol::Replies => {
                     let response = handler.run(&input).await?;
@@ -383,6 +392,8 @@ enum MessageRequest {
     History { before: Option<u64> },
     #[serde(rename = "message.cancel")]
     Cancel(MessageRef),
+    #[serde(rename = "interaction.cancel")]
+    CancelInteraction(MessageRef),
     #[serde(rename = "attachment.upload")]
     Upload(Upload),
     #[serde(rename = "attachment.download")]
@@ -419,6 +430,9 @@ impl MessageRequest {
                 client.history(cid, before).await
             }
             Self::Cancel(input) => client.cancel(cid, &input.message_id).await,
+            Self::CancelInteraction(input) => {
+                client.cancel_interaction(cid, &input.message_id).await
+            }
             Self::Upload(input) => client.upload_attachment(cid, input).await,
             Self::Download(input) => client.download_attachment(cid, input).await,
             Self::Remove(input) => client.remove_attachment(cid, input.file_id).await,
