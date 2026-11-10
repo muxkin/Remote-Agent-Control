@@ -128,6 +128,7 @@ impl Store {
                indices TEXT NOT NULL, download INTEGER NOT NULL, expires INTEGER NOT NULL
              );",
         )?;
+        crate::appearance::initialize(&db)?;
         migrate_operations(&mut db)?;
         db.execute(
             "CREATE INDEX IF NOT EXISTS operations_by_conversation ON operations(backend_id,thread_id,device_id,created)",
@@ -282,13 +283,22 @@ pub(crate) fn lock_directory(directory: &Path) -> Result<File> {
     private_directory(directory)?;
     let lock = private_file(&directory.join("native.lock"), true)?;
     lock.try_lock().context("已有原生适配器使用此状态目录")?;
-    for name in ["device-identity-v2.json", "state.sqlite"] {
-        let path = directory.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(_) => drop(private_file(&path, false).with_context(|| format!("检查 {name}"))?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+    let identity = directory.join("device-identity-v2.json");
+    match fs::symlink_metadata(&identity) {
+        Ok(_) => drop(private_file(&identity, false).context("检查设备身份")?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    verify_database_paths(directory)?;
+    Ok(lock)
+}
+
+pub(crate) fn verify_database_paths(directory: &Path) -> Result<()> {
+    let database = directory.join("state.sqlite");
+    match fs::symlink_metadata(&database) {
+        Ok(_) => drop(private_file(&database, false).context("检查 state.sqlite")?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     for name in [
         "state.sqlite-wal",
@@ -308,7 +318,7 @@ pub(crate) fn lock_directory(directory: &Path) -> Result<File> {
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(lock)
+    Ok(())
 }
 
 pub fn now() -> i64 {

@@ -1,4 +1,5 @@
 use crate::{
+    appearance,
     codex_backend::{Backend, Group, ID as CODEX, Live},
     codex_live::Action,
     conversations,
@@ -181,6 +182,9 @@ impl DeviceSession {
                         Ok(None) => json!({"type":"response","id":id,"status":404,"error":"会话或功能不可用"}),
                         Err(error) if error.is::<Conflict>() => {
                             json!({"type":"response","id":id,"status":409,"error":"请求 ID 已用于其他操作"})
+                        }
+                        Err(error) if error.is::<appearance::RevisionConflict>() => {
+                            json!({"type":"response","id":id,"status":409,"error":error.to_string()})
                         }
                         Err(error) if error.is::<history_media::MissingAttachment>() => {
                             json!({"type":"response","id":id,"status":404,"error":error.to_string()})
@@ -646,7 +650,20 @@ impl DeviceSession {
                 .filter_map(|(id, backend)| backend.info(id, self.online(id)))
                 .collect();
             backends.extend(self.backends.plugins.infos().await);
+            let store = self.db.lock().expect("database mutex poisoned");
+            for info in &mut backends {
+                let id = info["id"].as_str().context("实例 ID 无效")?;
+                appearance::Saved::read(&store.db, id)?.apply(info);
+            }
             return Ok(Some(json!({"backends":backends})));
+        }
+        if matches!(
+            method,
+            "backends.appearance.read" | "backends.appearance.update"
+        ) {
+            return self
+                .backend_appearance(&call, method == "backends.appearance.update")
+                .await;
         }
         if method == "device.revoke" {
             self.db
@@ -929,6 +946,31 @@ impl DeviceSession {
                     .await
             }
         }
+    }
+
+    async fn backend_appearance(&self, call: &Value, write: bool) -> Result<Option<Value>> {
+        let Some(id) = call["params"]["id"].as_str() else {
+            return Ok(None);
+        };
+        let info = if let Some(backend) = self.backends.codex.get(id) {
+            backend.info(id, self.online(id))
+        } else if let Some(plugin) = self.backends.plugins.get(id) {
+            Some(plugin.info().await)
+        } else {
+            None
+        };
+        let Some(info) = info else { return Ok(None) };
+        let saved = if write {
+            let body = call["body"].clone();
+            let change =
+                tokio::task::spawn_blocking(move || appearance::Change::parse(body)).await??;
+            let mut store = self.db.lock().expect("database mutex poisoned");
+            appearance::Saved::update(&mut store.db, id, change)?
+        } else {
+            let store = self.db.lock().expect("database mutex poisoned");
+            appearance::Saved::read(&store.db, id)?
+        };
+        Ok(Some(saved.document(&info)))
     }
 
     fn manage(

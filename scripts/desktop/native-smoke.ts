@@ -17,6 +17,7 @@ import { hostIdentity } from '../../src/server/device-identity.js';
 import { buildRelay } from '../../src/server/relay.js';
 import { platformRuntime } from '../../src/server/platform.js';
 import { createIdentity, type Identity } from '../../src/shared/secure-channel.js';
+import type { BackendAppearanceDocument, BackendInfo } from '../../src/shared/backends.js';
 import { DeviceLink } from '../../src/shared/device-link.js';
 import { nodeSession } from '../../src/client/node-session.js';
 import { apiCall } from '../../src/shared/rpc.js';
@@ -45,6 +46,10 @@ const existingPhone = await createIdentity();
 const store = new Store(legacyState);
 const old = store.pair(store.mintPairing().code, 'Existing phone', existingPhone.peerId);
 assert(old?.routeTicket);
+store.updateBackendAppearance('codex-local', {
+  description: '旧版显示说明',
+  icon: { kind: 'builtin', value: 'monitor' },
+});
 if (codexPackage) {
   store.beginOperation(legacyOperation, old.deviceId, THREAD, 'rename', JSON.stringify({ title: '旧操作' }), secondaryId);
   store.updateOperation(legacyOperation, 'completed', null, null, secondaryId);
@@ -1515,6 +1520,58 @@ try {
     }
     const existing = await reconnect(existingPhone, old.routeTicket);
     assert.equal((await existing.ready).device.id, old.deviceId);
+    const appearancePath = '/backends/codex-local/appearance';
+    const getAppearance = (session: typeof existing) =>
+      session.rpc<BackendAppearanceDocument>(apiCall(appearancePath));
+    const updateAppearance = (revision: number, patch: unknown) =>
+      existing.rpc<BackendAppearanceDocument>(apiCall(appearancePath, 'POST', { revision, patch }));
+    const importedAppearance = await getAppearance(existing);
+    assert.equal(importedAppearance.revision, 1);
+    assert.equal(importedAppearance.values.description, '旧版显示说明');
+    assert.deepEqual(importedAppearance.values.icon, { kind: 'builtin', value: 'monitor' });
+    const changedAppearance = await updateAppearance(1, {
+      description: ' Rust 保存的说明 ',
+      icon: { kind: 'emoji', value: '👩🏽‍💻' },
+    });
+    assert.equal(changedAppearance.revision, 2);
+    assert.equal(changedAppearance.values.description, 'Rust 保存的说明');
+    assert.deepEqual(changedAppearance.values.icon, { kind: 'emoji', value: '👩🏽‍💻' });
+    await assert.rejects(updateAppearance(1, { description: '过期修改' }), { status: 409 });
+    await assert.rejects(
+      existing.rpc(apiCall('/backends/nonexistent/appearance', 'POST', { revision: 0, patch: { name: 'X' } })),
+      { status: 404 },
+    );
+    await assert.rejects(updateAppearance(2, {
+      icon: { kind: 'image', value: 'data:image/svg+xml;base64,PHN2Zz4=' },
+    }), { status: 400 });
+    const png = await readFile('src/web/public/app-icon-32.png');
+    const raster = await updateAppearance(2, {
+      icon: { kind: 'image', value: 'data:image/png;base64,' + png.toString('base64') },
+    });
+    assert.equal(raster.revision, 3);
+    assert.equal(raster.values.icon.kind, 'image');
+    assert.match(raster.values.icon.value, /^data:image\/webp;base64,/);
+    const appearanceList = await existing.rpc<{ backends: BackendInfo[] }>(apiCall('/backends'));
+    assert.deepEqual(appearanceList.backends.find(({ id }) => id === 'codex-local')?.appearance, raster.values);
+    const resetAppearance = await updateAppearance(3, { icon: null });
+    assert.deepEqual(resetAppearance.values.icon, importedAppearance.defaults.icon);
+    const cliAppearance = (...args: string[]) =>
+      promisify(execFile)(executable, ['--instance', ...args], {
+        env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
+      });
+    const { stdout: cliSaved } = await cliAppearance(
+      'set', 'codex-local', '--description', '命令行同步说明', '--revision', '4',
+    );
+    assert.deepEqual(JSON.parse(cliSaved), { id: 'codex-local', revision: 5, saved: true });
+    await assert.rejects(updateAppearance(4, { description: '旧网页副本' }), { status: 409 });
+    const savedAppearance = await getAppearance(existing);
+    assert.equal(savedAppearance.values.description, '命令行同步说明');
+    const { stdout: cliCurrent } = await cliAppearance('show', 'codex-local');
+    assert.equal(JSON.parse(cliCurrent).overrides.description, savedAppearance.values.description);
+    const { stdout: cliList } = await cliAppearance('list');
+    assert(JSON.parse(cliList).some((entry: { id: string; revision: number }) =>
+      entry.id === 'codex-local' && entry.revision === 5,
+    ));
     if (versions) {
       const operation = apiCall(`/operations/${legacyOperation}`);
       await assert.rejects(existing.rpc(operation));
@@ -1657,12 +1714,18 @@ try {
     gateway = await launch(true);
     const resumed = await reconnect(phone, ready.ticket);
     assert.equal((await resumed.ready).device.id, ready.device.id);
+    assert.deepEqual(await getAppearance(resumed), savedAppearance);
+    await cliAppearance('reset', 'codex-local', '--revision', '5');
+    const restored = await getAppearance(resumed);
+    assert.equal(restored.revision, 6);
+    assert.deepEqual(restored.overrides, {});
+    assert.deepEqual(restored.values, restored.defaults);
     resumed.close();
   } finally {
     await gateway.stop();
   }
   console.log(
-    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, replay rejection and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with two isolated instances of the independently installed Codex plugin' : ''}.`,
+    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, replay rejection, appearance settings and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with two isolated instances of the independently installed Codex plugin' : ''}.`,
   );
 } finally {
   await relay.close();

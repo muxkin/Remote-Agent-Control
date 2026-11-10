@@ -303,56 +303,90 @@ impl ConfigRow {
     }
 }
 
+fn instance_configuration(directory: &Path) -> Result<(Vec<Instance>, HashMap<String, String>)> {
+    let legacy = crate::migration::source()
+        .filter(|path| *path != directory)
+        .map(Path::to_path_buf);
+    let mut secrets = HashMap::new();
+    for root in legacy
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(std::iter::once(directory))
+    {
+        let path = root.join("gateway.env");
+        if path.exists() {
+            for entry in dotenvy::Iter::new(private_file(&path, false)?) {
+                let (name, value) = entry.map_err(|_| anyhow::anyhow!("插件凭据配置无效"))?;
+                secrets.insert(name, value);
+            }
+        }
+    }
+    let path = |key: &str| {
+        env::var_os(key)
+            .map(PathBuf::from)
+            .or_else(|| secrets.get(key).map(PathBuf::from))
+            .filter(|path| !path.as_os_str().is_empty())
+    };
+    let local = directory.join("instances.json");
+    let file = path("POCKET_ADAPTERS_FILE")
+        .or_else(|| path("POCKET_BACKENDS_FILE"))
+        .or_else(|| local.exists().then_some(local))
+        .or_else(|| {
+            legacy
+                .as_ref()
+                .map(|root| root.join("instances.json"))
+                .filter(|file| file.exists())
+        })
+        .or_else(|| path("POCKET_NATIVE_DEFAULT_INSTANCES"));
+    let rows: Vec<ConfigRow> = if let Some(file) = file {
+        let mut bytes = Vec::new();
+        private_file(&file, false)?
+            .take(128 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 128 * 1024, "插件实例配置过大");
+        serde_json::from_slice(&bytes).context("插件实例配置无效")?
+    } else {
+        Vec::new()
+    };
+    ensure!(rows.len() <= 33, "插件实例配置过多");
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter_map(ConfigRow::into_instance)
+        .collect();
+    let mut seen = HashSet::new();
+    for row in &rows {
+        ensure!(
+            valid_instance_id(&row.id) && (1..=160).contains(&row.name.len()),
+            "插件实例标识无效"
+        );
+        let directory_key = if cfg!(any(windows, target_os = "macos")) {
+            row.id.to_ascii_lowercase()
+        } else {
+            row.id.clone()
+        };
+        ensure!(
+            directory_key != codex_backend::ID
+                || (row.id == codex_backend::ID && row.plugin == codex_backend::PACKAGE),
+            "默认 Codex 实例只能使用官方 Codex 插件"
+        );
+        ensure!(seen.insert(directory_key), "插件实例标识重复");
+    }
+    Ok((rows, secrets))
+}
+
+pub(crate) fn instance_names(directory: &Path) -> Result<BTreeMap<String, String>> {
+    let (rows, _) = instance_configuration(directory)?;
+    let mut names = BTreeMap::from([(codex_backend::ID.to_owned(), "Codex".to_owned())]);
+    names.extend(rows.into_iter().map(|row| (row.id, row.name)));
+    Ok(names)
+}
+
 impl Registry {
     pub(crate) fn load(
         directory: &Path,
         runtime: &tokio::runtime::Handle,
     ) -> Result<(Self, BTreeMap<String, Selection>)> {
-        let legacy = crate::migration::source()
-            .filter(|path| *path != directory)
-            .map(Path::to_path_buf);
-        let mut secrets = HashMap::new();
-        for root in legacy
-            .iter()
-            .map(PathBuf::as_path)
-            .chain(std::iter::once(directory))
-        {
-            let path = root.join("gateway.env");
-            if path.exists() {
-                for entry in dotenvy::Iter::new(private_file(&path, false)?) {
-                    let (name, value) = entry.map_err(|_| anyhow::anyhow!("插件凭据配置无效"))?;
-                    secrets.insert(name, value);
-                }
-            }
-        }
-        let path = |key: &str| {
-            env::var_os(key)
-                .map(PathBuf::from)
-                .or_else(|| secrets.get(key).map(PathBuf::from))
-                .filter(|path| !path.as_os_str().is_empty())
-        };
-        let local = directory.join("instances.json");
-        let file = path("POCKET_ADAPTERS_FILE")
-            .or_else(|| path("POCKET_BACKENDS_FILE"))
-            .or_else(|| local.exists().then_some(local))
-            .or_else(|| {
-                legacy
-                    .as_ref()
-                    .map(|root| root.join("instances.json"))
-                    .filter(|file| file.exists())
-            })
-            .or_else(|| path("POCKET_NATIVE_DEFAULT_INSTANCES"));
-        let rows: Vec<ConfigRow> = if let Some(file) = file {
-            let mut bytes = Vec::new();
-            private_file(&file, false)?
-                .take(128 * 1024 + 1)
-                .read_to_end(&mut bytes)?;
-            ensure!(bytes.len() <= 128 * 1024, "插件实例配置过大");
-            serde_json::from_slice(&bytes).context("插件实例配置无效")?
-        } else {
-            Vec::new()
-        };
-        ensure!(rows.len() <= 33, "插件实例配置过多");
+        let (rows, secrets) = instance_configuration(directory)?;
         let read_only = ["POCKET_NATIVE_READ_ONLY", "POCKET_READ_ONLY"]
             .iter()
             .any(|key| {
@@ -362,23 +396,7 @@ impl Registry {
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
         let mut hosts = Vec::new();
         let mut codex = BTreeMap::new();
-        let mut seen = HashSet::new();
-        for row in rows.into_iter().filter_map(ConfigRow::into_instance) {
-            ensure!(
-                valid_instance_id(&row.id) && (1..=160).contains(&row.name.len()),
-                "插件实例标识无效"
-            );
-            let directory_key = if cfg!(any(windows, target_os = "macos")) {
-                row.id.to_ascii_lowercase()
-            } else {
-                row.id.clone()
-            };
-            ensure!(
-                directory_key != codex_backend::ID
-                    || (row.id == codex_backend::ID && row.plugin == codex_backend::PACKAGE),
-                "默认 Codex 实例只能使用官方 Codex 插件"
-            );
-            ensure!(seen.insert(directory_key), "插件实例标识重复");
+        for row in rows {
             let mut config = row.config.as_object().cloned().unwrap_or_default();
             for (key, variable) in row.secrets {
                 ensure!(

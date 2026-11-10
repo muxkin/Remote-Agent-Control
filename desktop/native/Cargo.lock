@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "agent-space-native"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -149,6 +149,7 @@ dependencies = [
  "futures",
  "gpui-pre",
  "gpui-pre-platform",
+ "icu_properties",
  "image",
  "jsonschema",
  "libc",
@@ -177,6 +178,7 @@ dependencies = [
  "tokio-util",
  "toml 1.2.1+spec-1.1.0",
  "tray-icon",
+ "unicode-segmentation",
  "url",
  "uuid",
  "webrtc",

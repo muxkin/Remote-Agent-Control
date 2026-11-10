@@ -1,6 +1,6 @@
 [package]
 name = "agent-space-native"
-version = "0.3.20"
+version = "0.3.21"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -9,7 +9,7 @@ default-run = "agent-space-native"
 
 [features]
 default = ["ely"]
-ely = ["dep:ely-core", "dep:gpui", "dep:gpui-platform", "dep:tray-icon", "dep:auto-launch", "dep:image", "dep:zbus"]
+ely = ["dep:ely-core", "dep:gpui", "dep:gpui-platform", "dep:tray-icon", "dep:auto-launch", "dep:zbus"]
 official-plugins = []
 
 [[bin]]
@@ -30,6 +30,8 @@ bytes = "1"
 dirs = "6"
 dotenvy = "0.15"
 futures = "0.3"
+icu_properties = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 jsonschema = { version = "0.61", default-features = false }
 libp2p-core = "0.44"
 libp2p-identity = { version = "0.3", features = ["ed25519", "peerid", "rand"] }
@@ -52,6 +54,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["compat", "rt", "io"] }
 toml = "1.2"
+unicode-segmentation = "1"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 webrtc = "0.21.1"
@@ -62,7 +65,6 @@ gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, op
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "x11", "wayland"], optional = true }
 tray-icon = { version = "=0.26.1", default-features = false, features = ["ksni"], optional = true }
 auto-launch = { version = "=0.6.0", optional = true }
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "net", "process"] }

@@ -1,4 +1,6 @@
 mod app_tools;
+mod appearance;
+mod appearance_cli;
 mod conversations;
 
 mod codex;
@@ -87,6 +89,10 @@ pub fn start() -> Result<()> {
     }
     if arguments.first().is_some_and(|flag| flag == "--adapter") {
         return plugin_catalog::cli(&directory, &arguments[1..]);
+    }
+    if arguments.first().is_some_and(|flag| flag == "--instance") {
+        migration::initialize(&directory)?;
+        return appearance_cli::run(&directory, &arguments[1..]);
     }
     if arguments
         .first()

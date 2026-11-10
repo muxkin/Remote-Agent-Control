@@ -742,6 +742,15 @@ try {
         backends.every((entry) => entry.adapterVersion),
         'Expected the independent DSH plugin',
       );
+    const appearancePath = `/backends/${one.id}/appearance`;
+    const customized = await session.rpc<{ revision: number; values: { name: string } }>(
+      apiCall(appearancePath, 'POST', { revision: 0, patch: { name: 'DSH 测试外观' } }),
+    );
+    assert.equal(customized.revision, 1);
+    assert.equal(customized.values.name, 'DSH 测试外观');
+    const renamed = await session.rpc<{ backends: { id: string; name: string }[] }>(apiCall('/backends'));
+    assert.equal(renamed.backends.find(({ id }) => id === one.id)?.name, 'DSH 测试外观');
+    assert.equal(renamed.backends.find(({ id }) => id === two.id)?.name, two.id);
     const open = randomUUID();
     await rpc(one.id, '/threads/shared/open', 'POST', { requestId: open });
     await operation(open, 'completed');
