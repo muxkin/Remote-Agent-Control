@@ -14,7 +14,12 @@ export async function buildInstaller(platform, source, version, output, signed =
   const stage = await mkdtemp(join(tmpdir(), 'agent-space-native-installer-'));
   try {
     if (platform === 'linux') {
-      await buildDeb(stage, source, version, output);
+      const previous = process.umask(0o022);
+      try {
+        await buildDeb(stage, source, version, output);
+      } finally {
+        process.umask(previous);
+      }
     } else if (platform === 'win32') {
       const installed = join(
         process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)',
