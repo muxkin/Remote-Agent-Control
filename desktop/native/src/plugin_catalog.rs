@@ -127,26 +127,30 @@ impl Catalog {
             id TEXT PRIMARY KEY, instance TEXT NOT NULL, expected TEXT NOT NULL,
             target TEXT NOT NULL, outcome TEXT, submitted INTEGER NOT NULL
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS one_pending_switch ON switches(instance) WHERE outcome IS NULL;",
+        CREATE UNIQUE INDEX IF NOT EXISTS one_pending_switch ON switches(instance) WHERE outcome IS NULL;
+        CREATE TABLE IF NOT EXISTS bundled_switches (
+            instance TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY(instance,target)
+        );",
         )?;
         Ok(Self { root, db })
     }
 
     pub(crate) async fn install(&mut self, source: &Path) -> Result<String> {
-        let manifest_path = source.join("adapter.json");
-        ensure!(
-            fs::symlink_metadata(&manifest_path)?.is_file(),
-            "原生插件清单须为普通文件"
-        );
-        let mut document = Vec::new();
-        File::open(manifest_path)?
-            .take(16_385)
-            .read_to_end(&mut document)?;
-        ensure!(document.len() <= 16_384, "原生插件清单过大");
-        let manifest: Manifest = serde_json::from_slice(&document)?;
-        manifest.validate()?;
+        let manifest = read_manifest(source)?;
+        self.install_package(source, manifest, false).await
+    }
+
+    async fn install_package(
+        &mut self,
+        source: &Path,
+        manifest: Manifest,
+        reuse: bool,
+    ) -> Result<String> {
         let key = manifest.key();
-        ensure!(self.package(&key)?.is_none(), "原生插件版本已安装");
+        if self.package(&key)?.is_some() {
+            ensure!(reuse, "原生插件版本已安装");
+            return Ok(key);
+        }
         let source = source.join(&manifest.entry);
         let metadata = fs::symlink_metadata(&source)?;
         ensure!(
@@ -176,12 +180,14 @@ impl Catalog {
         let directory = Uuid::new_v4().to_string();
         let target = packages.join(&directory);
         fs::rename(stage.path(), &target)?;
-        if let Err(error) = self.db.execute(
-            "INSERT INTO packages VALUES (?1,?2,?3)",
+        let insert = self.db.execute(
+            "INSERT OR IGNORE INTO packages VALUES (?1,?2,?3)",
             params![key, directory, serde_json::to_string(&package.manifest)?],
-        ) {
+        );
+        if !matches!(insert, Ok(1)) {
             let _ = fs::remove_dir_all(target);
-            return Err(error.into());
+            insert?;
+            ensure!(reuse, "原生插件版本已安装");
         }
         Ok(key)
     }
@@ -248,8 +254,15 @@ impl Catalog {
         id: &str,
         name: &str,
         version: Option<&str>,
+        bundled: bool,
     ) -> Result<Option<Package>> {
         if let Some(package) = self.bind(id, name, version)? {
+            if bundled {
+                let target = format!("{name}@{}", env!("CARGO_PKG_VERSION"));
+                if let Some(replacement) = self.package(&target)? {
+                    self.queue_bundled(id, &package.manifest, &replacement.manifest)?;
+                }
+            }
             return Ok(Some(package));
         }
         if let Some(package) = self.bind(id, name, Some(env!("CARGO_PKG_VERSION")))? {
@@ -269,6 +282,44 @@ impl Catalog {
             return self.bind(id, name, Some(&package.manifest.version));
         }
         Ok(None)
+    }
+
+    fn queue_bundled(&self, id: &str, old: &Manifest, new: &Manifest) -> Result<()> {
+        if old.name != new.name
+            || old.product != new.product
+            || old.state_version != new.state_version
+            || !release_order(&old.version)
+                .zip(release_order(&new.version))
+                .is_some_and(|(old, new)| old < new)
+        {
+            return Ok(());
+        }
+        let target = new.key();
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let enqueued = tx.execute(
+            "INSERT OR IGNORE INTO switches
+             SELECT ?1,instance,current,?2,NULL,?3 FROM bindings
+             WHERE instance=?4 AND current=?5 AND previous IS NOT ?2
+             AND NOT EXISTS (SELECT 1 FROM bundled_switches WHERE instance=?4 AND target=?2)",
+            params![
+                Uuid::new_v4().to_string(),
+                target,
+                crate::state::now(),
+                id,
+                old.key()
+            ],
+        )?;
+        if enqueued == 1 {
+            tx.execute(
+                "INSERT INTO bundled_switches VALUES (?1,?2)",
+                params![id, target],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn queue(&mut self, id: &str, target: Option<&str>) -> Result<(String, String)> {
@@ -397,6 +448,64 @@ impl Catalog {
     }
 }
 
+fn release_order(version: &str) -> Option<([u64; 3], bool)> {
+    let (core, stable) = version
+        .split_once('-')
+        .map_or((version, true), |(core, _)| (core, false));
+    let mut numbers = core.split('.');
+    let major = numbers.next()?.parse().ok()?;
+    let minor = numbers.next()?.parse().ok()?;
+    let patch = numbers.next()?.parse().ok()?;
+    Some(([major, minor, patch], stable))
+}
+
+fn read_manifest(source: &Path) -> Result<Manifest> {
+    let manifest_path = source.join("adapter.json");
+    ensure!(
+        fs::symlink_metadata(&manifest_path)?.is_file(),
+        "原生插件清单须为普通文件"
+    );
+    let mut document = Vec::new();
+    File::open(manifest_path)?
+        .take(16_385)
+        .read_to_end(&mut document)?;
+    ensure!(document.len() <= 16_384, "原生插件清单过大");
+    let manifest: Manifest = serde_json::from_slice(&document)?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+pub(crate) async fn provision_official(executable: &Path, directory: &Path) -> Result<bool> {
+    let parent = executable.parent().context("无法定位官方插件目录")?;
+    let root = if cfg!(target_os = "linux") && parent == Path::new("/usr/bin") {
+        PathBuf::from("/usr/lib/agent-space-native/official-plugins")
+    } else if cfg!(target_os = "macos") && parent.ends_with("Contents/MacOS") {
+        parent.join("../Resources/official-plugins")
+    } else {
+        parent.join("official-plugins")
+    };
+    let metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(metadata.is_dir(), "官方插件目录无效");
+    let mut catalog = Catalog::open(directory)?;
+    for product in ["codex", "dsh"] {
+        let source = root.join(product);
+        ensure!(fs::symlink_metadata(&source)?.is_dir(), "官方插件目录无效");
+        let manifest = read_manifest(&source)?;
+        ensure!(
+            manifest.name == format!("@agent-remote/adapter-{product}")
+                && manifest.product == product
+                && manifest.version == env!("CARGO_PKG_VERSION"),
+            "安装包的官方插件与适配器版本不匹配"
+        );
+        catalog.install_package(&source, manifest, true).await?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn cli(directory: &Path, args: &[String]) -> Result<()> {
     let mut catalog = Catalog::open(directory)?;
     match args {
@@ -488,4 +597,77 @@ fn verify_binary(path: &Path, expected: &str) -> Result<()> {
         "原生插件入口校验失败"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_updates_keep_rollback_and_do_not_replace_a_pending_user_switch() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut catalog = Catalog::open(&directory.path().join("state"))?;
+        let mut old = Manifest {
+            sdk: 1,
+            name: "@agent-remote/adapter-codex".into(),
+            version: "0.0.1".into(),
+            product: "codex".into(),
+            state_version: 1,
+            entry: "agent-space-adapter-codex.exe".into(),
+            sha256: "0".repeat(64),
+        };
+        let bundled = Manifest {
+            version: env!("CARGO_PKG_VERSION").into(),
+            ..old.clone()
+        };
+        let manual = Manifest {
+            version: "0.0.2".into(),
+            ..old.clone()
+        };
+        for manifest in [&old, &manual, &bundled] {
+            catalog.db.execute(
+                "INSERT INTO packages VALUES (?1,?2,?3)",
+                params![
+                    manifest.key(),
+                    Uuid::new_v4().to_string(),
+                    serde_json::to_string(manifest)?
+                ],
+            )?;
+        }
+        let id = "codex-local";
+        let read = |catalog: &Catalog| -> Result<String> {
+            Ok(catalog
+                .bind_official(id, &old.name, Some("0.0.1"), true)?
+                .context("missing binding")?
+                .manifest
+                .key())
+        };
+        catalog.bind(id, &old.name, Some(&old.version))?;
+        let user = catalog.queue(id, Some(&manual.key()))?;
+        assert_eq!(read(&catalog)?, old.key());
+        let pending = catalog.next(id)?.context("missing user switch")?;
+        assert_eq!(pending.id, user.0);
+        catalog.finish(&pending, id, "applied")?;
+        assert_eq!(read(&catalog)?, manual.key());
+        let automatic = catalog.next(id)?.context("missing bundled switch")?;
+        assert_eq!(automatic.expected, manual.key());
+        assert_eq!(automatic.target.manifest.key(), bundled.key());
+        catalog.finish(&automatic, id, "applied")?;
+        assert_eq!(read(&catalog)?, bundled.key());
+        catalog.queue(id, None)?;
+        let rollback = catalog.next(id)?.context("missing rollback")?;
+        assert_eq!(rollback.target.manifest.key(), manual.key());
+        catalog.finish(&rollback, id, "applied")?;
+        catalog.db.execute("DELETE FROM switches", [])?;
+        assert_eq!(read(&catalog)?, manual.key());
+        assert!(catalog.next(id)?.is_none());
+
+        old.state_version = 2;
+        old.version = "9.9.9".into();
+        catalog.queue_bundled(id, &manual, &old)?;
+        assert!(catalog.next(id)?.is_none());
+        assert!(release_order("0.3.9") < release_order("0.3.10"));
+        assert!(release_order("0.3.10-rc.1") < release_order("0.3.10"));
+        Ok(())
+    }
 }

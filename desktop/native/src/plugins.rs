@@ -385,6 +385,7 @@ impl Registry {
     pub(crate) fn load(
         directory: &Path,
         runtime: &tokio::runtime::Handle,
+        bundled: bool,
     ) -> Result<(Self, BTreeMap<String, Selection>)> {
         let (rows, secrets) = instance_configuration(directory)?;
         let read_only = ["POCKET_NATIVE_READ_ONLY", "POCKET_READ_ONLY"]
@@ -429,7 +430,7 @@ impl Registry {
             let package = crate::plugin_catalog::Catalog::open(directory)
                 .and_then(|catalog| {
                     if is_dsh {
-                        catalog.bind_official(&row.id, &row.plugin, row.version.as_deref())
+                        catalog.bind_official(&row.id, &row.plugin, row.version.as_deref(), bundled)
                     } else {
                         catalog.bind(&row.id, &row.plugin, row.version.as_deref())
                     }

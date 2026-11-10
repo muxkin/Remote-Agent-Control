@@ -32,6 +32,7 @@ import { FrameReader, encodeFrame } from '../../packages/adapter-codex/src/frami
 const executable = resolve(process.argv[2] ?? 'desktop/native/target/release/agent-space-native');
 const codexPackage = process.argv[3] && resolve(process.argv[3]);
 const storageFixture = process.env.POCKET_NATIVE_TEST_STORAGE_PLUGIN;
+const bundled = process.env.POCKET_NATIVE_TEST_BUNDLED_PLUGINS === '1';
 const directory = await mkdtemp(
   join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'native-adapter-smoke-'),
 );
@@ -1674,6 +1675,39 @@ async function verifyCodexSwitch(
   }
 }
 
+async function seedBundledUpgrade() {
+  const root = join(state, 'native-plugins');
+  const db = new DatabaseSync(join(root, 'registry.sqlite'));
+  try {
+    const row = db.prepare(`
+      SELECT p.key, p.directory, p.manifest FROM bindings b JOIN packages p ON b.current = p.key
+      WHERE b.instance = 'codex-local'
+    `).get() as { key: string; directory: string; manifest: string };
+    const manifest = JSON.parse(row.manifest);
+    const old = { ...manifest, version: '0.0.1' };
+    const directory = join(state, 'old-official-fixture');
+    await mkdir(directory, { mode: 0o700 });
+    await copyFile(join(root, 'packages', row.directory, manifest.entry), join(directory, manifest.entry));
+    await writeFile(join(directory, 'adapter.json'), JSON.stringify(old));
+    await adapter('install', directory);
+    const previous = old.name + '@' + old.version;
+    db.prepare("UPDATE bindings SET current=?,previous=NULL WHERE instance='codex-local'").run(previous);
+    return { current: row.key, previous };
+  } finally {
+    db.close();
+  }
+}
+
+async function waitForBundledBinding(current: string, previous: string) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const { stdout } = await adapter('list');
+    const binding = JSON.parse(stdout).instances.find(({ instance }: { instance: string }) => instance === 'codex-local');
+    if (binding?.current === current && binding.previous === previous) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.fail(`Bundled Codex binding did not reach ${current} with rollback to ${previous}`);
+}
+
 async function installStorageFixture(fixture: string) {
   const directory = join(state, 'storage-fixture');
   await mkdir(directory, { mode: 0o700 });
@@ -1744,6 +1778,19 @@ try {
   await relay.listen();
   let gateway = await launch();
   try {
+    if (bundled) {
+      const { stdout } = await adapter('list');
+      const { packages, instances } = JSON.parse(stdout) as {
+        packages: string[]; instances: { instance: string; current: string; previous: string | null }[];
+      };
+      const official = packages.filter((key) => /^@agent-remote\/adapter-(codex|dsh)@/.test(key));
+      assert.equal(official.length, 2);
+      const [codex, dsh] = official;
+      assert(codex.startsWith('@agent-remote/adapter-codex@') && dsh.startsWith('@agent-remote/adapter-dsh@'));
+      assert.equal(codex.split('@').at(-1), dsh.split('@').at(-1));
+      assert.deepEqual(instances, [{ instance: 'codex-local', current: codex, previous: null }]);
+      console.log('Installed desktop adapter automatically registered both official plugins and bound Codex.');
+    }
     if (browserExecutable) {
       assert(ipc && !cloudflare, 'Browser smoke requires the Node relay and desktop fixture');
       await browserDirect(gateway.code, browserExecutable, ipc);
@@ -2021,6 +2068,18 @@ try {
     assert.deepEqual(restored.overrides, {});
     assert.deepEqual(restored.values, restored.defaults);
     resumed.close();
+    if (bundled) {
+      await gateway.stop();
+      const { current, previous } = await seedBundledUpgrade();
+      gateway = await launch(true);
+      await waitForBundledBinding(current, previous);
+      await adapter('rollback', 'codex-local');
+      await waitForBundledBinding(previous, current);
+      await gateway.stop();
+      gateway = await launch(true);
+      await waitForBundledBinding(previous, current);
+      console.log('The bundled Codex upgrade used the plugin supervisor and a rollback survived restart.');
+    }
   } finally {
     await gateway.stop();
   }

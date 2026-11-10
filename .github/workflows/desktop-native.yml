@@ -66,12 +66,22 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: cargo build --release --locked
+      - name: Build the official Codex and DSH plugins
+        working-directory: desktop/native
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-codex --bin agent-space-adapter-dsh
+      - name: Package the official Codex and DSH plugins
+        run: |
+          node scripts/desktop/native-plugin-package.mjs codex desktop/native/target/release/agent-space-adapter-codex${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-official-plugins/codex ${{ matrix.target }}
+          node scripts/desktop/native-plugin-package.mjs dsh desktop/native/target/release/agent-space-adapter-dsh${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-official-plugins/dsh ${{ matrix.target }}
       - name: Package the Rust adapter
-        run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }} ${{ matrix.target }} --installer
-      - name: Install and verify the Debian package
+        run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }} ${{ matrix.target }} dist/native-official-plugins --installer
+      - name: Install and verify the Debian package and its default plugins
         if: runner.os == 'Linux'
         env:
           POCKET_NATIVE_TEST_IPC: '1'
+          POCKET_NATIVE_TEST_BUNDLED_PLUGINS: '1'
         run: |
           sudo dpkg -i dist/desktop-native-preview/*.deb
           cmp /usr/bin/agent-space-native desktop/native/target/release/agent-space-native
@@ -83,10 +93,11 @@ jobs:
           node --import tsx scripts/desktop/native-dsh-smoke.ts /usr/bin/agent-space-native
           cd desktop/native
           cargo test --release --locked
-      - name: Mount and verify the macOS installer
+      - name: Mount and verify the macOS installer and its default plugins
         if: runner.os == 'macOS'
         env:
           POCKET_NATIVE_TEST_IPC: '1'
+          POCKET_NATIVE_TEST_BUNDLED_PLUGINS: '1'
         run: |
           set -euo pipefail
           mount=$(mktemp -d)
@@ -99,6 +110,9 @@ jobs:
           node --import tsx scripts/desktop/native-smoke.ts "$app/Contents/MacOS/agent-space-native"
       - name: Verify Windows install, reinstall and uninstall
         if: runner.os == 'Windows'
+        env:
+          POCKET_NATIVE_TEST_IPC: '1'
+          POCKET_NATIVE_TEST_BUNDLED_PLUGINS: '1'
         run: |
           $setup = (Get-Item dist/desktop-native-preview/*-setup.exe).FullName
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\Agent Space Adapter'
@@ -108,12 +122,14 @@ jobs:
             $process = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
             if ($process.ExitCode -ne 0 -or (Get-FileHash $exe).Hash -ne $expected) { throw 'Installation failed' }
           }
+          node --import tsx scripts/desktop/native-smoke.ts $exe
+          if ($LASTEXITCODE -ne 0) { throw 'Installed adapter protocol or plugin check failed' }
           if (Test-Path (Join-Path $dir 'gateway')) { throw 'Unexpected gateway runtime' }
           if ((Get-AuthenticodeSignature -LiteralPath $setup).Status -ne 'NotSigned') { throw 'Unexpected publisher signature' }
           # Uninstall only the packaged files, even when an unrelated file exists alongside them.
           New-Item -Path (Join-Path $dir 'keep.txt') -ItemType File | Out-Null
           $process = Start-Process -FilePath (Join-Path $dir 'Uninstall.exe') -ArgumentList '/S' -Wait -PassThru
-          if ($process.ExitCode -ne 0 -or (Test-Path $exe) -or !(Test-Path (Join-Path $dir 'keep.txt'))) { throw 'Uninstall failed' }
+          if ($process.ExitCode -ne 0 -or (Test-Path $exe) -or (Test-Path (Join-Path $dir 'official-plugins')) -or !(Test-Path (Join-Path $dir 'keep.txt'))) { throw 'Uninstall failed' }
       - name: Verify the signed HTTPS update through the installed adapter
         shell: bash
         run: node scripts/desktop/native-rust-update-smoke.mjs dist/desktop-native-preview desktop/native/target/release/${{ matrix.binary }}
@@ -138,31 +154,22 @@ jobs:
         env:
           POCKET_NATIVE_TEST_STANDALONE_CALL: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: node --import tsx scripts/desktop/native-rust-im-smoke.ts desktop/native/target/release/${{ matrix.binary }} desktop/native/target/release/examples/native-im-fixture${{ runner.os == 'Windows' && '.exe' || '' }}
-      - name: Build the official Codex and DSH plugins
-        working-directory: desktop/native
-        env:
-          MACOSX_DEPLOYMENT_TARGET: '14.0'
-        run: cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-codex --bin agent-space-adapter-dsh
-      - name: Package the official Codex and DSH plugins
-        run: |
-          node scripts/desktop/native-plugin-package.mjs codex desktop/native/target/release/agent-space-adapter-codex${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-adapter-codex ${{ matrix.target }}
-          node scripts/desktop/native-plugin-package.mjs dsh desktop/native/target/release/agent-space-adapter-dsh${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-adapter-dsh ${{ matrix.target }}
       - name: Verify the external Codex plugin and online version switches
         env:
           POCKET_NATIVE_TEST_IPC: '1'
-        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }} dist/native-adapter-codex
+        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }} dist/native-official-plugins/codex
       - name: Verify the external DSH plugin through the installed Rust gateway
         if: runner.os == 'Linux'
-        run: node --import tsx scripts/desktop/native-dsh-smoke.ts /usr/bin/agent-space-native dist/native-adapter-dsh
+        run: node --import tsx scripts/desktop/native-dsh-smoke.ts desktop/native/target/release/${{ matrix.binary }} dist/native-official-plugins/dsh
       - uses: actions/upload-artifact@v4
         with:
           name: agent-space-adapter-codex-${{ matrix.platform }}-${{ matrix.arch }}
-          path: dist/native-adapter-codex/
+          path: dist/native-official-plugins/codex/
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: agent-space-adapter-dsh-${{ matrix.platform }}-${{ matrix.arch }}
-          path: dist/native-adapter-dsh/
+          path: dist/native-official-plugins/dsh/
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

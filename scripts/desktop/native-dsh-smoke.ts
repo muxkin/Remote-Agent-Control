@@ -737,7 +737,7 @@ try {
       backends.map(({ id, connected }) => [id, connected]),
       instances.map(({ id }) => [id, true]),
     );
-    if (plugin)
+    if (plugin || process.env.POCKET_NATIVE_TEST_BUNDLED_PLUGINS === '1')
       assert(
         backends.every((entry) => entry.adapterVersion),
         'Expected the independent DSH plugin',

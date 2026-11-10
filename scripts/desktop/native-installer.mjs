@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -32,6 +33,7 @@ export async function buildInstaller(platform, source, version, output, signed =
         `${define}PACKAGE_DIR=${source}`,
         `${define}OUTPUT_FILE=${output}`,
         `${define}VERSION=${version}`,
+        ...(existsSync(join(source, 'official-plugins')) ? [`${define}OFFICIAL_PLUGINS`] : []),
         `${define}APP_ICON=${resolve('assets/branding/agent-space.ico')}`,
         resolve('desktop/native/installer.nsi'),
       ]);
@@ -55,6 +57,7 @@ async function buildDeb(stage, source, version, output) {
     await mkdir(join(stage, directory), { recursive: true });
     for (const file of files) await cp(join(source, file), join(stage, directory, file));
   }
+  await copyPlugins(source, join(stage, 'usr/lib/agent-space-native'));
   await writeFile(
     join(stage, 'DEBIAN/control'),
     `Package: agent-space-native
@@ -66,7 +69,7 @@ Priority: optional
 Depends: libc6 (>= 2.39), libgcc-s1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libfontconfig1
 Recommends: libvulkan1, mesa-vulkan-drivers, pkexec
 Description: Agent Space native desktop adapter
- Connects local Codex sessions to the Agent Space workbench.
+ Connects local Agent sessions to the Agent Space workbench.
 `,
   );
   const icons = 'usr/share/icons/hicolor/512x512/apps';
@@ -100,6 +103,7 @@ async function buildDmg(stage, source, version, output, signed) {
   await cp(join(source, program), join(contents, 'MacOS', program));
   for (const file of ['README.txt', 'LICENSE', 'THIRD-PARTY-NOTICES.txt'])
     await cp(join(source, file), join(resources, file));
+  const bundled = await copyPlugins(source, resources);
   const iconset = join(stage, 'AgentSpace.iconset');
   await mkdir(iconset);
   for (const size of [16, 32, 128, 256, 512]) {
@@ -136,12 +140,39 @@ async function buildDmg(stage, source, version, output, signed) {
 `,
   );
   run('plutil', ['-lint', join(contents, 'Info.plist')]);
-  if (signed) await macSignApp(app, stage);
-  else run('codesign', ['--force', '--deep', '--sign', '-', app]);
+  if (signed) await macSignApp(app, stage, () => refreshPluginHashes(bundled));
+  else {
+    if (bundled) {
+      for (const product of ['codex', 'dsh'])
+        run('codesign', ['--force', '--sign', '-', join(bundled, product, 'agent-space-adapter-' + product)]);
+      await refreshPluginHashes(bundled);
+    }
+    run('codesign', ['--force', '--sign', '-', app]);
+  }
   run('codesign', ['--verify', '--deep', '--strict', app]);
   await symlink('/Applications', join(volume, 'Applications'));
   run('hdiutil', ['create', '-volname', appName, '-srcfolder', volume, '-format', 'UDZO', output]);
   if (signed) macSignDmg(output);
+}
+
+async function copyPlugins(source, parent) {
+  const packaged = join(source, 'official-plugins');
+  if (!existsSync(packaged)) return undefined;
+  const installed = join(parent, 'official-plugins');
+  await mkdir(parent, { recursive: true });
+  await cp(packaged, installed, { recursive: true });
+  return installed;
+}
+
+export async function refreshPluginHashes(bundled) {
+  if (!bundled) return;
+  for (const product of ['codex', 'dsh']) {
+    const directory = join(bundled, product);
+    const path = join(directory, 'adapter.json');
+    const manifest = JSON.parse(await readFile(path, 'utf8'));
+    manifest.sha256 = createHash('sha256').update(await readFile(join(directory, manifest.entry))).digest('hex');
+    await writeFile(path, JSON.stringify(manifest, null, 2) + '\n');
+  }
 }
 
 function run(command, args) {

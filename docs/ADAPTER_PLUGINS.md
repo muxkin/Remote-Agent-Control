@@ -28,7 +28,9 @@ agent-space-native --adapter result REQUEST_ID
 
 ### 官方 Codex 和 DSH
 
-正式版本在 GitHub Releases 提供与系统和架构对应的 Codex、DSH 独立包及 `SHA256SUMS`。开发版可从桌面验收 CI 下载 `agent-space-adapter-codex-*` 或 `agent-space-adapter-dsh-*` 产物。解压后将目录传给 `agent-space-native --adapter install`，再重启适配器。首次绑定依次采用已安装的配置版本、当前适配器版本和最近安装的官方包。已经绑定的实例继续使用该版本，可通过 `upgrade` 和 `rollback` 在线切换。已有安装可用内建连接器过渡到独立包。
+安装器和便携包附带官方 Codex 与 DSH 原生插件。适配器首次启动时校验清单、二进制摘要和 SDK 握手，再将插件登记到用户的私有 registry。已有的 Codex 和 DSH 实例可以直接复用原配置。适配器升级时，兼容的新版随包插件由现有监督器切换，旧版保留供回滚。每个实例对同一随包版本只尝试一次，手动切换正在排队时优先处理手动请求。
+
+正式版本也在 GitHub Releases 提供独立包及 `SHA256SUMS`。开发版可从桌面验收 CI 下载 `agent-space-adapter-codex-*` 或 `agent-space-adapter-dsh-*` 产物。解压后将目录传给 `agent-space-native --adapter install`，用 `upgrade` 和 `rollback` 在线切换。首次绑定依次采用已安装的配置版本、当前适配器版本和最近安装的官方包。仅构建网关二进制时，内建连接器仍可用于过渡。
 
 Codex 默认实例沿用 `codex-local`、原有会话、配对和上传索引。实例可保留旧配置的 `home`、`root`、`socket`、`executable` 和 `appTools`，也可继续用原生环境变量指定路径。DSH 沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。
 

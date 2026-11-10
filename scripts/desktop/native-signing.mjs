@@ -33,7 +33,7 @@ export function verifyPlatformSignature(platform, file) {
   }
 }
 
-export async function macSignApp(app, stage) {
+export async function macSignApp(app, stage, beforeSeal = async () => {}) {
   const identity = process.env.POCKET_NATIVE_MAC_SIGN_IDENTITY;
   if (!identity?.startsWith('Developer ID Application:') || !process.env.POCKET_NATIVE_MAC_NOTARY_PROFILE)
     throw Error('Configure the Developer ID Application identity and notarytool Keychain profile');
@@ -70,6 +70,7 @@ export async function macSignApp(app, stage) {
     }
   }
   await signContents(join(app, 'Contents'));
+  await beforeSeal();
   sign(app);
   run('codesign', ['--verify', '--deep', '--strict', app]);
   const archive = join(stage, 'notarization.zip');

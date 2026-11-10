@@ -143,6 +143,7 @@ pub fn start() -> Result<()> {
             })
     };
     let runtime = Runtime::new()?;
+    let bundled = runtime.block_on(plugin_catalog::provision_official(&executable, &directory))?;
     let (state, updates) = watch::channel(Snapshot::default());
     let (pair, commands) = mpsc::channel(1);
     let (update_commands, update_requests) = mpsc::channel(8);
@@ -154,8 +155,8 @@ pub fn start() -> Result<()> {
     let mut connect = move |origin: &str, enrollment: String| -> Result<String> {
         let mut config = RelayConfig::new(origin, enrollment)?;
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
-        let (plugins, codex) = plugins::Registry::load(&directory, &handle)?;
-        config.codex = codex_backend::Group::load(&directory, &handle, codex)?;
+        let (plugins, codex) = plugins::Registry::load(&directory, &handle, bundled)?;
+        config.codex = codex_backend::Group::load(&directory, &handle, codex, bundled)?;
         let transports = storage::Transports::load(&directory, &config.origin)?;
         config.plugins = plugins;
         config.direct = transports.direct;

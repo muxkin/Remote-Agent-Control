@@ -69,4 +69,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" release/AgentSpace-* release/SHA256SUMS \
             --verify-tag --title "Agent Space Rust Desktop ${GITHUB_REF_NAME#native-rust-}" \
-            --notes "Verified installers and independent Codex and DSH plugin packages for Windows x64, macOS Apple Silicon and Intel, and Linux x64. Verify the SHA-256 checksums, extract the plugin for your system, then use agent-space-native --adapter install with the extracted directory. The automatic update feed is published separately with the desktop release key."
+            --notes "Verified installers and independent Codex and DSH plugin packages for Windows x64, macOS Apple Silicon and Intel, and Linux x64. The installers include both official plugins. To install a separate plugin package, verify its SHA-256 checksum, extract it, and run agent-space-native --adapter install with the extracted directory. The automatic update feed is published separately with the desktop release key."

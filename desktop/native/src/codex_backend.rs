@@ -49,11 +49,12 @@ impl Group {
         directory: &Path,
         runtime: &tokio::runtime::Handle,
         selections: BTreeMap<String, Selection>,
+        bundled: bool,
     ) -> Result<Self> {
         let backends = selections
             .into_iter()
             .map(|(id, selection)| {
-                let backend = Backend::load(directory, runtime, &id, selection)?;
+                let backend = Backend::load(directory, runtime, &id, selection, bundled)?;
                 Ok((id, backend))
             })
             .collect::<Result<_>>()?;
@@ -219,6 +220,7 @@ impl Backend {
         runtime: &tokio::runtime::Handle,
         id: &str,
         selection: Selection,
+        bundled: bool,
     ) -> Result<Self> {
         let Selection {
             name,
@@ -226,7 +228,8 @@ impl Backend {
             options,
             read_only,
         } = selection;
-        let package = Catalog::open(directory)?.bind_official(id, PACKAGE, version.as_deref())?;
+        let package =
+            Catalog::open(directory)?.bind_official(id, PACKAGE, version.as_deref(), bundled)?;
         if let Some(package) = package {
             ensure!(
                 package.manifest.product == "codex",
