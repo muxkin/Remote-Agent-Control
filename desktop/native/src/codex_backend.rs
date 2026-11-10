@@ -3,6 +3,7 @@ use crate::{
     codex_service::{Availability, Local, Options},
     conversations::Change,
     history_media::Source,
+    migration::GatewayEnvironment,
     plugin_catalog::Catalog,
     plugin_host::Host,
     plugins::Adapter,
@@ -104,7 +105,7 @@ impl Selection {
         name: String,
         version: Option<String>,
         config: &Map<String, Value>,
-        legacy: &HashMap<String, String>,
+        legacy: &GatewayEnvironment,
         read_only: bool,
     ) -> Result<Self> {
         let variable = |key: &str| {
@@ -128,7 +129,7 @@ impl Selection {
                 if path.is_absolute() {
                     Ok(path)
                 } else {
-                    std::path::absolute(path)
+                    std::path::absolute(legacy.resolve(path))
                 }
             })
             .transpose()

@@ -6,6 +6,7 @@ use crate::{
         Client, MAX_CURSOR, MessageConflict, MessageUpdate, NewMessage, required, segment,
     },
     im_interactions,
+    migration::GatewayEnvironment,
     state::{private_directory, private_file},
     update::UpdateGate,
 };
@@ -101,9 +102,16 @@ pub(crate) fn start(
     workers: &Workers,
     gate: UpdateGate,
     status: watch::Sender<Snapshot>,
+    environment: &GatewayEnvironment,
 ) {
     let manifest = env::var_os("POCKET_NATIVE_IM_AGENTS")
         .map(PathBuf::from)
+        .or_else(|| {
+            environment
+                .get("POCKET_NATIVE_IM_AGENTS")
+                .map(PathBuf::from)
+        })
+        .map(|path| environment.resolve(path))
         .unwrap_or_else(|| directory.join("im-agents.json"));
     let rows = match private_file(&manifest, false) {
         Ok(file) => serde_json::from_reader::<_, Vec<Value>>(file.take(128 * 1024))

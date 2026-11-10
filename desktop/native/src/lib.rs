@@ -127,21 +127,33 @@ pub fn start() -> Result<()> {
         "用法: agent-space-native [--configure | --background | --headless [--print-pair]]"
     );
     migration::initialize(&directory)?;
+    let source = migration::source();
+    let environment = migration::GatewayEnvironment::load(&directory, source)?;
     let configured_origin = if configure {
         None
     } else {
-        env::var("POCKET_NATIVE_ORIGIN")
+        let origin = env::var("POCKET_NATIVE_ORIGIN")
             .ok()
             .filter(|value| !value.is_empty())
             .or(state::saved_origin(&directory)?)
-            .or_else(|| {
-                migration::source()
-                    .filter(|source| {
-                        *source == directory && directory.join("adapters/registry.json").is_file()
-                    })
-                    .and_then(|_| update_preferences::legacy_origin().ok().flatten())
-            })
+            .or_else(|| environment.origin().map(str::to_owned));
+        if origin.is_none()
+            && (source.is_some() || env::var_os("POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS").is_some())
+        {
+            update_preferences::legacy_origin()?
+        } else {
+            origin
+        }
     };
+    let enrollment = env::var("POCKET_NATIVE_ENROLLMENT")
+        .ok()
+        .or_else(|| {
+            configured_origin
+                .as_deref()
+                .and_then(|origin| environment.enrollment_for(origin))
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
     let runtime = Runtime::new()?;
     let bundled = runtime.block_on(plugin_catalog::provision_official(&executable, &directory))?;
     let (state, updates) = watch::channel(Snapshot::default());
@@ -155,9 +167,9 @@ pub fn start() -> Result<()> {
     let mut connect = move |origin: &str, enrollment: String| -> Result<String> {
         let mut config = RelayConfig::new(origin, enrollment)?;
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
-        let (plugins, codex) = plugins::Registry::load(&directory, &handle, bundled)?;
+        let (plugins, codex) = plugins::Registry::load(&directory, &handle, bundled, &environment)?;
         config.codex = codex_backend::Group::load(&directory, &handle, codex, bundled)?;
-        let transports = storage::Transports::load(&directory, &config.origin)?;
+        let transports = storage::Transports::load(&directory, &config.origin, &environment)?;
         config.plugins = plugins;
         config.direct = transports.direct;
         config.storage = transports.storage;
@@ -173,6 +185,7 @@ pub fn start() -> Result<()> {
             &im_runtime,
             gate.clone(),
             state.clone(),
+            &environment,
         );
         if !headless {
             handle.spawn(update::run(
@@ -189,10 +202,7 @@ pub fn start() -> Result<()> {
         Ok(origin)
     };
     let configured = if let Some(origin) = configured_origin {
-        Some(connect(
-            &origin,
-            env::var("POCKET_NATIVE_ENROLLMENT").unwrap_or_default(),
-        )?)
+        Some(connect(&origin, enrollment)?)
     } else {
         None
     };

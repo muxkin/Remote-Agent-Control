@@ -6,7 +6,9 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, MAIN_DB, OpenFlags};
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -15,6 +17,7 @@ use std::{
 use uuid::Uuid;
 
 const SOURCE_FILE: &str = "node-state-source.json";
+const GATEWAY_SOURCE_FILE: &str = "legacy-gateway-source.json";
 static SOURCE: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn initialize(directory: &Path) -> Result<()> {
@@ -41,6 +44,130 @@ pub(crate) fn initialize(directory: &Path) -> Result<()> {
 
 pub(crate) fn source() -> Option<&'static Path> {
     SOURCE.get().map(PathBuf::as_path)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewaySource {
+    environment_file: PathBuf,
+    working_directory: PathBuf,
+    origin: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct GatewayEnvironment {
+    pub(crate) values: HashMap<String, String>,
+    external: Option<GatewaySource>,
+}
+
+impl GatewayEnvironment {
+    pub(crate) fn load(directory: &Path, source: Option<&Path>) -> Result<Self> {
+        let saved: Option<GatewaySource> = optional_file(&directory.join(GATEWAY_SOURCE_FILE))?
+            .map(|file| serde_json::from_reader(file.take(16 * 1024)))
+            .transpose()
+            .context("旧版网关迁移记录无效")?;
+        let desktop = if env::var_os("POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS").is_some()
+            || (saved.is_none() && source.is_some())
+        {
+            crate::update_preferences::legacy_gateway()?.map(|old| GatewaySource {
+                environment_file: old.environment_file,
+                working_directory: old.working_directory,
+                origin: old
+                    .origin
+                    .and_then(|origin| RelayConfig::new(&origin, String::new()).ok())
+                    .map(|config| config.origin.origin().ascii_serialization()),
+            })
+        } else {
+            None
+        };
+        let mut external = desktop.or(saved);
+        if let Some(file) = env::var_os("POCKET_ENV_FILE").filter(|value| !value.is_empty()) {
+            let file = PathBuf::from(file);
+            let working_directory = match &external {
+                Some(old) => old.working_directory.clone(),
+                None => env::current_dir()?,
+            };
+            external = Some(GatewaySource {
+                environment_file: working_directory.join(file),
+                working_directory,
+                origin: external.and_then(|old| old.origin),
+            });
+        }
+        let mut config = Self::default();
+        if let Some(external) = external {
+            ensure!(
+                external.environment_file.is_absolute() && external.working_directory.is_absolute(),
+                "旧版网关迁移记录须使用绝对路径"
+            );
+            config.extend(
+                legacy_private_file(&external.environment_file)
+                    .context("无法读取旧版网关环境文件")?,
+            )?;
+            config.external = Some(external);
+        } else {
+            for root in source
+                .filter(|source| *source != directory)
+                .into_iter()
+                .chain([directory])
+            {
+                if let Some(file) = optional_file(&root.join("gateway.env"))? {
+                    config.extend(file)?;
+                }
+            }
+        }
+        Ok(config)
+    }
+
+    pub(crate) fn is_external(&self) -> bool {
+        self.external.is_some()
+    }
+
+    fn extend(&mut self, file: fs::File) -> Result<()> {
+        const LIMIT: usize = 128 * 1024;
+        let mut bytes = Vec::new();
+        file.take((LIMIT + 1) as u64).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= LIMIT, "网关环境文件过大");
+        for entry in dotenvy::Iter::new(bytes.as_slice()) {
+            let (name, value) = entry.map_err(|_| anyhow::anyhow!("网关环境文件格式无效"))?;
+            self.values.insert(name, value);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve(&self, path: PathBuf) -> PathBuf {
+        match &self.external {
+            Some(external) if !path.is_absolute() => external.working_directory.join(path),
+            _ => path,
+        }
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn origin(&self) -> Option<&str> {
+        self.external
+            .as_ref()
+            .and_then(|source| source.origin.as_deref())
+            .or_else(|| {
+                self.get("POCKET_PUBLIC_ORIGIN")
+                    .filter(|origin| !origin.is_empty())
+            })
+    }
+
+    pub(crate) fn enrollment_for(&self, origin: &str) -> Option<&str> {
+        let declared = self
+            .get("POCKET_PUBLIC_ORIGIN")
+            .filter(|origin| !origin.is_empty())
+            .or_else(|| self.origin())?;
+        let configured = RelayConfig::new(declared, String::new()).ok()?;
+        let origin = RelayConfig::new(origin, String::new()).ok()?;
+        if configured.origin == origin.origin {
+            self.get("POCKET_RELAY_ENROLLMENT")
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn import(source: &Path, target: &Path, origin: Option<&str>) -> Result<()> {
@@ -89,6 +216,7 @@ pub(crate) fn import(source: &Path, target: &Path, origin: Option<&str>) -> Resu
             .starts_with(&source_canonical),
         "目标状态目录必须位于旧版目录之外"
     );
+    let environment = GatewayEnvironment::load(source, Some(source))?;
     let staging = parent.join(format!(".native-import-{}", Uuid::new_v4()));
     private_directory(&staging)?;
     let result = (|| -> Result<()> {
@@ -127,7 +255,12 @@ pub(crate) fn import(source: &Path, target: &Path, origin: Option<&str>) -> Resu
         serde_json::to_writer(&mut pointer, source)?;
         pointer.sync_all()?;
         drop(pointer);
-        let origin = choose_origin(source, origin)?;
+        if let Some(external) = &environment.external {
+            let mut pointer = private_file(&staging.join(GATEWAY_SOURCE_FILE), true)?;
+            serde_json::to_writer(&mut pointer, external)?;
+            pointer.sync_all()?;
+        }
+        let origin = choose_origin(source, origin, &environment)?;
         if let Some(origin) = origin {
             let config = RelayConfig::new(&origin, String::new())?;
             remember_origin(&staging, &config.origin.origin().ascii_serialization())?;
@@ -168,20 +301,19 @@ fn ensure_node_stopped(source: &Path) -> Result<()> {
     Ok(())
 }
 
-fn choose_origin(source: &Path, explicit: Option<&str>) -> Result<Option<String>> {
+fn choose_origin(
+    source: &Path,
+    explicit: Option<&str>,
+    environment: &GatewayEnvironment,
+) -> Result<Option<String>> {
     if let Some(origin) = explicit {
         return Ok(Some(origin.to_owned()));
     }
     if let Some(origin) = saved_origin(source)? {
         return Ok(Some(origin));
     }
-    if let Some(file) = optional_file(&source.join("gateway.env"))? {
-        for row in dotenvy::Iter::new(file) {
-            let (key, value) = row.map_err(|_| anyhow::anyhow!("旧版 gateway.env 无效"))?;
-            if key == "POCKET_PUBLIC_ORIGIN" && !value.is_empty() {
-                return Ok(Some(value));
-            }
-        }
+    if let Some(origin) = environment.origin() {
+        return Ok(Some(origin.to_owned()));
     }
     crate::update_preferences::legacy_origin()
 }
@@ -227,6 +359,36 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_enrollment_is_reused_only_at_the_declared_origin() {
+        let environment = GatewayEnvironment {
+            external: Some(GatewaySource {
+                environment_file: PathBuf::new(),
+                working_directory: PathBuf::new(),
+                origin: Some("https://desktop.example.org".into()),
+            }),
+            values: HashMap::from([
+                (
+                    "POCKET_PUBLIC_ORIGIN".into(),
+                    "https://legacy.example.org".into(),
+                ),
+                (
+                    "POCKET_RELAY_ENROLLMENT".into(),
+                    "fixture-enrollment".into(),
+                ),
+            ]),
+        };
+        assert_eq!(environment.origin(), Some("https://desktop.example.org"));
+        assert_eq!(
+            environment.enrollment_for("https://desktop.example.org"),
+            None
+        );
+        assert_eq!(
+            environment.enrollment_for("https://legacy.example.org/"),
+            Some("fixture-enrollment")
+        );
+    }
 
     #[test]
     fn imports_old_operation_schema_and_cursor_without_changing_source() -> Result<()> {

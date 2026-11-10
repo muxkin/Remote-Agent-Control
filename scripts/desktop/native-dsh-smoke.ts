@@ -18,6 +18,12 @@ const state = await mkdtemp(join(tmpdir(), 'native-dsh-smoke-'));
 const executable = resolve(process.argv[2]);
 const plugin = process.argv[3] ? resolve(process.argv[3]) : undefined;
 const legacy = join(state, 'legacy');
+const legacyWork = join(legacy, 'original-workspace');
+const legacyDesktop = join(legacy, 'desktop-settings.json');
+const legacyEnv = join(legacy, 'gateway.env');
+const externalEnv = join(legacy, 'external-gateway.env');
+const overrideEnv = join(legacy, 'override-gateway.env');
+let configSource: 'initial-env' | 'desktop-settings' | 'explicit-env' = 'initial-env';
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const png = await readFile('src/web/public/app-icon-32.png');
 const workspacePdf = Buffer.from('%PDF-1.7\nfixture document\n');
@@ -629,9 +635,10 @@ async function launch() {
       CODEX_HOME: join(state, 'no-codex'),
       POCKET_NATIVE_STATE_DIR: state,
       POCKET_NATIVE_LEGACY_STATE: legacy,
-      POCKET_NATIVE_ORIGIN: origin,
-      POCKET_NATIVE_ENROLLMENT: enrollment,
-      POCKET_NATIVE_P2P: '0',
+      ...(configSource === 'initial-env'
+        ? { POCKET_ENV_FILE: legacyEnv }
+        : { POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS: legacyDesktop }),
+      ...(configSource === 'explicit-env' ? { POCKET_ENV_FILE: overrideEnv } : {}),
       RUST_DSH_TEST_TOKEN_0: one.token,
     },
     stdio: ['ignore', 'pipe', 'inherit'],
@@ -667,11 +674,16 @@ try {
   await once(dsh, 'listening');
   const carrier = dsh.address();
   assert(carrier && typeof carrier !== 'string');
-  const legacyConfig = join(legacy, 'old-backends.json');
-  const legacyEnv = join(legacy, 'gateway.env');
+  const legacyConfig = join(legacyWork, 'old-backends.json');
   const carrierUrl = 'http://127.0.0.1:' + carrier.port;
   await mkdir(legacy, { mode: 0o700 });
-  await writeFile(legacyEnv, `RUST_DSH_TEST_TOKEN_1=${two.token}\n`, { mode: 0o600 });
+  await writeFile(legacyEnv, [
+    `RUST_DSH_TEST_TOKEN_1=${two.token}`,
+    `POCKET_PUBLIC_ORIGIN=${origin}`,
+    `POCKET_RELAY_ENROLLMENT=${enrollment}`,
+    'POCKET_P2P=0',
+    '',
+  ].join('\n'), { mode: 0o600 });
   await writeFile(
     join(state, 'instances.json'),
     JSON.stringify([
@@ -1350,12 +1362,16 @@ try {
     remove();
     session.close();
     await stop();
+    await mkdir(legacyWork, { mode: 0o700 });
     await renameFile(join(state, 'instances.json'), legacyConfig);
-    await writeFile(
-      legacyEnv,
-      `RUST_DSH_TEST_TOKEN_1=${two.token}\nPOCKET_BACKENDS_FILE=${JSON.stringify(legacyConfig)}\n`,
-      { mode: 0o600 },
-    );
+    const oldEnvironment = `RUST_DSH_TEST_TOKEN_1=${two.token}\nPOCKET_BACKENDS_FILE=old-backends.json\nPOCKET_PUBLIC_ORIGIN=https://unused.invalid\nPOCKET_P2P=0\n`;
+    await writeFile(externalEnv, oldEnvironment, { mode: 0o600 });
+    await writeFile(legacyDesktop, JSON.stringify({
+      origin,
+      legacyGateway: { workingDirectory: legacyWork, environmentFile: externalEnv },
+    }), { mode: 0o600 });
+    await rm(join(state, 'service-origin'));
+    configSource = 'desktop-settings';
     await launch();
     views.clear();
     session = await nodeSession(origin, host, phone, ready.ticket, {
@@ -1385,7 +1401,8 @@ try {
     remove();
     session.close();
     await stop();
-    await writeFile(join(state, 'gateway.env'), 'POCKET_READ_ONLY=1\n', { mode: 0o600 });
+    await writeFile(overrideEnv, oldEnvironment + 'POCKET_READ_ONLY=1\n', { mode: 0o600 });
+    configSource = 'explicit-env';
     const beforeReadOnly = one.eventSessions;
     await launch();
     views.clear();
@@ -1426,7 +1443,7 @@ try {
     session.close();
   }
   console.log(
-    'Rust DSH: media, native skills and controls, goals, ZIP export, approvals and questions, recovery, replay and read-only policy passed.',
+    'Rust DSH: media, native skills and controls, goals, ZIP export, approvals and questions, recovery, replay, legacy environment and read-only policy passed.',
   );
 } finally {
   await stop();

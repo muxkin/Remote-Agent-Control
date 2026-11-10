@@ -2,7 +2,8 @@ use crate::{
     im_agent::cli_request,
     im_client::{Client, MAX_CURSOR, agent_http, checked_bytes, is_uid, origin_url, required},
     im_crypto::new_agent_vault,
-    state::{create_private_file, private_directory, private_file},
+    migration::{self, GatewayEnvironment},
+    state::{create_private_file, private_directory},
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -92,7 +93,12 @@ impl<'a> Arguments<'a> {
         let state = self
             .get("state")
             .map(PathBuf::from)
-            .or_else(|| environment.get("POCKET_IM_AGENT_STATE").map(PathBuf::from))
+            .or_else(|| {
+                environment
+                    .get("POCKET_IM_AGENT_STATE")
+                    .map(PathBuf::from)
+                    .map(|path| environment.0.resolve(path))
+            })
             .or_else(|| {
                 dirs::home_dir()
                     .map(|home| home.join(".local/state/codex-pocket-remote/im-agent.json"))
@@ -112,38 +118,28 @@ impl<'a> Arguments<'a> {
     }
 }
 
-struct Environment(BTreeMap<String, String>);
+struct Environment(GatewayEnvironment);
 
 impl Environment {
     fn load() -> Result<Self> {
-        let explicit = env::var_os("POCKET_ENV_FILE").map(PathBuf::from);
-        let path = explicit.clone().or_else(|| {
-            env::var_os("POCKET_NATIVE_STATE_DIR")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    dirs::data_local_dir().map(|path| path.join("agent-space-native-preview"))
-                })
-                .map(|path| path.join("gateway.env"))
-        });
-        let Some(path) = path else {
-            return Ok(Self(BTreeMap::new()));
+        let directory = env::var_os("POCKET_NATIVE_STATE_DIR")
+            .map(PathBuf::from)
+            .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")));
+        let Some(directory) = directory else {
+            return Ok(Self(GatewayEnvironment::default()));
         };
-        match private_file(&path, false) {
-            Ok(file) => Ok(Self(
-                dotenvy::from_read_iter(file.take(128 * 1024))
-                    .filter(
-                        |entry| !matches!(entry, Ok((name, _)) if !name.starts_with("POCKET_IM_")),
-                    )
-                    .collect::<dotenvy::Result<_>>()
-                    .map_err(|_| anyhow::anyhow!("Agent 环境文件格式无效"))?,
-            )),
-            Err(error) if explicit.is_none() && missing_file(&error) => Ok(Self(BTreeMap::new())),
-            Err(error) => Err(error),
-        }
+        let directory = std::path::absolute(directory)?;
+        migration::initialize(&directory)?;
+        Ok(Self(GatewayEnvironment::load(
+            &directory,
+            migration::source(),
+        )?))
     }
 
     fn get(&self, name: &str) -> Option<String> {
-        env::var(name).ok().or_else(|| self.0.get(name).cloned())
+        env::var(name)
+            .ok()
+            .or_else(|| self.0.get(name).map(str::to_owned))
     }
 }
 

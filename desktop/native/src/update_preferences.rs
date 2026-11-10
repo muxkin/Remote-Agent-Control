@@ -115,7 +115,7 @@ impl Preferences {
         let mut handed_off = false;
         if let Some((source, inherited)) = hybrid {
             handed_off = inherited;
-            if let Some((base, disabled)) = hybrid_preferences(source)? {
+            if let Some((base, disabled)) = hybrid_preferences(directory, source)? {
                 migrated = true;
                 if disabled {
                     preferences.auto_update = false;
@@ -161,31 +161,13 @@ fn channel(url: Url, suffix: &[&str]) -> Result<String> {
     Ok(url.to_string())
 }
 
-fn hybrid_preferences(source: &Path) -> Result<Option<(Option<String>, bool)>> {
-    let path = source.join("gateway.env");
-    let file = match private_file(&path, false) {
-        Ok(file) => file,
-        Err(error)
-            if error
-                .downcast_ref::<io::Error>()
-                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    let mut base = None;
-    let mut disabled = false;
-    for entry in dotenvy::Iter::new(settings_bytes(file)?.as_slice()) {
-        let (key, value) = entry.map_err(|_| anyhow::anyhow!("旧版更新配置格式无效"))?;
-        match key.as_str() {
-            "POCKET_NATIVE_UPDATE_BASE_URL" => {
-                base = Some(value).filter(|value| !value.trim().is_empty())
-            }
-            "POCKET_NATIVE_UPDATES" => disabled = value == "0",
-            _ => {}
-        }
-    }
+fn hybrid_preferences(directory: &Path, source: &Path) -> Result<Option<(Option<String>, bool)>> {
+    let environment = crate::migration::GatewayEnvironment::load(directory, Some(source))?;
+    let base = environment
+        .get("POCKET_NATIVE_UPDATE_BASE_URL")
+        .filter(|base| !base.trim().is_empty())
+        .map(str::to_owned);
+    let disabled = environment.get("POCKET_NATIVE_UPDATES") == Some("0");
     Ok((base.is_some() || disabled).then_some((base, disabled)))
 }
 
@@ -203,11 +185,27 @@ fn legacy_settings() -> Option<PathBuf> {
         .find(|file| file.is_file())
 }
 
-pub(crate) fn legacy_origin() -> Result<Option<String>> {
-    #[derive(Deserialize)]
-    struct DesktopSettings {
-        origin: Option<String>,
-    }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSettings {
+    origin: Option<String>,
+    legacy_gateway: Option<LegacyGatewayPaths>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyGatewayPaths {
+    environment_file: PathBuf,
+    working_directory: PathBuf,
+}
+
+pub(crate) struct LegacyGateway {
+    pub environment_file: PathBuf,
+    pub working_directory: PathBuf,
+    pub origin: Option<String>,
+}
+
+fn read_desktop_settings() -> Result<Option<DesktopSettings>> {
     let Some(path) = legacy_settings() else {
         return Ok(None);
     };
@@ -215,9 +213,33 @@ pub(crate) fn legacy_origin() -> Result<Option<String>> {
         fs::symlink_metadata(&path)?.is_file(),
         "旧版桌面设置路径无效"
     );
-    let settings: DesktopSettings = serde_json::from_slice(&settings_bytes(fs::File::open(path)?)?)
+    let settings = serde_json::from_slice(&settings_bytes(fs::File::open(path)?)?)
         .context("旧版桌面设置文件无法读取")?;
-    Ok(settings.origin.filter(|origin| !origin.is_empty()))
+    Ok(Some(settings))
+}
+
+pub(crate) fn legacy_origin() -> Result<Option<String>> {
+    Ok(read_desktop_settings()?
+        .and_then(|settings| settings.origin)
+        .filter(|origin| !origin.is_empty()))
+}
+
+pub(crate) fn legacy_gateway() -> Result<Option<LegacyGateway>> {
+    let Some(settings) = read_desktop_settings()? else {
+        return Ok(None);
+    };
+    let Some(gateway) = settings.legacy_gateway else {
+        return Ok(None);
+    };
+    ensure!(
+        gateway.environment_file.is_absolute() && gateway.working_directory.is_absolute(),
+        "旧版网关配置和工作目录必须使用绝对路径"
+    );
+    Ok(Some(LegacyGateway {
+        environment_file: gateway.environment_file,
+        working_directory: gateway.working_directory,
+        origin: settings.origin.filter(|origin| !origin.is_empty()),
+    }))
 }
 
 fn read_preferences(file: fs::File) -> Result<Preferences> {

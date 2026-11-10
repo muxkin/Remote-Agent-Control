@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.32 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.33 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
@@ -29,6 +29,8 @@ agent-space-native --import-node-state /absolute/path/to/old-state --origin http
 导入要求新状态目录尚不存在，父目录已存在。也可通过 `POCKET_NATIVE_STATE_DIR` 指定新的私有目录。适配器在验证原主机身份和 SQLite 快照后启用新目录，保留手机配对、操作记录、实例配置、原生上传和独立 Agent 游标。原 Node 历史附件与回执按原路径读取，保留旧目录以继续访问这些文件。旧版与新适配器应分时运行，避免同一主机身份同时接入中继。
 
 省略 `--origin` 时，依次读取旧状态的已保存地址、`gateway.env` 或 Electron 设置。若来源均为空，首次启动时填写服务地址。已在原服务登记的主机使用原身份重连。
+
+从旧桌面管理器接管时，Rust 版会读取原 `settings.json` 的 `legacyGateway.environmentFile` 和 `legacyGateway.workingDirectory`。如旧文件在自定义位置，启动和导入时可设置 `POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS`。也可直接用 `POCKET_ENV_FILE` 指定私有环境文件。导入会记住外部环境文件和旧工作目录，后续托盘启动沿用原路径。相对的实例配置、Codex 路径和独立 Agent 清单按旧工作目录解析。旧环境中的中继接入密钥只用于其声明的服务地址，已配对的设备继续用原主机身份重连。
 
 只保存了上传 ID 的 Codex 和 DSH 草稿可恢复已完成的附件。恢复会核对配对设备、实例、会话和回执，预览时校验附件内容。仍在有效期内的旧上传可按分块清单或原字节偏移续传。Rust 会重验已有分块，并要求客户端补传缺失或损坏的块。续传进度写入 Rust 状态目录，保留旧目录原件。旧进程在重命名文件后退出时，可按原回执校验并恢复文件。沿用相同的七牛私有桶和前缀时，持有有效对象 ID 的客户端也可以继续导入已经上传的旧批次。
 

@@ -2,6 +2,7 @@ use crate::{
     files::BLOCK,
     gateway::Database,
     history_media::legacy_upload_receipt,
+    migration::GatewayEnvironment,
     state::{legacy_private_file, now, private_file},
 };
 use anyhow::{Context, Result, ensure};
@@ -71,7 +72,7 @@ pub struct Transports {
 }
 
 impl Transports {
-    pub fn load(directory: &Path, relay: &Url) -> Result<Self> {
+    pub fn load(directory: &Path, relay: &Url, environment: &GatewayEnvironment) -> Result<Self> {
         let file = directory.join("transport.env");
         let profile = if file.exists() {
             dotenvy::Iter::new(private_file(&file, false)?)
@@ -90,6 +91,9 @@ impl Transports {
                 let path = PathBuf::from(path);
                 ensure!(path.is_absolute(), "对象存储配置文件必须是绝对路径");
                 transport_settings(legacy_private_file(&path)?, true)?
+            }
+            None if environment.is_external() => {
+                filter_transport(environment.values.clone(), false)
             }
             None => migrated_transport_settings(directory, crate::migration::source())?,
         };
@@ -167,10 +171,18 @@ fn migrated_transport_settings(
 }
 
 fn transport_settings(file: std::fs::File, explicit: bool) -> Result<HashMap<String, String>> {
-    let mut settings = HashMap::new();
-    for entry in dotenvy::Iter::new(file) {
-        let (key, value) = entry.map_err(|_| anyhow::anyhow!("既有传输配置格式无效"))?;
-        if matches!(
+    let settings = dotenvy::Iter::new(file)
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|_| anyhow::anyhow!("既有传输配置格式无效"))?;
+    Ok(filter_transport(settings, explicit))
+}
+
+fn filter_transport(
+    mut settings: HashMap<String, String>,
+    explicit: bool,
+) -> HashMap<String, String> {
+    settings.retain(|key, _| {
+        matches!(
             key.as_str(),
             "POCKET_MEDIA_ADAPTER"
                 | "POCKET_MEDIA_ORIGIN"
@@ -183,10 +195,8 @@ fn transport_settings(file: std::fs::File, explicit: bool) -> Result<HashMap<Str
                 | "POCKET_NATIVE_P2P"
                 | "POCKET_P2P"
                 | "POCKET_STUN_URLS"
-        ) {
-            settings.insert(key, value);
-        }
-    }
+        )
+    });
     let used_media = settings
         .remove("POCKET_MEDIA_ADAPTER")
         .is_some_and(|value| !value.is_empty());
@@ -198,7 +208,7 @@ fn transport_settings(file: std::fs::File, explicit: bool) -> Result<HashMap<Str
             )
         });
     }
-    Ok(settings)
+    settings
 }
 
 impl Storage {

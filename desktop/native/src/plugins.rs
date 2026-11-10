@@ -3,6 +3,7 @@ use crate::{
     dsh::Dsh,
     files::VerifiedUpload,
     history_media::Source,
+    migration::GatewayEnvironment,
     state::private_file,
 };
 use anyhow::{Context, Result, ensure};
@@ -303,37 +304,23 @@ impl ConfigRow {
     }
 }
 
-fn instance_configuration(directory: &Path) -> Result<(Vec<Instance>, HashMap<String, String>)> {
-    let legacy = crate::migration::source()
-        .filter(|path| *path != directory)
-        .map(Path::to_path_buf);
-    let mut secrets = HashMap::new();
-    for root in legacy
-        .iter()
-        .map(PathBuf::as_path)
-        .chain(std::iter::once(directory))
-    {
-        let path = root.join("gateway.env");
-        if path.exists() {
-            for entry in dotenvy::Iter::new(private_file(&path, false)?) {
-                let (name, value) = entry.map_err(|_| anyhow::anyhow!("插件凭据配置无效"))?;
-                secrets.insert(name, value);
-            }
-        }
-    }
+fn instance_configuration(
+    directory: &Path,
+    environment: &GatewayEnvironment,
+) -> Result<Vec<Instance>> {
     let path = |key: &str| {
         env::var_os(key)
             .map(PathBuf::from)
-            .or_else(|| secrets.get(key).map(PathBuf::from))
+            .or_else(|| environment.get(key).map(PathBuf::from))
             .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| environment.resolve(path))
     };
     let local = directory.join("instances.json");
     let file = path("POCKET_ADAPTERS_FILE")
         .or_else(|| path("POCKET_BACKENDS_FILE"))
         .or_else(|| local.exists().then_some(local))
         .or_else(|| {
-            legacy
-                .as_ref()
+            crate::migration::source()
                 .map(|root| root.join("instances.json"))
                 .filter(|file| file.exists())
         })
@@ -371,11 +358,12 @@ fn instance_configuration(directory: &Path) -> Result<(Vec<Instance>, HashMap<St
         );
         ensure!(seen.insert(directory_key), "插件实例标识重复");
     }
-    Ok((rows, secrets))
+    Ok(rows)
 }
 
 pub(crate) fn instance_names(directory: &Path) -> Result<BTreeMap<String, String>> {
-    let (rows, _) = instance_configuration(directory)?;
+    let environment = GatewayEnvironment::load(directory, crate::migration::source())?;
+    let rows = instance_configuration(directory, &environment)?;
     let mut names = BTreeMap::from([(codex_backend::ID.to_owned(), "Codex".to_owned())]);
     names.extend(rows.into_iter().map(|row| (row.id, row.name)));
     Ok(names)
@@ -386,14 +374,12 @@ impl Registry {
         directory: &Path,
         runtime: &tokio::runtime::Handle,
         bundled: bool,
+        environment: &GatewayEnvironment,
     ) -> Result<(Self, BTreeMap<String, Selection>)> {
-        let (rows, secrets) = instance_configuration(directory)?;
+        let rows = instance_configuration(directory, environment)?;
         let read_only = ["POCKET_NATIVE_READ_ONLY", "POCKET_READ_ONLY"]
             .iter()
-            .any(|key| {
-                env::var(key).as_deref() == Ok("1")
-                    || secrets.get(*key).is_some_and(|value| value == "1")
-            });
+            .any(|key| env::var(key).as_deref() == Ok("1") || environment.get(key) == Some("1"));
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
         let mut hosts = Vec::new();
         let mut codex = BTreeMap::new();
@@ -409,7 +395,7 @@ impl Registry {
                 );
                 let value = env::var(&variable)
                     .ok()
-                    .or_else(|| secrets.get(&variable).cloned())
+                    .or_else(|| environment.get(&variable).map(str::to_owned))
                     .unwrap_or_default();
                 config.insert(key, json!(value));
             }
@@ -420,7 +406,7 @@ impl Registry {
                     row.name,
                     row.version,
                     &config,
-                    &secrets,
+                    environment,
                     instance_read_only,
                 )?;
                 codex.insert(row.id, selection);
@@ -499,7 +485,7 @@ impl Registry {
                 "Codex".into(),
                 None,
                 &Default::default(),
-                &secrets,
+                environment,
                 read_only,
             )?;
             codex.insert(codex_backend::ID.into(), selection);

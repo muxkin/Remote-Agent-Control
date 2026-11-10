@@ -1755,9 +1755,30 @@ async function verifyStorageFixture(session: DeviceLink, downloaded: FileManifes
 }
 
 try {
+  const legacyDesktop = join(directory, 'old-desktop-settings.json');
+  if (bundled) {
+    const work = join(directory, 'old-working-directory');
+    const environment = join(directory, 'old-external.env');
+    const instances = join(work, 'configured-instances.json');
+    await mkdir(work, { mode: 0o700 });
+    await writeFile(environment, 'POCKET_ADAPTERS_FILE=configured-instances.json\n', { mode: 0o600 });
+    await writeFile(instances, JSON.stringify([{
+      id: 'codex-local', name: 'Migrated Codex fixture', plugin: '@agent-remote/adapter-codex',
+    }]), { mode: 0o600 });
+    await writeFile(legacyDesktop, JSON.stringify({
+      origin, legacyGateway: { environmentFile: environment, workingDirectory: work },
+    }), { mode: 0o600 });
+    if (process.platform === 'win32') {
+      platformRuntime().privateFile(environment);
+      platformRuntime().privateFile(instances);
+    }
+  }
   const importer = () =>
-    promisify(execFile)(executable, ['--import-node-state', legacyState, '--origin', origin], {
-      env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
+    promisify(execFile)(executable, ['--import-node-state', legacyState, ...(bundled ? [] : ['--origin', origin])], {
+      env: {
+        ...process.env, POCKET_NATIVE_STATE_DIR: state,
+        ...(bundled ? { POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS: legacyDesktop } : {}),
+      },
     });
   const supervisor = join(legacyState, 'adapters', 'supervisor.json');
   await mkdir(join(legacyState, 'adapters'), { mode: 0o700 });
@@ -1867,7 +1888,9 @@ try {
     assert.equal(raster.values.icon.kind, 'image');
     assert.match(raster.values.icon.value, /^data:image\/webp;base64,/);
     const appearanceList = await existing.rpc<{ backends: BackendInfo[] }>(apiCall('/backends'));
-    assert.deepEqual(appearanceList.backends.find(({ id }) => id === 'codex-local')?.appearance, raster.values);
+    const appearedCodex = appearanceList.backends.find(({ id }) => id === 'codex-local');
+    assert.deepEqual(appearedCodex?.appearance, raster.values);
+    if (bundled) assert.equal(appearedCodex?.name, 'Migrated Codex fixture');
     const resetAppearance = await updateAppearance(3, { icon: null });
     assert.deepEqual(resetAppearance.values.icon, importedAppearance.defaults.icon);
     const cliAppearance = (...args: string[]) =>
