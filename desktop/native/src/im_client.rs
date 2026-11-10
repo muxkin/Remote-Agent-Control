@@ -4,6 +4,7 @@ use crate::{
     state::private_file,
 };
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client as Http, Method, RequestBuilder, header, redirect};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Read, path::Path, time::Duration};
 use tokio::sync::Mutex;
 use url::Url;
+use uuid::{Builder, Uuid};
 
 pub(crate) const MAX_CURSOR: u64 = (1 << 53) - 1;
 
@@ -36,6 +38,8 @@ pub(crate) struct SendOptions {
     attachment_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interaction: Option<InteractionInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sticker_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -393,7 +397,8 @@ impl Client {
                 && (matches!(state, MessageState::Streaming)
                     || !text.trim().is_empty()
                     || has_attachments
-                    || options.interaction.is_some()),
+                    || options.interaction.is_some()
+                    || options.sticker_id.is_some()),
             "消息格式无效"
         );
         let mut original = serde_json::to_value(options)?;
@@ -404,8 +409,10 @@ impl Client {
             .transpose()?;
         if let Some(card) = &card {
             ensure!(
-                matches!(state, MessageState::Complete) && !has_attachments,
-                "交互卡片不能包含流式回复或附件"
+                matches!(state, MessageState::Complete)
+                    && !has_attachments
+                    && options.sticker_id.is_none(),
+                "交互卡片不能包含流式回复、附件或表情包"
             );
             original["interaction"] = serde_json::to_value(card)?;
         }
@@ -421,11 +428,37 @@ impl Client {
             }
             return Ok(message);
         }
+        if let Some(sticker) = options.sticker_id {
+            ensure!(
+                matches!(state, MessageState::Complete) && !has_attachments,
+                "表情包需单独发送"
+            );
+            let mut recipients = self.recipients(&endpoint).await?;
+            recipients.sort_unstable();
+            let digest = self.keys.private_id(&canonical(&json!([
+                "sticker-upload",
+                id,
+                client_id,
+                recipients
+            ])))?;
+            let digest = URL_SAFE_NO_PAD.decode(digest)?;
+            let bytes = digest.get(..16).context("表情包附件标识无效")?;
+            let file_id = Builder::from_random_bytes(bytes.try_into()?).into_uuid();
+            self.forward_sticker(id, sticker, file_id).await?;
+            original
+                .as_object_mut()
+                .expect("message options")
+                .remove("stickerId");
+            original["attachmentIds"] = json!([file_id]);
+        }
+        let mut body = original.clone();
+        if options.sticker_id.is_some() {
+            original["encryptedSticker"] = json!(true);
+        }
         let content = json!({"text":text,"options":original,"state":state,"request":request});
         let encrypted = self
             .seal_message(id, &endpoint, client_id, 0, &content)
             .await?;
-        let mut body = original;
         if let Some(card) = card {
             body["interaction"] = card.wire();
         }

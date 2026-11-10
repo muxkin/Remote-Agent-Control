@@ -1,6 +1,6 @@
 use crate::{
     gateway::{ManagedAgent, Snapshot},
-    im_attachments::{Download, Upload},
+    im_attachments::{Download, StickerDownload, Upload},
     im_calls,
     im_client::{
         Client, MAX_CURSOR, MessageConflict, MessageUpdate, NewMessage, required, segment,
@@ -437,6 +437,14 @@ enum MessageRequest {
     Download(Download),
     #[serde(rename = "attachment.remove")]
     Remove(AttachmentRef),
+    #[serde(rename = "stickers.list")]
+    Stickers,
+    #[serde(rename = "sticker.save")]
+    SaveSticker(AttachmentRef),
+    #[serde(rename = "sticker.download")]
+    DownloadSticker(StickerDownload),
+    #[serde(rename = "sticker.remove")]
+    RemoveSticker(StickerRef),
     #[serde(rename = "done")]
     Done,
 }
@@ -480,6 +488,12 @@ struct MessageRef {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AttachmentRef {
     file_id: Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StickerRef {
+    sticker_id: Uuid,
 }
 
 impl MessageRequest {
@@ -599,6 +613,10 @@ impl MessageRequest {
             Self::Upload(input) => client.upload_attachment(cid, input).await,
             Self::Download(input) => client.download_attachment(cid, input).await,
             Self::Remove(input) => client.remove_attachment(cid, input.file_id).await,
+            Self::Stickers => client.stickers().await,
+            Self::SaveSticker(input) => client.save_sticker(cid, input.file_id).await,
+            Self::DownloadSticker(input) => client.download_sticker(input).await,
+            Self::RemoveSticker(input) => client.remove_sticker(input.sticker_id).await,
             Self::Done => Ok(json!({"ok":true})),
         }
     }

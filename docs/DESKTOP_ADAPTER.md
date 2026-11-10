@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.16 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.17 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
@@ -63,6 +63,10 @@ DSH 技能选择使用会话的原生目录，发送前会重新验证。会话�
 | `conversation.markRead` | `sequence`，使用目标会话的消息序号。 |
 | `events.sync` | `cursor` 和可选的毫秒数 `wait`。事件中的消息会验签并解密。 |
 | `message.search` | `query` 和可选的分页游标 `before`。适配器在本机搜索已验签的历史，每次最多扫描 20 页，返回最多 50 条匹配和续页游标。 |
+| `stickers.list` | 省略 `params`，读取账号的已有收藏。 |
+| `sticker.save`、`sticker.download`、`sticker.remove` | 收藏使用当前会话的 `fileId`。下载使用 `stickerId` 和绝对文件路径 `path`。移除使用 `stickerId`。 |
+
+通过 `message.send` 的 `options.stickerId` 发送表情。适配器用目标会话成员的密钥重新加密图片。对同一会话、成员列表和 `clientId` 的重试可复用已上传的图片，已发送的消息会返回原消息 ID。
 
 通话处理程序负责 WebRTC 对端、编解码和模型接入。适配器负责接听状态、心跳、加密 SDP/ICE 信令和挂断。更新交接会等待正在处理的消息和通话。 [原生通话处理程序接口](AGENT_CALLS.md#原生通话处理程序)
 

@@ -77,6 +77,11 @@ async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Val
         Ok(reply)
     };
     let scenario = message["text"].as_str().unwrap_or_default();
+    if let Some(parameters) = scenario.strip_prefix("验证加密表情 ") {
+        stickers(&mut frame, message, serde_json::from_str(parameters)?)?;
+        assert_eq!(frame("done", Value::Null, None)?["result"]["ok"], true);
+        return Ok(());
+    }
     if let Some(parameters) = scenario.strip_prefix("验证会话目录 ") {
         directory(&mut frame, message, serde_json::from_str(parameters)?)?;
         assert_eq!(frame("done", Value::Null, None)?["result"]["ok"], true);
@@ -278,6 +283,121 @@ async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Val
         assert_eq!(call("message.send", different)?["error"]["status"], 409);
     }
     assert_eq!(call("done", Value::Null)?["result"]["ok"], true);
+    Ok(())
+}
+
+fn stickers(
+    call: &mut impl FnMut(&str, Value, Option<&Value>) -> Result<Value>,
+    message: &Value,
+    parameters: Value,
+) -> Result<()> {
+    let old = &parameters["stickerId"];
+    let target = &parameters["target"];
+    let existing = &parameters["legacyMessageId"];
+    let shelf = call("stickers.list", Value::Null, None)?;
+    let old_item = shelf["result"]["stickers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| &entry["id"] == old)
+        .unwrap();
+    assert_eq!(old_item["name"], "旧 Node 表情.png");
+    assert_eq!(old_item["mime"], "image/png");
+    let media =
+        PathBuf::from(std::env::var_os("RUST_IM_FIXTURE_MEDIA").context("missing media folder")?);
+    let output = media.join("legacy-sticker.png");
+    let result = call(
+        "sticker.download",
+        json!({"stickerId":old,"path":output}),
+        None,
+    )?;
+    assert_eq!(result["result"]["name"], "旧 Node 表情.png", "{result}");
+    assert!(fs::read(output)?.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+    let invalid = call(
+        "sticker.save",
+        json!({"fileId":parameters["invalidFile"]}),
+        None,
+    )?;
+    assert_eq!(invalid["error"]["status"], 400);
+    let attachment = &message["attachments"][0];
+    let save = json!({"fileId":attachment["id"]});
+    let saved = call("sticker.save", save.clone(), None)?;
+    let new_item = saved["result"]["stickers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "新收藏.png")
+        .unwrap();
+    let new = &new_item["id"];
+    assert_eq!(new_item["mime"], "image/png");
+    let again = call("sticker.save", save, None)?;
+    assert_eq!(
+        again["result"]["stickers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| &entry["id"] == new)
+            .count(),
+        1
+    );
+
+    let legacy_request = json!({
+        "clientId":"rust-sticker-node-retry","text":"","options":{"stickerId":old}
+    });
+    let legacy = call("message.send", legacy_request.clone(), None)?;
+    assert_eq!(&legacy["result"]["id"], existing, "{legacy}");
+    assert_eq!(legacy["result"]["sticker"], true);
+
+    let send = json!({"clientId":"rust-sticker-forward","text":"","options":{"stickerId":old}});
+    let mut reject = send.clone();
+    reject["options"]["replyTo"] = message["id"].clone();
+    assert_eq!(
+        call("message.send", reject, Some(target))?["error"]["status"],
+        404
+    );
+    let sent = call("message.send", send.clone(), Some(target))?;
+    assert_eq!(sent["result"]["sticker"], true, "{sent}");
+    assert_eq!(sent["result"]["attachments"][0]["name"], "旧 Node 表情.png");
+    assert_eq!(
+        call("message.send", send, Some(target))?["result"]["id"],
+        sent["result"]["id"]
+    );
+
+    let new_send = json!({
+        "clientId":"rust-sticker-from-new-shelf","text":"","options":{"stickerId":new,"replyTo":message["id"]}
+    });
+    assert_eq!(
+        call("message.send", new_send, None)?["result"]["sticker"],
+        true
+    );
+    assert_eq!(
+        call("sticker.remove", json!({"stickerId":old}), None)?["result"]["ok"],
+        true
+    );
+    assert_eq!(
+        call("message.send", legacy_request, None)?["result"]["id"],
+        *existing
+    );
+    assert_eq!(
+        call(
+            "sticker.download",
+            json!({"stickerId":old,"path":media.join("removed.png")}),
+            None
+        )?["error"]["status"],
+        404
+    );
+
+    assert_eq!(
+        call(
+            "message.send",
+            json!({
+                "clientId":"rust-sticker-check","text":"表情收藏已验证","options":{"replyTo":message["id"]}
+            }),
+            None
+        )?["result"]["text"],
+        "表情收藏已验证"
+    );
     Ok(())
 }
 

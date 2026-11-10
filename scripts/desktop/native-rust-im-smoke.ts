@@ -410,6 +410,49 @@ try {
   );
   assert.equal(secondaryChat.kind, 'direct');
 
+  const png = await readFile('src/web/public/app-icon-32.png');
+  const { file: oldStickerFile } = await legacy.upload(conversation.id, '旧 Node 表情.png', png);
+  const { stickers: [oldSticker] } = await legacy.saveSticker(conversation.id, oldStickerFile.id);
+  assert(oldSticker);
+  const { message: legacySticker } = await legacy.send(conversation.id, '', 'rust-sticker-node-retry', {
+    stickerId: oldSticker.id,
+  });
+  assert.equal(legacySticker.sticker, true);
+  const { conversation: target } = await human.group('表情转发测试群', [agent.user.id, secondary.user.id]);
+  const { file: newStickerFile } = await human.upload(conversation.id, '新收藏.png', png);
+  const stickerPrompt = await human.send(
+    conversation.id,
+    '验证加密表情 ' + JSON.stringify({
+      stickerId: oldSticker.id, legacyMessageId: legacySticker.id, target: target.id, invalidFile: file.id,
+    }),
+    'rust-sticker-fixture',
+    { attachmentIds: [newStickerFile.id] },
+  );
+  await until(async () => (await human.history(conversation.id)).messages.some(
+    (message) => message.replyTo === stickerPrompt.message.id && message.text === '表情收藏已验证',
+  ));
+  const shelf = (await legacy.stickers()).stickers;
+  assert.deepEqual(shelf.map(({ name }) => name), ['新收藏.png']);
+  assert.deepEqual(await readFile(join(media, 'legacy-sticker.png')), png);
+  const directSticker = (await human.history(conversation.id)).messages.find(
+    (message) => message.clientId === 'rust-sticker-from-new-shelf',
+  );
+  assert(directSticker?.sticker);
+  assert.deepEqual(Buffer.from((await human.download(directSticker.attachments[0].url)).data), png);
+  const forwarded = (await secondary.client.history(target.id)).messages.filter(
+    (message) => message.clientId === 'rust-sticker-forward',
+  );
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0].sticker, true);
+  assert.deepEqual(Buffer.from((await secondary.client.download(forwarded[0].attachments[0].url)).data), png);
+  await assert.rejects(secondary.client.download(oldStickerFile.url));
+  const storedSticker = await human.raw<{ message: ChatMessage }>(
+    `/conversations/${target.id}/messages/${forwarded[0].id}`,
+  );
+  assert.equal(storedSticker.message.attachments[0].name, 'encrypted.pocket');
+  assert.equal(storedSticker.message.sticker, undefined);
+  assert(storedSticker.message.text.startsWith('pocket-e2ee:1:'));
+
   const calls = new AgentCallsClient(human);
   await until(async () => (await calls.capabilities(conversation.id)).video);
   for (const mode of ['audio', 'video'] as const) {
@@ -488,7 +531,7 @@ try {
     await until(async () => !(await calls.capabilities(conversation.id)).audio);
   }
   console.log(
-    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messaging, streaming, attachments, interactions, contacts, groups, local search, read receipts, replay, and bidirectional audio/video RTP passed.`,
+    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messaging, streaming, attachments, stickers, interactions, contacts, groups, local search, read receipts, replay, and bidirectional audio/video RTP passed.`,
   );
 } finally {
   await stop();
