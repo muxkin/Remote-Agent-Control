@@ -60,11 +60,15 @@ impl Preferences {
 
     pub(crate) fn load(directory: &Path, origin: &Url) -> Result<Self> {
         let legacy = legacy_settings();
+        let hybrid = crate::migration::source()
+            .filter(|source| source.join("adapters/registry.json").is_file())
+            .map(|source| (source, env::var_os("POCKET_NATIVE_VERSION").is_some()));
         Self::load_from(
             directory,
             origin,
             legacy.as_deref(),
             env::var("POCKET_NATIVE_UPDATE_BASE_URL").ok().as_deref(),
+            hybrid,
         )
     }
 
@@ -73,6 +77,7 @@ impl Preferences {
         origin: &Url,
         legacy: Option<&Path>,
         environment_base: Option<&str>,
+        hybrid: Option<(&Path, bool)>,
     ) -> Result<Self> {
         let path = directory.join(FILE);
         match private_file(&path, false) {
@@ -87,6 +92,7 @@ impl Preferences {
             Err(error) => return Err(error),
         }
         let mut preferences = Self::default();
+        let mut migrated = legacy.is_some();
         if let Some(path) = legacy {
             ensure!(
                 fs::symlink_metadata(path)?.is_file(),
@@ -95,20 +101,40 @@ impl Preferences {
             let old = read_preferences(fs::File::open(path)?)?;
             preferences = Self::new(old.auto_update, old.base.as_deref().unwrap_or(""))?;
             if let Some(base) = &mut preferences.base {
-                let mut url = Url::parse(base)?;
+                let url = Url::parse(base)?;
                 if !url.path().ends_with("/native/rust/") {
-                    url.path_segments_mut()
-                        .map_err(|_| anyhow::anyhow!("旧版更新地址无效"))?
-                        .pop_if_empty()
-                        .extend(["native", "rust", ""]);
+                    let suffix = if url.path().ends_with("/native/") {
+                        &["rust", ""][..]
+                    } else {
+                        &["native", "rust", ""][..]
+                    };
+                    *base = channel(url, suffix)?;
                 }
-                *base = url.to_string();
             }
         }
-        if let Some(base) = environment_base.filter(|base| !base.is_empty()) {
-            preferences.base = Some(https_base(origin.join(base)?)?.to_string());
+        let mut handed_off = false;
+        if let Some((source, inherited)) = hybrid {
+            handed_off = inherited;
+            if let Some((base, disabled)) = hybrid_preferences(source)? {
+                migrated = true;
+                if disabled {
+                    preferences.auto_update = false;
+                }
+                if let Some(base) = base {
+                    preferences.base = Some(channel(origin.join(&base)?, &["rust", ""])?);
+                }
+            }
         }
-        if legacy.is_some() {
+        if let Some(base) = environment_base.filter(|base| !base.trim().is_empty()) {
+            let base = origin.join(base)?;
+            preferences.base = Some(if handed_off {
+                migrated = true;
+                channel(base, &["rust", ""])?
+            } else {
+                https_base(base)?.to_string()
+            });
+        }
+        if migrated {
             preferences.save(directory)?;
         }
         Ok(preferences)
@@ -124,6 +150,43 @@ impl Preferences {
         temporary.persist(directory.join(FILE))?;
         Ok(())
     }
+}
+
+fn channel(url: Url, suffix: &[&str]) -> Result<String> {
+    let mut url = https_base(url)?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("旧版更新地址无效"))?
+        .pop_if_empty()
+        .extend(suffix.iter().copied());
+    Ok(url.to_string())
+}
+
+fn hybrid_preferences(source: &Path) -> Result<Option<(Option<String>, bool)>> {
+    let path = source.join("gateway.env");
+    let file = match private_file(&path, false) {
+        Ok(file) => file,
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut base = None;
+    let mut disabled = false;
+    for entry in dotenvy::Iter::new(settings_bytes(file)?.as_slice()) {
+        let (key, value) = entry.map_err(|_| anyhow::anyhow!("旧版更新配置格式无效"))?;
+        match key.as_str() {
+            "POCKET_NATIVE_UPDATE_BASE_URL" => {
+                base = Some(value).filter(|value| !value.trim().is_empty())
+            }
+            "POCKET_NATIVE_UPDATES" => disabled = value == "0",
+            _ => {}
+        }
+    }
+    Ok((base.is_some() || disabled).then_some((base, disabled)))
 }
 
 fn legacy_settings() -> Option<PathBuf> {
@@ -182,7 +245,7 @@ mod tests {
         let old = br#"{"autoUpdate":false,"updateBaseURL":"https://updates.example.org/custom","enrollment":"ignored"}"#;
         fs::write(&legacy, old)?;
         let origin = Url::parse("https://agent.example.org/")?;
-        let preferences = Preferences::load_from(&directory, &origin, Some(&legacy), None)?;
+        let preferences = Preferences::load_from(&directory, &origin, Some(&legacy), None, None)?;
         assert_eq!(
             preferences,
             Preferences::new(false, "https://updates.example.org/custom/native/rust/")?,
@@ -192,8 +255,52 @@ mod tests {
         let reset = Preferences::new(true, "")?;
         reset.save(&directory)?;
         assert_eq!(
-            Preferences::load_from(&directory, &origin, Some(&legacy), Some("/other/"))?,
+            Preferences::load_from(&directory, &origin, Some(&legacy), Some("/other/"), None)?,
             reset,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_hybrid_channel_and_keeps_a_later_override() -> Result<()> {
+        use std::io::Write;
+        let fixture = tempfile::tempdir()?;
+        let directory = fixture.path().join("state");
+        let source = fixture.path().join("hybrid");
+        private_directory(&directory)?;
+        private_directory(&source)?;
+        let mut gateway = private_file(&source.join("gateway.env"), true)?;
+        write!(
+            gateway,
+            "POCKET_NATIVE_UPDATES=0\nPOCKET_NATIVE_UPDATE_BASE_URL=/legacy/channel\n"
+        )?;
+        drop(gateway);
+        let origin = Url::parse("https://agent.example.org/")?;
+        let preferences =
+            Preferences::load_from(&directory, &origin, None, None, Some((&source, false)))?;
+        assert_eq!(
+            preferences,
+            Preferences::new(false, "https://agent.example.org/legacy/channel/rust/")?
+        );
+
+        let fresh = fixture.path().join("handoff");
+        private_directory(&fresh)?;
+        let inherited = Preferences::load_from(
+            &fresh,
+            &origin,
+            None,
+            Some("https://updates.example.org/native/"),
+            Some((&source, true)),
+        )?;
+        assert_eq!(
+            inherited,
+            Preferences::new(false, "https://updates.example.org/native/rust/")?
+        );
+        let reset = Preferences::new(true, "https://updates.example.org/explicit/")?;
+        reset.save(&fresh)?;
+        assert_eq!(
+            Preferences::load_from(&fresh, &origin, None, None, Some((&source, false)))?,
+            reset
         );
         Ok(())
     }
@@ -212,7 +319,7 @@ mod tests {
         let fixture = tempfile::tempdir()?;
         let origin = Url::parse("https://agent.example.org/")?;
         assert_eq!(
-            Preferences::load_from(fixture.path(), &origin, None, Some("/updates"))?,
+            Preferences::load_from(fixture.path(), &origin, None, Some("/updates"), None)?,
             Preferences::new(true, "https://agent.example.org/updates/")?,
         );
         Ok(())

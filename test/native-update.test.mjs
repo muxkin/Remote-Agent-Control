@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +59,65 @@ describe('signed native updates', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+  it('stages and verifies the same signed Rust release for hybrid and Rust clients', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'native-bridge-test-'));
+    try {
+      const scripts = join(directory, 'scripts', 'desktop');
+      const native = join(directory, 'desktop', 'native');
+      await mkdir(scripts, { recursive: true });
+      await mkdir(native, { recursive: true });
+      await symlink(await realpath(new URL('../node_modules', import.meta.url)), join(directory, 'node_modules'), 'junction');
+      for (const script of ['publish.mjs', 'native-update.mjs', 'native-signing.mjs']) {
+        await copyFile(new URL(`../scripts/desktop/${script}`, import.meta.url), join(scripts, script));
+      }
+      const keyPath = join(directory, 'test-key.pem');
+      await writeFile(keyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+      await writeFile(join(native, 'update-release.pub'), publicKey.export({ type: 'spki', format: 'pem' }));
+      const old = join(directory, 'desktop-releases', 'native', 'linux', 'x64');
+      const rust = join(directory, 'desktop-releases', 'native', 'rust', 'linux', 'x64');
+      await mkdir(old, { recursive: true });
+      const oldLatest = join(old, 'latest.json');
+      const rustLatest = join(rust, 'latest.json');
+      const previous = JSON.stringify(signed());
+      await writeFile(oldLatest, previous);
+      const version = '0.3.25';
+      const file = updateFilename(version, 'linux', 'x64');
+      const installer = Buffer.from('test installer');
+      await writeFile(join(directory, file), installer);
+      const publish = (target = version, ...extra) =>
+        spawnSync(
+          process.execPath,
+          [join(scripts, 'publish.mjs'), '--output', directory, '--directory', directory,
+            '--platform', 'linux', '--arch', 'x64', '--native-version', target, '--rust-native',
+            ...extra],
+          { encoding: 'utf8', env: { ...process.env, POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE: keyPath } },
+        );
+      const bridge = '--bridge-hybrid-linux';
+      expect(publish(version).status).toBe(0);
+      expect(await readFile(oldLatest, 'utf8')).toBe(previous);
+      await writeFile(join(old, file), Buffer.alloc(installer.length));
+      const collision = publish(version, bridge);
+      expect(collision.status).toBe(1);
+      expect(collision.stderr).toContain('Immutable release already exists');
+      expect(await readFile(oldLatest, 'utf8')).toBe(previous);
+      await rm(join(old, file));
+      expect(publish(version, bridge).status).toBe(0);
+      const current = await readFile(oldLatest, 'utf8');
+      expect(current).toBe(await readFile(rustLatest, 'utf8'));
+      expect(check(JSON.parse(current), release.version)).toMatchObject({ version, runtime: 'rust', file });
+      expect(await readFile(join(old, file))).toEqual(installer);
+      expect(await readFile(join(rust, file))).toEqual(installer);
+      expect(publish(version, bridge).status).toBe(0);
+      await writeFile(join(directory, release.file), installer);
+      const downgrade = publish(release.version, bridge);
+      expect(downgrade.status).toBe(1);
+      expect(downgrade.stderr).toContain('Refusing to downgrade');
+      expect(await readFile(oldLatest, 'utf8')).toBe(current);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('keeps unsigned preview artifacts separate from the signed update channel', () => {
     const path = '/downloads/desktop/native/preview/linux/x64/';
     expect(releaseKey(path + 'preview.json')).toBe('desktop-releases/native/preview/linux/x64/preview.json');

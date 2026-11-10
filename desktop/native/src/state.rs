@@ -63,7 +63,7 @@ impl Store {
         let identity = if identity_path.exists() {
             use std::io::Read;
             let mut input = String::new();
-            private_file(&identity_path, false)?
+            state_identity_file(directory, &identity_path)?
                 .take(8192)
                 .read_to_string(&mut input)?;
             let document: IdentityFile = serde_json::from_str(&input)?;
@@ -289,12 +289,19 @@ pub(crate) fn lock_directory(directory: &Path) -> Result<File> {
     lock.try_lock().context("已有原生适配器使用此状态目录")?;
     let identity = directory.join("device-identity-v2.json");
     match fs::symlink_metadata(&identity) {
-        Ok(_) => drop(private_file(&identity, false).context("检查设备身份")?),
+        Ok(_) => drop(state_identity_file(directory, &identity).context("检查设备身份")?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
     verify_database_paths(directory)?;
     Ok(lock)
+}
+
+fn state_identity_file(directory: &Path, path: &Path) -> Result<File> {
+    if crate::migration::source() == Some(directory) {
+        return legacy_private_file(path);
+    }
+    private_file(path, false)
 }
 
 pub(crate) fn verify_database_paths(directory: &Path) -> Result<()> {
@@ -379,7 +386,12 @@ pub(crate) fn private_file(path: &Path, create: bool) -> Result<File> {
 }
 
 #[cfg(windows)]
-pub(crate) use crate::windows::{private_directory, private_file};
+pub(crate) use crate::windows::{legacy_private_file, private_directory, private_file};
+
+#[cfg(not(windows))]
+pub(crate) fn legacy_private_file(path: &Path) -> Result<File> {
+    private_file(path, false)
+}
 
 #[cfg(not(any(unix, windows)))]
 fn private_directory(_: &Path) -> Result<()> {

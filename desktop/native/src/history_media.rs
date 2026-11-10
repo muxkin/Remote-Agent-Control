@@ -1,4 +1,4 @@
-use crate::{codex::History, files, state::private_file};
+use crate::{codex::History, files, state::legacy_private_file};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
@@ -462,7 +462,7 @@ impl LegacyUpload {
                     .join(path.strip_prefix(&self.root)?),
             "旧附件路径无效"
         );
-        private_file(&path, false)
+        legacy_private_file(&path)
     }
 
     pub(crate) fn open_pending(&self) -> Result<File> {
@@ -504,7 +504,7 @@ pub(crate) fn legacy_upload_receipt(
 }
 
 fn legacy_upload_json(path: &Path) -> Result<Option<Value>> {
-    let receipt = match private_file(path, false) {
+    let receipt = match legacy_private_file(path) {
         Ok(receipt) => receipt,
         Err(error) if is_not_found(&error) => return Ok(None),
         Err(error) => return Err(error),

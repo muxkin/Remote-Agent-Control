@@ -1,6 +1,8 @@
 use crate::{
     gateway::RelayConfig,
-    state::{Store, private_directory, private_file, remember_origin, saved_origin},
+    state::{
+        Store, legacy_private_file, private_directory, private_file, remember_origin, saved_origin,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, MAIN_DB, OpenFlags};
@@ -63,7 +65,7 @@ pub(crate) fn import(source: &Path, target: &Path, origin: Option<&str>) -> Resu
     } else {
         None
     };
-    let identity = private_file(&source.join("device-identity-v2.json"), false)
+    let identity = legacy_private_file(&source.join("device-identity-v2.json"))
         .context("旧版状态目录缺少主机身份")?;
     let database = source.join("state.sqlite");
     drop(private_file(&database, false).context("旧版状态目录缺少配对数据库")?);

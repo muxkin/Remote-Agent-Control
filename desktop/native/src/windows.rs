@@ -176,10 +176,18 @@ pub fn private_directory(path: &Path) -> Result<()> {
         .share_mode(SHARE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
-    verify(file.as_raw_handle(), &user, true, false)
+    verify(file.as_raw_handle(), &user, true, OwnerPolicy::Current)
 }
 
 pub fn private_file(path: &Path, create: bool) -> Result<File> {
+    open_private_file(path, create, OwnerPolicy::Current)
+}
+
+pub(crate) fn legacy_private_file(path: &Path) -> Result<File> {
+    open_private_file(path, false, OwnerPolicy::LegacyRead)
+}
+
+fn open_private_file(path: &Path, create: bool, owner: OwnerPolicy) -> Result<File> {
     let user = User::current()?;
     let mut security = descriptor(&user, false)?;
     let flags = if create {
@@ -202,7 +210,7 @@ pub fn private_file(path: &Path, create: bool) -> Result<File> {
         return Err(io::Error::last_os_error().into());
     }
     let file = unsafe { File::from_raw_handle(handle) };
-    verify(handle, &user, false, false)?;
+    verify(handle, &user, false, owner)?;
     Ok(file)
 }
 
@@ -216,10 +224,21 @@ pub(crate) fn private_sqlite_sidecar(path: &Path) -> Result<()> {
         .share_mode(SHARE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
-    verify(file.as_raw_handle(), &user, false, true)
+    verify(
+        file.as_raw_handle(),
+        &user,
+        false,
+        OwnerPolicy::SqliteSidecar,
+    )
 }
 
-fn verify(handle: HANDLE, user: &User, directory: bool, sqlite_sidecar: bool) -> Result<()> {
+enum OwnerPolicy {
+    Current,
+    LegacyRead,
+    SqliteSidecar,
+}
+
+fn verify(handle: HANDLE, user: &User, directory: bool, policy: OwnerPolicy) -> Result<()> {
     let mut info = unsafe { std::mem::zeroed() };
     unsafe {
         ok(GetFileInformationByHandle(handle, &mut info))?;
@@ -251,10 +270,11 @@ fn verify(handle: HANDLE, user: &User, directory: bool, sqlite_sidecar: bool) ->
         !owner.is_null() && !dacl.is_null(),
         "Windows 状态文件缺少属主或 ACL"
     );
-    let repair_owner = unsafe { EqualSid(owner, user.sid()) } == 0;
-    if repair_owner {
+    let default_admin_owner = unsafe { EqualSid(owner, user.sid()) } == 0;
+    if default_admin_owner {
         ensure!(
-            sqlite_sidecar && unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0,
+            !matches!(policy, OwnerPolicy::Current)
+                && unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0,
             "Windows 状态文件必须属于当前用户"
         );
         let token = token_info(
@@ -265,7 +285,7 @@ fn verify(handle: HANDLE, user: &User, directory: bool, sqlite_sidecar: bool) ->
         let default_owner = unsafe { (*token.as_ptr().cast::<TOKEN_OWNER>()).Owner };
         ensure!(
             !default_owner.is_null() && unsafe { EqualSid(owner, default_owner) } != 0,
-            "Windows 数据库临时文件属主无效"
+            "Windows 状态文件的默认属主无效"
         );
     }
     let mut own = false;
@@ -291,7 +311,7 @@ fn verify(handle: HANDLE, user: &User, directory: bool, sqlite_sidecar: bool) ->
         }
     }
     ensure!(own && system, "Windows 状态 ACL 缺少必要权限");
-    if repair_owner {
+    if default_admin_owner && matches!(policy, OwnerPolicy::SqliteSidecar) {
         let error = unsafe {
             SetSecurityInfo(
                 handle,

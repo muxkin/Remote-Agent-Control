@@ -1,10 +1,11 @@
 import { readFile, readdir, writeFile, mkdtemp, rm, mkdir, rename, stat, copyFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
-import { updateFilename } from './native-update.mjs';
+import { updateFilename, verifyManifest } from './native-update.mjs';
 import { verifyPlatformSignature } from './native-signing.mjs';
 const args = process.argv.slice(2),
   get = (key) => args[args.indexOf(key) + 1];
@@ -34,7 +35,10 @@ const directory = resolve(args.includes('--directory') ? get('--directory') : 'd
 const nativeVersion = args.includes('--native-version') ? get('--native-version') : null;
 const releaseKeyOnly = args.includes('--release-key-only');
 const rustNative = args.includes('--rust-native');
+const bridgeHybrid = args.includes('--bridge-hybrid-linux');
 if (rustNative && !nativeVersion) throw Error('--rust-native requires an explicit native release version');
+if (bridgeHybrid && (!rustNative || platform !== 'linux' || arch !== 'x64'))
+  throw Error('--bridge-hybrid-linux requires a Linux x64 Rust native release');
 if (releaseKeyOnly && (!nativeVersion || platform === 'linux'))
   throw Error('--release-key-only requires a Windows or macOS native release');
 if (args.includes('--native-version') && !/^\d+\.\d+\.\d+$/.test(nativeVersion ?? ''))
@@ -90,12 +94,61 @@ if (nativeVersion) {
 }
 if (!Array.isArray(index.files)) throw Error('Invalid release index');
 const uploaded = new Map();
-async function put(name, file, type) {
+async function releaseBody(name) {
+  if (output) {
+    const existing = await head(name);
+    return existing.ok ? createReadStream(join(output, name)) : null;
+  }
+  const response = await fetch(publicURL + name, {
+    cache: 'no-store',
+    redirect: 'error',
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (response.status === 404) return null;
+  if (!response.ok || !response.body) throw Error(`Cannot read published release file: ${name}`);
+  return response.body;
+}
+
+async function sameInstaller(name, size, sha512) {
+  const body = await releaseBody(name);
+  if (!body) return false;
+  let length = 0;
+  const hash = createHash('sha512');
+  for await (const chunk of body) {
+    length += chunk.length;
+    if (length > size) return false;
+    hash.update(chunk);
+  }
+  return length === size && hash.digest('hex') === sha512;
+}
+
+async function verifyExistingManifest(path, key, version, size, sha512) {
+  const body = await releaseBody(`${path}/latest.json`);
+  if (!body) return;
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of body) {
+    length += chunk.length;
+    if (length > 16384) throw Error(`Published release manifest exceeds its size limit: ${path}`);
+    chunks.push(chunk);
+  }
+  const previous = verifyManifest(Buffer.concat(chunks), key, '0.0.0', platform, arch);
+  if (!previous) return;
+  const order = previous.version.split('.').map((value, index) => Number(value) - Number(version.split('.')[index]));
+  if (order.find(Boolean) > 0)
+    throw Error(`Refusing to downgrade the published release: ${path}`);
+  if (previous.version === version && (previous.size !== size || previous.sha512 !== sha512))
+    throw Error(`Refusing to change the published release: ${path}`);
+}
+
+async function put(name, file, type, sha512) {
   const existing = await head(name);
   if (!existing.ok && existing.status !== 404) throw Error('Cannot safely check the existing artifact');
-  if (existing.ok && !/\.(yml|json)$/.test(name))
-    throw Error(`Immutable release already exists: ${name}; increment the version`);
   const size = (await stat(file)).size;
+  if (existing.ok && !/\.(yml|json)$/.test(name)) {
+    if (sha512 && existing.size === size && await sameInstaller(name, size, sha512)) return;
+    throw Error(`Immutable release already exists: ${name}; increment the version`);
+  }
   if (output) {
     const destination = join(output, name),
       temporary = `${destination}.tmp-${process.pid}`;
@@ -156,6 +209,14 @@ if (nativeVersion) {
   }
   if (!bytes.length || bytes.length > 512 * 1024 * 1024) throw Error('Installer size out of range');
   const path = `native/${rustNative ? 'rust/' : ''}${platform}/${arch}`;
+  const paths = bridgeHybrid ? [path, 'native/linux/x64'] : [path];
+  const sha512 = createHash('sha512').update(bytes).digest('hex');
+  if (bridgeHybrid) {
+    const publicKey = createPublicKey(privateKey);
+    for (const destination of paths) {
+      await verifyExistingManifest(destination, publicKey, nativeVersion, bytes.length, sha512);
+    }
+  }
   const payload = Buffer.from(
     JSON.stringify({
       format: 1,
@@ -166,21 +227,29 @@ if (nativeVersion) {
       version: nativeVersion,
       file,
       size: bytes.length,
-      sha512: createHash('sha512').update(bytes).digest('hex'),
+      sha512,
     }),
   );
   const envelope = {
     payload: payload.toString('base64'),
     signature: sign(null, payload, privateKey).toString('base64'),
   };
-  await put(`${path}/${file}`, source, 'application/octet-stream');
-  const reachable = await head(`${path}/${file}`);
-  if (!reachable.ok || reachable.size !== bytes.length) throw Error('Native installer is not reachable');
   const temp = await mkdtemp(join(tmpdir(), 'desktop-native-release-'));
   try {
+    const installer = join(temp, file);
+    await writeFile(installer, bytes);
+    for (const destination of paths) {
+      const name = `${destination}/${file}`;
+      await put(name, installer, 'application/octet-stream', bridgeHybrid ? sha512 : undefined);
+      const reachable = await head(name);
+      if (!reachable.ok || reachable.size !== bytes.length) throw Error('Native installer is not reachable');
+    }
     const metadata = join(temp, 'latest.json');
     await writeFile(metadata, JSON.stringify(envelope));
-    await put(`${path}/latest.json`, metadata, 'application/json');
+    // Existing hybrid clients must never transition before the Rust feed is available.
+    for (const destination of paths) {
+      await put(`${destination}/latest.json`, metadata, 'application/json');
+    }
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
