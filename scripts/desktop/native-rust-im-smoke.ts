@@ -56,6 +56,8 @@ const env = {
   POCKET_NATIVE_ENROLLMENT: enrollmentSecret,
   POCKET_NATIVE_P2P: '0',
   CODEX_HOME: join(directory, 'no-codex'),
+  HTTP_PROXY: 'http://127.0.0.1:9',
+  NO_PROXY: '',
 };
 let child: ReturnType<typeof spawn> | undefined;
 let peer: RTCPeerConnection | undefined;

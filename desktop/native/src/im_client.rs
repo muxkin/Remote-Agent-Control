@@ -53,15 +53,17 @@ impl Client {
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("no-store"),
         );
-        let http = Http::builder()
+        let mut http = Http::builder()
             .default_headers(headers)
             .redirect(redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
+            .connect_timeout(Duration::from_secs(10));
+        if loopback {
+            http = http.no_proxy();
+        }
         Ok(Self {
             id: id.to_owned(),
             origin: origin.to_owned(),
-            http,
+            http: http.build()?,
             keys: AccountCrypto::from_secrets(&credentials["secrets"])?,
             pins: Mutex::new(BTreeMap::new()),
         })
