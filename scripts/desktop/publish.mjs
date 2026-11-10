@@ -1,4 +1,4 @@
-import { readFile, readdir, writeFile, mkdtemp, rm, mkdir, rename, stat, copyFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile, mkdtemp, rm, mkdir, rename, stat, copyFile, link } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -122,9 +122,9 @@ async function sameInstaller(name, size, sha512) {
   return length === size && hash.digest('hex') === sha512;
 }
 
-async function verifyExistingManifest(path, key, version, size, sha512) {
+async function readNativeManifest(path) {
   const body = await releaseBody(`${path}/latest.json`);
-  if (!body) return;
+  if (!body) return null;
   const chunks = [];
   let length = 0;
   for await (const chunk of body) {
@@ -132,7 +132,13 @@ async function verifyExistingManifest(path, key, version, size, sha512) {
     if (length > 16384) throw Error(`Published release manifest exceeds its size limit: ${path}`);
     chunks.push(chunk);
   }
-  const previous = verifyManifest(Buffer.concat(chunks), key, '0.0.0', platform, arch);
+  return Buffer.concat(chunks);
+}
+
+async function verifyExistingManifest(path, key, version, size, sha512) {
+  const current = await readNativeManifest(path);
+  if (!current) return;
+  const previous = verifyManifest(current, key, '0.0.0', platform, arch, true);
   if (!previous) return;
   const order = previous.version.split('.').map((value, index) => Number(value) - Number(version.split('.')[index]));
   if (order.find(Boolean) > 0)
@@ -155,7 +161,17 @@ async function put(name, file, type, sha512) {
     await mkdir(dirname(destination), { recursive: true });
     try {
       await copyFile(file, temporary);
-      await rename(temporary, destination);
+      if (sha512) {
+        try {
+          await link(temporary, destination);
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          if (!await sameInstaller(name, size, sha512))
+            throw Error(`Immutable release already exists: ${name}; increment the version`);
+        }
+      } else {
+        await rename(temporary, destination);
+      }
     } finally {
       await rm(temporary, { force: true });
     }
@@ -211,11 +227,9 @@ if (nativeVersion) {
   const path = `native/${rustNative ? 'rust/' : ''}${platform}/${arch}`;
   const paths = bridgeHybrid ? [path, 'native/linux/x64'] : [path];
   const sha512 = createHash('sha512').update(bytes).digest('hex');
-  if (bridgeHybrid) {
-    const publicKey = createPublicKey(privateKey);
-    for (const destination of paths) {
-      await verifyExistingManifest(destination, publicKey, nativeVersion, bytes.length, sha512);
-    }
+  const publicKey = createPublicKey(privateKey);
+  for (const destination of paths) {
+    await verifyExistingManifest(destination, publicKey, nativeVersion, bytes.length, sha512);
   }
   const payload = Buffer.from(
     JSON.stringify({
@@ -240,15 +254,20 @@ if (nativeVersion) {
     await writeFile(installer, bytes);
     for (const destination of paths) {
       const name = `${destination}/${file}`;
-      await put(name, installer, 'application/octet-stream', bridgeHybrid ? sha512 : undefined);
-      const reachable = await head(name);
-      if (!reachable.ok || reachable.size !== bytes.length) throw Error('Native installer is not reachable');
+      await put(name, installer, 'application/octet-stream', sha512);
+      if (!await sameInstaller(name, bytes.length, sha512))
+        throw Error(`Native installer is not reachable with the expected digest: ${name}`);
     }
     const metadata = join(temp, 'latest.json');
-    await writeFile(metadata, JSON.stringify(envelope));
+    const signedManifest = Buffer.from(JSON.stringify(envelope));
+    await writeFile(metadata, signedManifest);
     // Existing hybrid clients must never transition before the Rust feed is available.
     for (const destination of paths) {
+      await verifyExistingManifest(destination, publicKey, nativeVersion, bytes.length, sha512);
       await put(`${destination}/latest.json`, metadata, 'application/json');
+      const published = await readNativeManifest(destination);
+      if (!published?.equals(signedManifest))
+        throw Error(`Published native manifest is not visible with the expected signature: ${destination}`);
     }
   } finally {
     await rm(temp, { recursive: true, force: true });
