@@ -1,4 +1,4 @@
-use crate::{dsh::Dsh, state::private_file};
+use crate::{dsh::Dsh, files::VerifiedUpload, history_media::Source, state::private_file};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ pub(crate) trait Adapter: Send + Sync {
     async fn info(&self) -> Value;
     async fn status(&self) -> Value;
     async fn read(&self, method: &str, params: &Value, query: &Value) -> Result<Option<Value>>;
+    async fn media(&self, thread: &str, reference: &str) -> Result<Media>;
     fn subscribe(self: Arc<Self>, thread: &str) -> Result<Arc<Subscription>>;
     async fn write(
         &self,
@@ -23,6 +24,15 @@ pub(crate) trait Adapter: Send + Sync {
         live: Option<Arc<Subscription>>,
         created: &RecordCreated<'_>,
     ) -> Delivery;
+}
+
+pub(crate) enum Media {
+    Download(Source),
+    VerifiedFile {
+        name: String,
+        size: u64,
+        sha256: String,
+    },
 }
 
 pub(crate) type RecordCreated<'a> =
@@ -36,6 +46,7 @@ pub(crate) struct View {
     pub messages: Arc<[Value]>,
     pub streamed: Option<Value>,
     pub observations: Arc<[Observation]>,
+    pub image_limits: Value,
 }
 
 #[derive(Clone)]
@@ -49,10 +60,14 @@ pub(crate) struct Observation {
 pub(crate) enum Write {
     Send {
         text: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        files: Vec<VerifiedUpload>,
     },
     Steer {
         expected: String,
         text: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        files: Vec<VerifiedUpload>,
     },
     Interrupt {
         expected: String,
@@ -145,6 +160,13 @@ pub(crate) enum Control {
 }
 
 impl Write {
+    pub(crate) fn dispatch_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Self::Send { files, .. } | Self::Steer { files, .. } if !files.is_empty() => 180,
+            _ => 45,
+        })
+    }
+
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Send { .. } => "send",

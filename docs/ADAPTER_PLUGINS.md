@@ -2,7 +2,7 @@
 
 网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口；产品协议和系统连接器分别位于 `packages/adapter-codex`、`packages/adapter-dsh`。默认附带两款官方插件。每个配置实例有独立 Node 宿主、配置、状态目录与订阅；宿主只连接已有 Agent。
 
-本页描述 Node 网关的插件 SDK 与监督器。纯 Rust Ely 适配器使用独立 Rust 网关，复用 `instances.json` 配置独立的 DSH 实例，支持历史、实时回复、文本发送、队列和会话设置。Rust 版当前通过编译期注册接入 DSH，第三方运行时插件宿主仍在迁移。 [原生安装与更新](DESKTOP_ADAPTER.md)
+本页描述 Node 网关的插件 SDK 与监督器。纯 Rust Ely 适配器使用独立 Rust 网关，复用 `instances.json` 配置独立的 DSH 实例，支持历史、实时回复、文本和附件发送、队列和会话设置。Rust 版当前通过编译期注册接入 DSH，第三方运行时插件宿主仍在迁移。 [原生安装与更新](DESKTOP_ADAPTER.md)
 
 ```mermaid
 flowchart LR

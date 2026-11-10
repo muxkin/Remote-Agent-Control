@@ -320,7 +320,7 @@ fn viewed_images(output: &Value) -> Option<Vec<&str>> {
     Some(images)
 }
 
-fn legacy_root() -> Option<PathBuf> {
+pub(crate) fn legacy_root() -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("POCKET_NATIVE_LEGACY_STATE") {
         let root = PathBuf::from(root);
         return root.is_absolute().then_some(root);
@@ -473,7 +473,7 @@ fn local_path(reference: &str, cwd: &Path) -> Result<PathBuf> {
     Ok(path.components().collect())
 }
 
-fn links(text: &str) -> impl Iterator<Item = String> {
+pub(crate) fn links(text: &str) -> impl Iterator<Item = String> {
     static CITATION: OnceLock<Regex> = OnceLock::new();
     static ATTRIBUTE: OnceLock<Regex> = OnceLock::new();
     let citation =

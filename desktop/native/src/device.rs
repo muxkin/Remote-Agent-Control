@@ -3,10 +3,12 @@ use crate::{
     codex::History,
     codex_live::{Action, Desktop, Outcome, Thread},
     conversations,
-    files::{Attachment, Download, Scope},
+    files::{Attachment, Download, Scope, VerifiedUpload},
     gateway::{Database, Packet, reply, reply_packet},
     history_media,
-    plugins::{Adapter, Control, CreationSettings, Delivery, ModelSettings, Subscription, Write},
+    plugins::{
+        Adapter, Control, CreationSettings, Delivery, Media, ModelSettings, Subscription, Write,
+    },
     queue, requests, settings,
     state::Device,
 };
@@ -644,7 +646,18 @@ impl DeviceSession {
                 }
                 (body.request_id, Write::Control(body.control))
             }
-            _ => serde_json::from_value::<PluginRequest>(call["body"].clone())?.parse(method)?,
+            _ => {
+                let scope = Scope::plugin(plugin.id(), thread);
+                serde_json::from_value::<PluginRequest>(call["body"].clone())?.parse(
+                    method,
+                    |ids| {
+                        let store = self.db.lock().expect("database mutex poisoned");
+                        ids.iter()
+                            .map(|id| store.verified_upload(&self.device.id, &scope, *id))
+                            .collect()
+                    },
+                )?
+            }
         };
         let live = self
             .plugin_watches
@@ -671,7 +684,7 @@ impl DeviceSession {
                         .record_plugin_thread(plugin.id(), request, id)
                 };
                 let result = timeout(
-                    Duration::from_secs(45),
+                    action.dispatch_timeout(),
                     plugin.write(&thread, request, action, live.clone(), &created),
                 )
                 .await
@@ -735,6 +748,52 @@ impl DeviceSession {
                     ensure!(writable && plugin.uploads_enabled(), "请先同步可写会话");
                     self.begin_upload(Scope::plugin(plugin.id(), thread), call["body"].clone())
                         .await
+                }
+                "media.describe" => {
+                    let thread = plugin_thread(&call["params"]["id"])?;
+                    let reference = call["body"]["path"]
+                        .as_str()
+                        .filter(|path| (1..=4096).contains(&path.encode_utf16().count()))
+                        .context("附件地址无效")?;
+                    let media = plugin.media(thread, reference).await?;
+                    let scope = Scope::plugin(plugin.id(), thread);
+                    let db = self.db.clone();
+                    let device = self.device.id.clone();
+                    let backend = plugin.id().to_owned();
+                    let thread = thread.to_owned();
+                    let batch = self
+                        .backends
+                        .storage
+                        .as_ref()
+                        .map(crate::storage::Storage::batch);
+                    tokio::task::spawn_blocking(move || {
+                        let source = match media {
+                            Media::Download(source) => source,
+                            Media::VerifiedFile { name, size, sha256 } => {
+                                let retained = db
+                                    .lock()
+                                    .expect("database mutex poisoned")
+                                    .retained_attachment(&scope, &sha256)?;
+                                let file = match retained {
+                                    Some(file) => file,
+                                    None => {
+                                        crate::dsh_media::legacy_file(&backend, &thread, &sha256)?
+                                    }
+                                };
+                                history_media::Source {
+                                    file,
+                                    name,
+                                    expected: Some((size, sha256)),
+                                }
+                            }
+                        };
+                        let download = Download::prepare(source, device, scope, batch)?;
+                        db.lock()
+                            .expect("database mutex poisoned")
+                            .register_download(download)
+                            .map(Some)
+                    })
+                    .await?
                 }
                 "message.send" | "turn.steer" | "turn.interrupt" | "thread.rename"
                 | "thread.create" | "queue.add" | "queue.remove" | "settings.update"
@@ -1137,18 +1196,42 @@ struct PluginRequest {
 }
 
 impl PluginRequest {
-    fn parse(self, method: &str) -> Result<(Uuid, Write)> {
+    fn parse(
+        self,
+        method: &str,
+        resolve: impl FnOnce(&[Uuid]) -> Result<Vec<VerifiedUpload>>,
+    ) -> Result<(Uuid, Write)> {
         ensure!(
-            self.upload_ids.as_ref().is_none_or(Vec::is_empty)
-                && self.skill_ids.as_ref().is_none_or(Vec::is_empty)
+            self.skill_ids.as_ref().is_none_or(Vec::is_empty)
                 && self.plugin_ids.as_ref().is_none_or(Vec::is_empty),
-            "DSH 附件和技能尚未迁移"
+            "DSH 技能尚未迁移"
         );
+        let uploads = self.upload_ids.as_deref().unwrap_or_default();
+        ensure!(
+            uploads.len() <= 10
+                && (uploads.is_empty() || matches!(method, "message.send" | "turn.steer")),
+            "DSH 附件参数无效"
+        );
+        let files = if uploads.is_empty() {
+            Vec::new()
+        } else {
+            resolve(uploads)?
+        };
         let text = |input: Option<String>, limit: usize| {
             let value = input.unwrap_or_default();
             let trimmed = value.trim();
             ensure!(
                 (1..=limit).contains(&trimmed.encode_utf16().count()),
+                "DSH 内容无效"
+            );
+            Ok::<_, anyhow::Error>(trimmed.to_owned())
+        };
+        let prompt_text = |input: Option<String>| {
+            let value = input.unwrap_or_default();
+            let trimmed = value.trim();
+            ensure!(
+                trimmed.encode_utf16().count() <= 16_000
+                    && (!trimmed.is_empty() || !files.is_empty()),
                 "DSH 内容无效"
             );
             Ok::<_, anyhow::Error>(trimmed.to_owned())
@@ -1192,12 +1275,14 @@ impl PluginRequest {
         let action = match method {
             "message.send" if self.title.is_none() && self.expected_turn_id.is_none() => {
                 Write::Send {
-                    text: text(self.text, 16_000)?,
+                    text: prompt_text(self.text)?,
+                    files,
                 }
             }
             "turn.steer" if self.title.is_none() => Write::Steer {
                 expected: expected()?,
-                text: text(self.text, 16_000)?,
+                text: prompt_text(self.text)?,
+                files,
             },
             "turn.interrupt" if self.text.is_none() && self.title.is_none() => Write::Interrupt {
                 expected: expected()?,

@@ -62,6 +62,14 @@ pub struct Attachment {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Serialize)]
+pub(crate) struct VerifiedUpload {
+    pub name: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub sha256: String,
+}
+
 impl Attachment {
     pub fn image(&self) -> bool {
         self.path
@@ -312,6 +320,49 @@ impl Store {
                 .to_owned(),
             path: upload.path,
         })
+    }
+
+    pub(crate) fn verified_upload(
+        &self,
+        device: &str,
+        scope: &Scope,
+        id: Uuid,
+    ) -> Result<VerifiedUpload> {
+        let upload = self.upload(device, scope, id)?;
+        ensure!(upload.complete, "附件尚未传完");
+        Ok(VerifiedUpload {
+            name: upload.document["name"]
+                .as_str()
+                .context("附件名称无效")?
+                .to_owned(),
+            path: upload.path,
+            size: upload.document["size"].as_u64().context("附件大小无效")?,
+            sha256: upload.document["sha256"]
+                .as_str()
+                .context("附件摘要无效")?
+                .to_owned(),
+        })
+    }
+
+    pub(crate) fn retained_attachment(&self, scope: &Scope, sha256: &str) -> Result<Option<File>> {
+        let entry = self
+            .db
+            .query_row(
+                "SELECT id,json_extract(manifest,'$.name') FROM native_uploads
+             WHERE thread=?1 AND complete=1 AND json_extract(manifest,'$.sha256')=?2 LIMIT 1",
+                params![scope.key(), sha256],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((id, name)) = entry else {
+            return Ok(None);
+        };
+        let path = upload_path(
+            &self.directory.join("native-uploads"),
+            Uuid::parse_str(&id)?,
+            &name,
+        );
+        private_file(&path, false).map(Some)
     }
 
     pub fn describe_upload(&self, device: &str, scope: &Scope, reference: &Path) -> Result<Value> {

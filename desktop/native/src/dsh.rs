@@ -1,6 +1,6 @@
 use crate::{
     dsh_live::Timeline,
-    plugins::{Adapter, Delivery, RecordCreated, Subscription, Write},
+    plugins::{Adapter, Delivery, Media, RecordCreated, Subscription, Write},
 };
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
@@ -34,6 +34,8 @@ const READS: &[&str] = &[
     "permissionPresets/catalog",
     "agentPresets/list",
     "commands/list",
+    "session/attachment",
+    "fileReferences/list",
 ];
 
 #[derive(Clone)]
@@ -46,10 +48,10 @@ pub(crate) struct Session {
 pub(crate) struct Dsh {
     id: String,
     name: String,
-    base: Url,
+    pub(crate) base: Url,
     version: String,
     token: String,
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     session: Mutex<Option<Session>>,
     subscriptions: SyncMutex<HashMap<String, Weak<Subscription>>>,
     read_only: bool,
@@ -105,7 +107,7 @@ impl Dsh {
         })
     }
 
-    async fn authenticate(&self) -> Result<Session> {
+    pub(crate) async fn authenticate(&self) -> Result<Session> {
         let mut cached = self.session.lock().await;
         if let Some(session) = cached
             .as_ref()
@@ -188,9 +190,7 @@ impl Dsh {
         args: Value,
     ) -> Result<Value> {
         let request = Uuid::new_v4();
-        let mut response = self.http.post(self.base.join(&format!("api/{endpoint}"))?)
-            .header(header::COOKIE, &session.cookie)
-            .header(header::ORIGIN, self.base.origin().ascii_serialization())
+        let response = self.authorized(session, self.http.post(self.base.join(&format!("api/{endpoint}"))?))
             .header(header::CONTENT_TYPE, "application/json")
             .body(json!({"type":"client-request","rpcId":request,"method":endpoint,"payload":{"args":args}}).to_string())
             .send().await.map_err(|_| anyhow::anyhow!("DSH 请求未完成"))?;
@@ -203,17 +203,7 @@ impl Dsh {
         ) {
             return Err(Refused.into());
         }
-        ensure!(response.status().is_success(), "DSH 请求未完成");
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| anyhow::anyhow!("DSH 请求未完成"))?
-        {
-            ensure!(body.len() + chunk.len() <= MAX_RESPONSE, "DSH 响应过大");
-            body.extend_from_slice(&chunk);
-        }
-        let mut result: Value = serde_json::from_slice(&body)?;
+        let mut result = bounded_json(response, MAX_RESPONSE).await?;
         ensure!(
             result["type"] == "server-response" && result["rpcId"] == request.to_string(),
             "DSH 响应标识无效"
@@ -226,6 +216,16 @@ impl Dsh {
             },
             None => bail!("DSH 响应无效"),
         }
+    }
+
+    pub(crate) fn authorized(
+        &self,
+        session: &Session,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        request
+            .header(header::COOKIE, &session.cookie)
+            .header(header::ORIGIN, self.base.origin().ascii_serialization())
     }
 
     async fn open_stream(
@@ -375,7 +375,7 @@ impl Dsh {
         }
     }
 
-    async fn snapshot(&self, id: &str) -> Result<Value> {
+    pub(crate) async fn snapshot(&self, id: &str) -> Result<Value> {
         let session = self.authenticate().await?;
         let result = timeout(Duration::from_secs(10), async {
             self.follow(&session, id, false)
@@ -516,6 +516,16 @@ impl Dsh {
             json!({"threads":rows.into_iter().skip(offset).take(limit).collect::<Vec<_>>(),"nextCursor":cursor}),
         )
     }
+}
+
+pub(crate) async fn bounded_json(mut response: reqwest::Response, limit: usize) -> Result<Value> {
+    ensure!(response.status().is_success(), "DSH 请求未完成");
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        ensure!(body.len() + chunk.len() <= limit, "DSH 响应过大");
+        body.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn valid_thread(id: &str) -> bool {
@@ -697,11 +707,12 @@ pub(crate) fn render(records: &[Value], full: bool) -> Vec<Value> {
                 };
                 let text = blocks(message, "text");
                 let reasoning = blocks(message, "reasoning");
+                let attachments = crate::dsh_media::attachments(message);
                 let context = (role == "user")
                     .then(|| message["source"]["kind"].as_str())
                     .flatten()
                     .filter(|kind| *kind != "user");
-                if text.is_empty() && reasoning.is_empty() {
+                if text.is_empty() && reasoning.is_empty() && attachments.is_empty() {
                     continue;
                 }
                 let truncated = !full && (text.len() > limit || reasoning.len() > limit);
@@ -724,6 +735,9 @@ pub(crate) fn render(records: &[Value], full: bool) -> Vec<Value> {
                 });
                 if let Some(request) = message["source"]["rpcId"].as_str() {
                     item["clientMessageId"] = json!(request);
+                }
+                if !attachments.is_empty() {
+                    item["attachments"] = json!(attachments);
                 }
                 messages.insert(seq, item);
             }
@@ -776,13 +790,16 @@ impl Adapter for Dsh {
             "skills",
             "plugins",
         ] {
-            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"|"settings"))) {"experimental"} else {"unavailable"}}));
+            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"|"settings"|"attachments"))) {"experimental"} else {"unavailable"}}));
         }
         json!({"id":self.id,"name":self.name,"product":"dsh","version":self.version,"connected":connected,
         "profile":"rust-native","capabilities":capabilities,"presentation":{
             "description":"DSH Web","creation":{"empty":false,"permission":if self.read_only {"native"} else {"select"},"preset":!self.read_only,"plan":!self.read_only},
-            "plan":if self.read_only {"none"} else {"control"},"fileReferences":false,"exportLog":false,"nativeCommands":!self.read_only,
+            "plan":if self.read_only {"none"} else {"control"},"fileReferences":true,"exportLog":false,"nativeCommands":!self.read_only,
         }})
+    }
+    async fn media(&self, thread: &str, reference: &str) -> Result<Media> {
+        self.attachment(thread, reference).await
     }
     async fn status(&self) -> Value {
         let connected = self.authenticate().await.is_ok();
@@ -831,13 +848,19 @@ impl Adapter for Dsh {
                     .collect();
                 return Ok(Some(json!({"projects":projects})));
             }
-            "thread.read" | "history.read" | "content.read" => {}
+            "thread.read" | "history.read" | "content.read" | "references.list" => {}
             _ => return Ok(None),
         }
         let id = params["id"]
             .as_str()
             .filter(|id| valid_thread(id))
             .context("DSH 会话标识无效")?;
+        if method == "references.list" {
+            return self
+                .file_references(id, query["q"].as_str().unwrap_or_default())
+                .await
+                .map(Some);
+        }
         if method == "history.read"
             && let Some(cursor) = query["cursor"].as_str()
         {
@@ -909,6 +932,7 @@ impl Adapter for Dsh {
             return Delivery::Rejected("DSH Web 未连接");
         };
         let view = live
+            .as_ref()
             .and_then(|live| live.0.borrow().clone())
             .filter(|view| view.thread["synchronized"] == true);
         if matches!(&action, Write::Create { .. }) {
@@ -917,7 +941,7 @@ impl Adapter for Dsh {
             }
             return self.create(&session, request, action, created).await;
         }
-        let Some(view) = view else {
+        let (Some(view), Some(live)) = (view, live) else {
             return Delivery::Rejected("DSH 会话尚未同步");
         };
         let active = view.thread["activeTurnId"].as_str();
@@ -926,16 +950,42 @@ impl Adapter for Dsh {
                 return self.change_model(&session, thread, settings).await;
             }
             Write::Control(control) => return self.change_control(&session, thread, control).await,
-            Write::Send { text } if active.is_none() => (
-                "session/prompt",
-                json!({"sessionId":thread,"requestId":request,"mode":"queue","content":[{"type":"text","text":text}]}),
-                Delivery::Accepted(None),
-            ),
-            Write::Steer { expected, text } if active == Some(expected.as_str()) => (
-                "session/prompt",
-                json!({"sessionId":thread,"requestId":request,"mode":"steer","content":[{"type":"text","text":text}]}),
-                Delivery::Accepted(Some(expected)),
-            ),
+            Write::Send { text, files } if active.is_none() => {
+                let Ok(content) = self
+                    .prompt_content(&session, thread, &text, files, &view.image_limits)
+                    .await
+                else {
+                    return Delivery::Rejected("DSH 未接收附件，消息未发送");
+                };
+                if !still_on_turn(&live, None) {
+                    return Delivery::Rejected("当前回合已变化，请刷新");
+                }
+                (
+                    "session/prompt",
+                    json!({"sessionId":thread,"requestId":request,"mode":"queue","content":content}),
+                    Delivery::Accepted(None),
+                )
+            }
+            Write::Steer {
+                expected,
+                text,
+                files,
+            } if active == Some(expected.as_str()) => {
+                let Ok(content) = self
+                    .prompt_content(&session, thread, &text, files, &view.image_limits)
+                    .await
+                else {
+                    return Delivery::Rejected("DSH 未接收附件，消息未发送");
+                };
+                if !still_on_turn(&live, Some(expected.as_str())) {
+                    return Delivery::Rejected("当前回合已变化，请刷新");
+                }
+                (
+                    "session/prompt",
+                    json!({"sessionId":thread,"requestId":request,"mode":"steer","content":content}),
+                    Delivery::Accepted(Some(expected)),
+                )
+            }
             Write::Interrupt { expected } if active == Some(expected.as_str()) => (
                 "session/cancel",
                 json!({"sessionId":thread}),
@@ -986,6 +1036,12 @@ impl Adapter for Dsh {
             _ => Delivery::Uncertain,
         }
     }
+}
+
+fn still_on_turn(live: &Subscription, expected: Option<&str>) -> bool {
+    live.0.borrow().as_ref().is_some_and(|view| {
+        view.thread["synchronized"] == true && view.thread["activeTurnId"].as_str() == expected
+    })
 }
 
 fn page_reply(id: &str, through: i64, snapshot: &Value) -> Result<Value> {

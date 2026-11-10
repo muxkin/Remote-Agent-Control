@@ -374,6 +374,7 @@ impl Timeline {
             messages: self.durable.messages.clone(),
             streamed,
             observations: self.durable.observations.clone(),
+            image_limits: self.projections["imageLimits"].clone(),
         }
     }
 }

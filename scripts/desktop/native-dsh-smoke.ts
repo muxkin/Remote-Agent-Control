@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -15,6 +15,10 @@ import { apiCall } from '../../src/shared/rpc.js';
 import { createIdentity } from '../../src/shared/secure-channel.js';
 
 const state = await mkdtemp(join(tmpdir(), 'native-dsh-smoke-'));
+const legacy = join(state, 'legacy');
+const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
+const png = await readFile('src/web/public/app-icon-32.png');
+const workspacePdf = Buffer.from('%PDF-1.7\nfixture document\n');
 const modelId = (model: string) => JSON.stringify(['fixture', model]);
 const defaultProjections = () => ({
   modelSelection: { next: { provider: 'fixture', model: 'base' } },
@@ -31,8 +35,11 @@ const instances = ['dsh-one', 'dsh-two'].map((id) => ({
   inbox: [] as { id: string; content: { type: string; text: string }[] }[],
   followers: new Map<WebSocket, string>(),
   controls: new Map<WebSocket, string>(),
+  receipts: new Map<string, { attachmentId: string; name: string; bytes: number }>(),
+  images: new Map<string, { attachment: object; data: string }>(),
   projections: new Map<string, Record<string, unknown>>([['shared', defaultProjections()]]),
   projectionSeq: 1,
+  pageWindow: 100,
   calls: [] as { method: string; request: any }[],
   records: [
     {
@@ -62,13 +69,60 @@ const dsh = createServer(async (request, response) => {
   }
   const instance = cookie(request.headers.cookie);
   if (!instance) return response.writeHead(403).end();
+  if (path.pathname === '/api/file') {
+    assert.equal(instance, one);
+    assert.equal(path.searchParams.get('path'), '/fixture/report copy.pdf');
+    assert.equal(request.method, 'GET');
+    instance.calls.push({ method: '/api/file', request: path.searchParams.get('path') });
+    return response.end(workspacePdf);
+  }
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
-  const rpc = JSON.parse(Buffer.concat(chunks).toString());
+  const body = Buffer.concat(chunks);
+  if (path.pathname === '/api/session/uploadFileBinary') {
+    assert.equal(request.headers['content-type'], 'application/octet-stream');
+    assert.equal(Number(request.headers['content-length']), body.length);
+    assert.equal(path.searchParams.get('sessionId'), 'shared');
+    const name = path.searchParams.get('name')!;
+    const file = { attachmentId: hash(body), name, bytes: body.length };
+    const receiptId = randomUUID();
+    instance.receipts.set(receiptId, file);
+    if (name === 'race.txt') {
+      record(instance, 'turn/start', { turn: 21 });
+      await delay(300);
+    }
+    instance.calls.push({ method: 'session/uploadFileBinary', request: file });
+    return response.end(JSON.stringify({ ok: true, value: { receiptId, file } }));
+  }
+  const rpc = JSON.parse(body.toString());
   assert.equal(path.pathname, '/api/' + rpc.method);
   const args = rpc.payload.args.request ?? rpc.payload.args;
   let value;
   switch (rpc.method) {
+    case 'session/page': {
+      assert.deepEqual(args.address, { kind: 'session', sessionId: 'shared' });
+      const earlier = instance.records.filter(
+        ({ event }) => Number(event.seq) < args.beforeSeq && Number(event.seq) <= args.throughSeq,
+      );
+      value = { records: earlier.slice(-instance.pageWindow), hasMore: earlier.length > instance.pageWindow };
+      break;
+    }
+    case 'fileReferences/list':
+      assert.deepEqual(args, { agentId: 'shared', query: 'report' });
+      value = [{ path: 'report copy.pdf' }];
+      break;
+    case 'session/attachment':
+      assert.equal(args.sessionId, 'shared');
+      value = instance.images.get(args.attachmentId);
+      if (!value)
+        return response.end(
+          JSON.stringify({
+            type: 'server-response',
+            rpcId: rpc.rpcId,
+            result: { ok: false, error: { code: 'session/attachment-invalid' } },
+          }),
+        );
+      break;
     case 'session/list':
       value = {
         items: [
@@ -174,6 +228,31 @@ const dsh = createServer(async (request, response) => {
         const start = instance.inbox.length;
         instance.inbox.push(queued);
         record(instance, 'agent/inbox/spliced', { target: 'next-turn', start, inserted: [queued] });
+      }
+      if (args.content.some((part: any) => part.type === 'file' || part.type === 'image')) {
+        const content = args.content.map((part: any) => {
+          if (part.type === 'file') {
+            const attachment = instance.receipts.get(part.receiptId);
+            assert(attachment);
+            return { type: 'file', attachment };
+          }
+          if (part.type === 'image') {
+            assert.equal(part.mediaType, 'image/png');
+            assert.deepEqual(Buffer.from(part.data, 'base64'), png);
+            const attachment = {
+              attachmentId: hash(png),
+              mediaType: 'image/png',
+              bytes: png.length,
+              name: part.name,
+            };
+            instance.images.set(attachment.attachmentId, { attachment, data: part.data });
+            return { type: 'image', attachment };
+          }
+          return part;
+        });
+        record(instance, 'assistant/message', {
+          message: { id: args.requestId, role: 'assistant', content },
+        });
       }
       value = { accepted: true };
       break;
@@ -284,8 +363,8 @@ dshSocket.on('connection', (socket, request) => {
             },
           },
           cursor: isShared ? instance.records.length : -1,
-          hasMore: false,
-          records: isShared ? instance.records : [],
+          hasMore: isShared && instance.records.length > instance.pageWindow,
+          records: isShared ? instance.records.slice(-instance.pageWindow) : [],
         },
       }),
     );
@@ -368,6 +447,7 @@ async function launch() {
       ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(POCKET_|CODEX_)/i.test(key))),
       CODEX_HOME: join(state, 'no-codex'),
       POCKET_NATIVE_STATE_DIR: state,
+      POCKET_NATIVE_LEGACY_STATE: legacy,
       POCKET_NATIVE_ORIGIN: origin,
       POCKET_NATIVE_ENROLLMENT: enrollment,
       POCKET_NATIVE_P2P: '0',
@@ -576,6 +656,106 @@ try {
     await operation(rename, 'completed');
 
     await wait(() => views.get(one.id)?.thread.title === 'renamed');
+    const stage = async (name: string, data: Buffer) => {
+      const digest = hash(data);
+      const { id } = await rpc<{ id: string }>(one.id, '/threads/shared/uploads', 'POST', {
+        name,
+        size: data.length,
+        sha256: digest,
+        hashes: [digest],
+      });
+      const file = { fileId: id, backendId: one.id, threadId: 'shared' };
+      await session.request('file', { ...file, action: 'write', index: 0 }, data);
+      await session.request('file', { ...file, action: 'finish' });
+      return id;
+    };
+    const describe = (backendId: string, path: string) =>
+      rpc<{ id: string; mime: string }>(backendId, '/threads/shared/media', 'POST', { path });
+    const download = async (path: string, mime: string) => {
+      const manifest = await describe(one.id, path);
+      assert.equal(manifest.mime, mime);
+      const reply = await session.request('file', { ...file, fileId: manifest.id, action: 'read', index: 0 });
+      return Buffer.from(reply.bytes!);
+    };
+    const fileRef = 'dsh-file:' + digest;
+    const imageRef = 'dsh-image:' + hash(png);
+    await assert.rejects(describe(one.id, fileRef), { status: 404 });
+    await assert.rejects(describe(two.id, imageRef), { status: 404 });
+    const imageUpload = await stage('image.png', png);
+    const mediaSend = { requestId: randomUUID(), text: '', uploadIds: [upload.id, imageUpload] };
+    await assert.rejects(rpc(two.id, '/threads/shared/messages', 'POST', mediaSend));
+    await rpc(one.id, '/threads/shared/messages', 'POST', mediaSend);
+    await operation(mediaSend.requestId, 'accepted');
+    await rpc(one.id, '/threads/shared/messages', 'POST', mediaSend);
+    assert.equal(one.calls.filter((call) => call.method === 'session/uploadFileBinary').length, 1);
+    assert.equal(one.calls.filter((call) => call.request.requestId === mediaSend.requestId).length, 1);
+    await wait(() => views.get(one.id)?.messages.get(mediaSend.requestId)?.attachments?.length === 2);
+    assert.deepEqual(views.get(one.id)?.messages.get(mediaSend.requestId)?.attachments, [
+      { path: fileRef, name: 'scope.txt' },
+      { path: imageRef, name: 'image.png' },
+    ]);
+    assert.deepEqual(await download(fileRef, 'text/plain'), attachment);
+    assert.deepEqual(await download(imageRef, 'image/png'), png);
+    await assert.rejects(describe(two.id, fileRef), { status: 404 });
+    assert.deepEqual(await rpc(one.id, '/threads/shared/references?q=report'), {
+      files: [{ name: 'report copy.pdf', path: 'report copy.pdf' }],
+    });
+    record(one, 'assistant/message', {
+      message: {
+        id: 'workspace-link',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '[Document](./notes/../report%20copy.pdf) and `[private](secret.pdf)`' },
+        ],
+      },
+    });
+    await assert.rejects(describe(two.id, 'report%20copy.pdf'), { status: 404 });
+    await assert.rejects(describe(one.id, 'secret.pdf'), { status: 404 });
+    assert.deepEqual(await download('report%20copy.pdf', 'application/pdf'), workspacePdf);
+    assert.equal(one.calls.filter(({ method }) => method === '/api/file').length, 1);
+
+    const legacyData = Buffer.from('original DSH file from the Node adapter');
+    const legacyDigest = hash(legacyData);
+    const oldPath = join(legacy, 'uploads', randomUUID(), 'old.txt');
+    const receiptDir = join(legacy, 'backends', one.id, 'receipts');
+    await mkdir(join(oldPath, '..'), { recursive: true, mode: 0o700 });
+    await mkdir(receiptDir, { recursive: true, mode: 0o700 });
+    await writeFile(oldPath, legacyData, { mode: 0o600 });
+    await writeFile(
+      join(receiptDir, hash(JSON.stringify(['shared', legacyDigest])) + '.json'),
+      JSON.stringify({ path: oldPath }),
+      { mode: 0o600 },
+    );
+    record(one, 'assistant/message', {
+      message: {
+        id: 'legacy-media',
+        role: 'assistant',
+        content: [
+          {
+            type: 'file',
+            attachment: { attachmentId: legacyDigest, bytes: legacyData.length, name: 'old.txt' },
+          },
+        ],
+      },
+    });
+    record(one, 'assistant/message', {
+      message: { id: 'later', role: 'assistant', content: [{ type: 'text', text: 'Newer record' }] },
+    });
+    one.pageWindow = 1;
+    assert.deepEqual(await download('dsh-file:' + legacyDigest, 'text/plain'), legacyData);
+    assert.deepEqual(await download('report%20copy.pdf', 'application/pdf'), workspacePdf);
+    assert(one.calls.some(({ method }) => method === 'session/page'));
+    one.pageWindow = 100;
+    await writeFile(oldPath, Buffer.alloc(legacyData.length, 0x01), { mode: 0o600 });
+    await assert.rejects(describe(one.id, 'dsh-file:' + legacyDigest));
+
+    const raceUpload = await stage('race.txt', Buffer.from('changed turn'));
+    const race = { requestId: randomUUID(), text: '', uploadIds: [raceUpload] };
+    await rpc(one.id, '/threads/shared/messages', 'POST', race);
+    await operation(race.requestId, 'rejected');
+    assert(!one.calls.some((call) => call.request.requestId === race.requestId));
+    record(one, 'turn/end', { turn: 21, reason: { kind: 'completed' } });
+    await wait(() => views.get(one.id)?.thread.canSend === true);
     const models = await rpc<{ models: { id: string; efforts: string[] }[] }>(one.id, '/models');
     assert.deepEqual(
       models.models.map(({ id, efforts }) => [id, efforts]),
@@ -735,6 +915,7 @@ try {
     });
     remove = listen();
     await watch(one.id);
+    assert.deepEqual(await download(fileRef, 'text/plain'), attachment);
     await rpc(one.id, '/threads/shared/settings', 'POST', lostSetting);
     await operation(lostSetting.requestId, 'uncertain');
     assert.equal(
@@ -787,7 +968,7 @@ try {
     session.close();
   }
   console.log(
-    'Rust DSH: isolated instances and staged attachments, live sync, model/permission/preset/plan controls, configured creation, queue, replay, uncertain restart recovery and migrated read-only policy passed.',
+    'Rust DSH: scoped file/image send and preview, legacy receipts, live sync and settings, configured creation, queue, replay, uncertain restart recovery and read-only policy passed.',
   );
 } finally {
   await stop();

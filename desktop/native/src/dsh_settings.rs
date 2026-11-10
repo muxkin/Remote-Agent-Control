@@ -15,6 +15,7 @@ pub(crate) const PROJECTIONS: &[&str] = &[
     "agentPreset",
     "plan",
     "turnOutline",
+    "imageLimits",
 ];
 
 pub(crate) fn model(selection: &Value) -> Option<String> {
