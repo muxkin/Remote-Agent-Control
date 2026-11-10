@@ -51,7 +51,7 @@ jobs:
           node-version: 24
           cache: npm
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils pkexec
       - if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
       - run: npm ci --ignore-scripts
@@ -112,6 +112,9 @@ jobs:
           New-Item -Path (Join-Path $dir 'keep.txt') -ItemType File | Out-Null
           $process = Start-Process -FilePath (Join-Path $dir 'Uninstall.exe') -ArgumentList '/S' -Wait -PassThru
           if ($process.ExitCode -ne 0 -or (Test-Path $exe) -or !(Test-Path (Join-Path $dir 'keep.txt'))) { throw 'Uninstall failed' }
+      - name: Verify the signed HTTPS update through the installed adapter
+        shell: bash
+        run: node scripts/desktop/native-rust-update-smoke.mjs dist/desktop-native-preview desktop/native/target/release/${{ matrix.binary }}
       - name: Build the console binary for protocol verification
         if: runner.os == 'Windows'
         working-directory: desktop/native

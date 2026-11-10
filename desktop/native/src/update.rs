@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use reqwest::{Client as Http, ClientBuilder};
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
@@ -15,13 +16,13 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tempfile::TempDir;
 use tokio::{
     io::AsyncWriteExt,
     sync::{mpsc, watch},
     time::{interval, sleep},
 };
 use url::Url;
+use uuid::Uuid;
 
 const MAX_MANIFEST: usize = 16 * 1024;
 const MAX_PACKAGE: u64 = 512 * 1024 * 1024;
@@ -229,16 +230,54 @@ fn feed(origin: &Url, target: Target) -> Result<Url> {
 
 struct Staged {
     release: Release,
-    directory: TempDir,
+    directory: StagingDirectory,
 }
 
-async fn stage(origin: &Url, target: Target, directory: &Path) -> Result<Option<Staged>> {
-    let base = feed(origin, target)?;
-    let client = reqwest::Client::builder()
+struct StagingDirectory(Option<PathBuf>);
+
+impl StagingDirectory {
+    fn new(parent: &Path) -> Result<Self> {
+        let path = parent.join(format!(".native-update-{}", Uuid::new_v4()));
+        private_directory(&path)?;
+        Ok(Self(Some(path)))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("active staging directory")
+    }
+
+    fn keep(mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn client_builder() -> ClientBuilder {
+    Http::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(900))
-        .build()?;
+}
+
+struct UpdateSource {
+    client: Http,
+    base: Url,
+    target: Target,
+}
+
+async fn stage(source: &UpdateSource, directory: &Path) -> Result<Option<Staged>> {
+    let UpdateSource {
+        client,
+        base,
+        target,
+    } = source;
     let mut response = client
         .get(base.join("latest.json")?)
         .timeout(Duration::from_secs(15))
@@ -250,7 +289,7 @@ async fn stage(origin: &Url, target: Target, directory: &Path) -> Result<Option<
         ensure!(manifest.len() + part.len() <= MAX_MANIFEST, "更新清单过大");
         manifest.extend_from_slice(&part);
     }
-    let Some(release) = pinned_manifest(&manifest, target)? else {
+    let Some(release) = pinned_manifest(&manifest, *target)? else {
         return Ok(None);
     };
     if let Ok(mut old) = private_file(&directory.join("native-update-attempt.json"), false) {
@@ -266,15 +305,7 @@ async fn stage(origin: &Url, target: Target, directory: &Path) -> Result<Option<
             );
         }
     }
-    let mut temporary = tempfile::Builder::new();
-    temporary.prefix(".native-update-");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary.permissions(fs::Permissions::from_mode(0o700));
-    }
-    let temporary = temporary.tempdir_in(directory)?;
-    private_directory(temporary.path())?;
+    let temporary = StagingDirectory::new(directory)?;
     let manifest_file = temporary.path().join("latest.json");
     private_file(&manifest_file, true)?.write_all(&manifest)?;
     let path = temporary.path().join(&release.file);
@@ -340,17 +371,39 @@ pub(crate) async fn run(
     directory: PathBuf,
     db: Database,
     gate: UpdateGate,
-    mut install: mpsc::Receiver<()>,
+    install: mpsc::Receiver<()>,
     status: watch::Sender<Snapshot>,
 ) {
     let Some(target) = target() else { return };
     if env::var("POCKET_NATIVE_UPDATES").as_deref() == Ok("0")
         || !crate::update_install::installed(&executable)
-        || feed(&origin, target).is_err()
     {
         return;
     }
-    let manual = target.platform == "linux";
+    let Ok(base) = feed(&origin, target) else {
+        return;
+    };
+    let Ok(client) = client_builder().build() else {
+        return;
+    };
+    let source = UpdateSource {
+        client,
+        base,
+        target,
+    };
+    run_ready(source, executable, directory, db, gate, install, status).await;
+}
+
+async fn run_ready(
+    source: UpdateSource,
+    executable: PathBuf,
+    directory: PathBuf,
+    db: Database,
+    gate: UpdateGate,
+    mut install: mpsc::Receiver<()>,
+    status: watch::Sender<Snapshot>,
+) {
+    let manual = source.target.platform == "linux";
     remove_expired_staging(&directory);
     let mut checks = interval(CHECK_INTERVAL);
     checks.tick().await;
@@ -358,7 +411,7 @@ pub(crate) async fn run(
     let mut staged = None;
     let mut requested = false;
     let mut apply = interval(Duration::from_secs(15));
-    let mut next = Some(stage(&origin, target, &directory).await);
+    let mut next = Some(stage(&source, &directory).await);
     loop {
         if let Some(result) = next.take() {
             let message = match result {
@@ -389,7 +442,7 @@ pub(crate) async fn run(
         {
             match handoff(package, &executable, &directory) {
                 Ok(()) => {
-                    let _ = staged.take().unwrap().directory.keep();
+                    staged.take().unwrap().directory.keep();
                     status.send_modify(|snapshot| snapshot.exit_for_update = true);
                     return;
                 }
@@ -402,7 +455,7 @@ pub(crate) async fn run(
             }
         }
         tokio::select! {
-            _ = checks.tick(), if staged.is_none() => next = Some(stage(&origin, target, &directory).await),
+            _ = checks.tick(), if staged.is_none() => next = Some(stage(&source, &directory).await),
             _ = apply.tick(), if staged.is_some() => {},
             command = install.recv() => {
                 if command.is_none() { return; }
@@ -476,12 +529,16 @@ pub(crate) fn apply(executable: &Path, stage: &Path, directory: &Path) -> Result
             "更新包校验失败"
         );
         drop(file);
-        let mut attempt = tempfile::NamedTempFile::new_in(&directory)?;
+        let record = directory.join(format!(".native-update-attempt-{}.part", Uuid::new_v4()));
+        let temporary = tempfile::TempPath::try_from_path(&record)?;
+        let mut attempt = private_file(&record, true)?;
         serde_json::to_writer(
             &mut attempt,
             &serde_json::json!({"version":release.version,"time":now()}),
         )?;
-        attempt.persist(directory.join("native-update-attempt.json"))?;
+        attempt.sync_all()?;
+        drop(attempt);
+        temporary.persist(directory.join("native-update-attempt.json"))?;
         crate::update_install::replace(
             executable,
             &artifact,
@@ -490,7 +547,7 @@ pub(crate) fn apply(executable: &Path, stage: &Path, directory: &Path) -> Result
         )
     })();
     drop(lock);
-    let relaunched = crate::update_install::restart(executable);
+    let relaunched = crate::update_install::restart(executable, &directory);
     // Windows keeps the running helper executable mapped. Remove what can be deleted.
     let _ = fs::remove_dir_all(stage);
     result.and(relaunched)
@@ -518,6 +575,165 @@ mod tests {
             "signature": STANDARD.encode(key.sign(&payload)),
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed fixture and the isolated HTTPS release server"]
+    async fn installed_release_smoke() -> Result<()> {
+        crate::install_tls()?;
+        let target = target().context("更新平台不支持")?;
+        let origin = Url::parse(&env::var("POCKET_QA_UPDATE_ORIGIN")?)?;
+        let directory =
+            PathBuf::from(env::var_os("POCKET_QA_UPDATE_STATE").context("missing state")?);
+        let executable =
+            PathBuf::from(env::var_os("POCKET_QA_UPDATE_EXE").context("missing installer path")?);
+        let expected = env::var("POCKET_QA_UPDATE_SHA512")?;
+        let release_version = env::var("POCKET_QA_UPDATE_VERSION")?;
+        ensure!(
+            env!("CARGO_PKG_VERSION") == "0.0.0",
+            "需要隔离的旧版测试构建"
+        );
+        ensure!(
+            crate::update_install::installed(&executable),
+            "测试适配器安装位置无效"
+        );
+        let root = env::var_os("POCKET_QA_UPDATE_CA").context("missing fixture CA")?;
+        let certificate = reqwest::Certificate::from_pem(&fs::read(root)?)?;
+        let source = |name: &str, trust_fixture: bool| -> Result<UpdateSource> {
+            let base = if name == "good" {
+                feed(&origin, target)?
+            } else {
+                origin.join(&format!("{name}/{}/{}/", target.platform, target.arch))?
+            };
+            let mut builder = client_builder().no_proxy();
+            if trust_fixture {
+                builder = builder.add_root_certificate(certificate.clone());
+            }
+            Ok(UpdateSource {
+                client: builder.build()?,
+                base,
+                target,
+            })
+        };
+        let mut store = crate::state::Store::open(&directory)?;
+        let pairing = store.mint_pairing(None)?;
+        let peer = libp2p_identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        store.pair(
+            &crate::state::hash(&pairing.code),
+            "Existing paired fixture",
+            peer,
+        )?;
+        let device = store.device(peer)?.context("测试配对未完成")?;
+        let identity = fs::read(directory.join("device-identity-v2.json"))?;
+        let config = directory.join("instances.json");
+        private_file(&config, true)?.write_all(b"[]")?;
+        for (name, trust_fixture) in [
+            ("good", false),
+            ("foreign", true),
+            ("corrupt", true),
+            ("redirect", true),
+        ] {
+            ensure!(
+                stage(&source(name, trust_fixture)?, &directory)
+                    .await
+                    .is_err(),
+                "更新接受了无效的测试来源 {name}"
+            );
+        }
+        ensure!(
+            !fs::read_dir(&directory)?.flatten().any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".native-update-")),
+            "失败的更新保留了不可信暂存文件"
+        );
+        let before = Sha512::digest(fs::read(&executable)?);
+        let gate = UpdateGate::default();
+        let active = gate.admit().context("测试连接未接入")?;
+        let db = Arc::new(Mutex::new(store));
+        let (requests, install) = mpsc::channel(1);
+        let (status, mut updates) = watch::channel(Snapshot::default());
+        let work = tokio::spawn(run_ready(
+            source("good", true)?,
+            executable.clone(),
+            directory.clone(),
+            db.clone(),
+            gate,
+            install,
+            status,
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(50),
+            updates.wait_for(|snapshot| snapshot.update.starts_with("已下载")),
+        )
+        .await??;
+        ensure!(
+            updates.borrow().manual_update == (target.platform == "linux"),
+            "安装授权模式与平台不符"
+        );
+        if target.platform == "linux" {
+            requests.send(()).await?;
+        }
+        // Hold the client through the next installation check after downloading.
+        sleep(Duration::from_secs(17)).await;
+        ensure!(!updates.borrow().exit_for_update, "更新中断了活动连接");
+        ensure!(
+            Sha512::digest(fs::read(&executable)?) == before,
+            "活动连接期间安装了更新"
+        );
+        drop(active);
+        tokio::time::timeout(
+            Duration::from_secs(55),
+            updates.wait_for(|snapshot| snapshot.exit_for_update),
+        )
+        .await??;
+        work.await?;
+        // The copied installer helper must wait for the process-wide state lock.
+        ensure!(
+            Sha512::digest(fs::read(&executable)?) == before,
+            "助手未等待旧版退出"
+        );
+        drop(db);
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                if fs::read(&executable)
+                    .ok()
+                    .is_some_and(|bytes| format!("{:x}", Sha512::digest(bytes)) == expected)
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(300)).await;
+            }
+        })
+        .await
+        .context("系统安装器没有替换可执行文件")?;
+        let record: Value = serde_json::from_reader(private_file(
+            &directory.join("native-update-attempt.json"),
+            false,
+        )?)?;
+        ensure!(record["version"] == release_version, "更新尝试记录无效");
+        ensure!(
+            fs::read(directory.join("device-identity-v2.json"))? == identity,
+            "更新改变了主机身份"
+        );
+        ensure!(fs::read(config)? == b"[]", "更新改变了插件配置");
+        let check = rusqlite::Connection::open_with_flags(
+            directory.join("state.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let ticket: String = check.query_row(
+            "SELECT route_ticket FROM device_keys WHERE peer_id=?1 AND device_id=?2",
+            rusqlite::params![peer.to_string(), device.id],
+            |row| row.get(0),
+        )?;
+        ensure!(ticket == device.ticket, "更新改变了配对数据");
+        println!(
+            "Signed HTTPS update installed on {}/{} and preserved paired state",
+            target.platform, target.arch
+        );
+        Ok(())
     }
 
     #[test]
