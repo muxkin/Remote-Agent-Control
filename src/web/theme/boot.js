@@ -1,4 +1,4 @@
-// Runs before stylesheets/React. The palette engine refreshes this validated paint cache.
+// Runs before stylesheets and Vue. The palette engine refreshes this validated paint cache.
 (() => {
   try {
     const data = JSON.parse(localStorage.getItem('pocket-appearance-v1') || 'null');

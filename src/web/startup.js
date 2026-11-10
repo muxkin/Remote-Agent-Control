@@ -1,4 +1,4 @@
-// Small same-origin recovery UI, independent of React and the asset CDN.
+// Small same-origin recovery UI, independent of Vue and the asset CDN.
 (() => {
   let timer;
   function install() {

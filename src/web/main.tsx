@@ -1,5 +1,4 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
+import { createApp, h } from 'vue';
 import { MessagingProvider } from './messaging/context';
 import { AppShell } from './shell/AppShell';
 import './style.css';
@@ -28,8 +27,6 @@ for (const [rel, href, type, sizes] of [
 }
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {});
 
-createRoot(document.getElementById('root')!).render(
-  <MessagingProvider>
-    <AppShell />
-  </MessagingProvider>,
-);
+createApp({
+  render: () => h(MessagingProvider, null, { default: () => h(AppShell) }),
+}).mount('#root');

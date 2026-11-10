@@ -1,4 +1,3 @@
-import { useSyncExternalStore } from 'react';
 import {
   defaults,
   parseAppearance,
@@ -63,13 +62,10 @@ export function initializeAppearance() {
     }
   });
 }
-const subscribe = (listener: () => void) => {
+export const subscribeAppearance = (listener: () => void) => {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
 };
-const getSnapshot = () => snapshot;
-export function useAppearance() {
-  return useSyncExternalStore(subscribe, getSnapshot);
-}
+export const appearanceSnapshot = () => snapshot;

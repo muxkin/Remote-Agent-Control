@@ -1,7 +1,9 @@
+import { tsxComponent } from '../tsx-component';
+import { shallowRef, defineAsyncComponent as lazy, Suspense } from 'vue';
+import { watchRender, writeRef } from '../render-effects';
 import { useMessaging } from '../messaging/context';
 import { BackendChooser } from '../BackendChooser';
 import { DEFAULT_BACKEND } from '../../shared/backends';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
@@ -19,26 +21,29 @@ import { Avatar } from '../messaging/ui';
 
 export { PageHeader } from './PageHeader';
 
-export function AppShell() {
+export const AppShell = tsxComponent(function AppShell() {
   useAppViewport();
-  useEffect(() => {
-    window.dispatchEvent(new Event('pocket:app-ready'));
-  }, []);
-  const { conversations, loading: accountLoading, user } = useMessaging();
-  const unread = conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
-  const [route, setRoute] = useState(() => readRoute(new URL(location.href)));
-  const workbenchRoute = useRef<AppRoute>(route.page === 'workbench' ? route : { page: 'workbench' });
-  const lastChat = useRef<{ account: string; id: string }>(undefined);
-  const accountId = user?.id;
-  const [ready, setReady] = useState(false);
-  const [hosts, setHosts] = useState<PairedHost[]>([]);
-  const [hostId, setHostId] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [workspaceVisited, setWorkspaceVisited] = useState(
-    route.page === 'workbench' || route.page === 'pair',
+  const routeState = shallowRef(readRoute(new URL(location.href)));
+  const setRoute = writeRef(routeState);
+  const workbenchRoute: { current: AppRoute } = {
+    current: routeState.value.page === 'workbench' ? routeState.value : { page: 'workbench' },
+  };
+  const lastChat: { current: { account: string; id: string } | undefined } = { current: undefined };
+  const readyState = shallowRef(false);
+  const setReady = writeRef(readyState);
+  const hostsState = shallowRef<PairedHost[]>([]);
+  const setHosts = writeRef(hostsState);
+  const hostIdState = shallowRef('');
+  const setHostId = writeRef(hostIdState);
+  const busyState = shallowRef(false);
+  const setBusy = writeRef(busyState);
+  const errorState = shallowRef('');
+  const setError = writeRef(errorState);
+  const workspaceVisitedState = shallowRef(
+    routeState.value.page === 'workbench' || routeState.value.page === 'pair',
   );
-  const navigate = useCallback((next: AppRoute, replace = false) => {
+  const setWorkspaceVisited = writeRef(workspaceVisitedState);
+  const navigate = (next: AppRoute, replace = false) => {
     if (next.page === 'workbench' && next.thread && !next.host)
       next = { ...next, host: deviceSession.host?.hostId };
     if (next.page === 'workbench') workbenchRoute.current = next;
@@ -59,206 +64,277 @@ export function AppShell() {
     }
     setRoute(next);
     if (next.page === 'workbench' || next.page === 'pair') setWorkspaceVisited(true);
-  }, []);
-  useEffect(() => {
-    if (
-      accountId &&
-      route.page === 'messages' &&
-      route.conversation &&
-      conversations.some(({ id }) => id === route.conversation)
-    ) {
-      lastChat.current = { account: accountId, id: route.conversation };
-      try {
-        sessionStorage.setItem(`pocket-last-chat:${accountId}`, route.conversation);
-      } catch {}
-    }
-  }, [accountId, route.page, route.conversation, conversations]);
-  function resumeMessages(): AppRoute {
-    let id = lastChat.current?.account === accountId ? lastChat.current?.id : undefined;
-    if (accountId && !id) {
-      try {
-        id = sessionStorage.getItem(`pocket-last-chat:${accountId}`) ?? undefined;
-      } catch {}
-    }
-    return id && conversations.some((chat) => chat.id === id)
-      ? { page: 'messages', conversation: id }
-      : { page: 'messages' };
-  }
-  useEffect(() => {
-    const pop = () => {
-      const next = readRoute(new URL(location.href));
-      if (next.page === 'workbench') workbenchRoute.current = next;
-      setRoute(next);
-      if (next.page === 'workbench' || next.page === 'pair') setWorkspaceVisited(true);
-    };
-    window.addEventListener('popstate', pop);
-    return () => window.removeEventListener('popstate', pop);
-  }, []);
-  const refreshHosts = useCallback(async () => {
+  };
+  const refreshHosts = async () => {
     setHosts(await deviceSession.cache.hosts());
     setHostId(deviceSession.host?.hostId ?? '');
-  }, []);
-  useEffect(() => {
-    if (accountLoading) return;
-    onAccountSessionChange(() => void refreshHosts());
-    void deviceSession
-      .init()
-      .then(refreshHosts)
-      .catch(() => setError('无法读取本机配对，请检查浏览器存储权限'))
-      .finally(() => setReady(true));
-    return deviceSession.onChange(() => void refreshHosts().catch(() => {}));
-  }, [refreshHosts, accountLoading, user?.id]);
-  useEffect(() => {
-    if (!user?.encrypted) return;
-    const sync = () => {
-      if (document.visibilityState !== 'hidden')
-        void syncAccountHosts(messaging.account)
-          .then(refreshHosts)
-          .catch(() => {});
-    };
-    const timer = setInterval(sync, 30000);
-    window.addEventListener('focus', sync);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener('focus', sync);
-    };
-  }, [user?.id, user?.encrypted, refreshHosts]);
-  useEffect(() => {
-    if (ready && route.page !== 'pair') void deviceSession.init().catch(() => {});
-  }, [route.page, ready]);
-  const chooser = route.page === 'workbench' && !route.backend && !route.thread && !!deviceSession.host;
-  const workspaceRoute = route.page === 'workbench' || route.page === 'pair' ? route : workbenchRoute.current;
-  const backendId = workspaceRoute.backend ?? DEFAULT_BACKEND;
-  const [selectedBackend, setSelectedBackend] = useState(deviceSession.backendId);
-  useEffect(() => {
-    deviceSession.selectBackend(backendId);
-    setSelectedBackend(backendId);
-  }, [backendId]);
-  const activeWorkspace = route.page === 'workbench' || route.page === 'pair';
-  const root =
-    ['messages', 'contacts', 'workbench', 'me'].includes(route.page) && !route.thread && !route.conversation;
-  const messagingPage = ['messages', 'contacts', 'profile', 'integrations'].includes(route.page);
-  const showNavigation = route.page !== 'pair';
-  const activeModule =
-    route.page === 'messages' || route.page === 'contacts' || route.page === 'workbench'
-      ? route.page
-      : route.page === 'integrations'
-        ? 'contacts'
-        : 'me';
-  const back = () => backTo(parentRoute(route), navigate);
-  return (
-    <AccountSecurity>
-      <div
-        className={`app-shell ${root ? 'shell-root' : 'shell-detail'} ${showNavigation ? 'has-navigation' : ''}`}
-      >
-        <div className="shell-content">
-          {chooser && <BackendChooser key={hostId} navigate={navigate} />}
-          {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
-            <section className="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
-              <Suspense fallback={<PageLoading label="正在打开工作台…" />}>
-                <PageBoundary page="workbench" backLabel="返回消息" onBack={() => navigate(resumeMessages())}>
-                  <AgentWorkspace
-                    key={`${hostId || 'unpaired'}:${backendId}`}
-                    active={activeWorkspace}
-                    route={workspaceRoute}
-                    navigate={navigate}
-                    onBusy={setBusy}
-                  />
-                </PageBoundary>
-              </Suspense>
-            </section>
-          )}
-          {activeWorkspace && !ready && (
-            <div className="page-loading" role="status">
-              正在打开…
-            </div>
-          )}
-          {route.page === 'pair' && (
-            <button className="pair-back icon-button" aria-label="返回" onClick={back}>
-              <Icon name="back" />
-            </button>
-          )}
-          {messagingPage && (
-            <Suspense fallback={<PageLoading />}>
-              <PageBoundary
-                key={route.page}
-                page={route.page}
-                backLabel="返回工作台"
-                onBack={() => navigate({ page: 'workbench' })}
-              >
-                <MessagingPages route={route} navigate={navigate} />
-              </PageBoundary>
-            </Suspense>
-          )}
-          {!activeWorkspace && !messagingPage && (
-            <Suspense fallback={<PageLoading />}>
-              <PageBoundary
-                key={route.page}
-                page={route.page}
-                backLabel="返回工作台"
-                onBack={() => navigate({ page: 'workbench' })}
-              >
-                <MePages
-                  route={route}
-                  navigate={navigate}
-                  back={back}
-                  hosts={hosts}
-                  hostId={hostId}
-                  busy={busy}
-                  refreshHosts={refreshHosts}
-                />
-              </PageBoundary>
-            </Suspense>
-          )}
-          {error && (activeWorkspace || route.page === 'devices') && (
-            <p className="shell-error" role="alert">
-              {error}
-            </p>
-          )}
-          {accountSyncError && (
-            <p className="shell-error" role="status">
-              {accountSyncError}
-            </p>
-          )}
-        </div>
-        {showNavigation && (
-          <nav className="bottom-navigation" aria-label="主要功能">
-            <button
-              className="shell-account"
-              aria-label={user ? `我的账号：${user.displayName}` : '登录账号'}
-              title={user?.displayName ?? '登录账号'}
-              onClick={() => navigate({ page: 'me' })}
+  };
+  const selectedBackendState = shallowRef(deviceSession.backendId);
+  const setSelectedBackend = writeRef(selectedBackendState);
+  const afterRender = watchRender();
+  const watchItem = watchRender();
+  const watchRoute = watchRender();
+  const watchError = watchRender();
+  const watchInterval = watchRender();
+  const watchRoute2 = watchRender();
+  const watchSelectedBackend = watchRender();
+  return () => {
+    afterRender(() => {
+      window.dispatchEvent(new Event('pocket:app-ready'));
+    }, []);
+    const { conversations, loading: accountLoading, user } = useMessaging();
+    const unread = conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
+    const route = routeState.value;
+
+    const accountId = user?.id;
+    const ready = readyState.value;
+    const hosts = hostsState.value;
+    const hostId = hostIdState.value;
+    const busy = busyState.value;
+    const error = errorState.value;
+    const workspaceVisited = workspaceVisitedState.value;
+
+    watchItem(() => {
+      if (
+        accountId &&
+        route.page === 'messages' &&
+        route.conversation &&
+        conversations.some(({ id }) => id === route.conversation)
+      ) {
+        lastChat.current = { account: accountId, id: route.conversation };
+        try {
+          sessionStorage.setItem(`pocket-last-chat:${accountId}`, route.conversation);
+        } catch {}
+      }
+    }, [accountId, route.page, route.conversation, conversations]);
+    function resumeMessages(): AppRoute {
+      let id = lastChat.current?.account === accountId ? lastChat.current?.id : undefined;
+      if (accountId && !id) {
+        try {
+          id = sessionStorage.getItem(`pocket-last-chat:${accountId}`) ?? undefined;
+        } catch {}
+      }
+      return id && conversations.some((chat) => chat.id === id)
+        ? { page: 'messages', conversation: id }
+        : { page: 'messages' };
+    }
+    watchRoute(() => {
+      const pop = () => {
+        const next = readRoute(new URL(location.href));
+        if (next.page === 'workbench') workbenchRoute.current = next;
+        setRoute(next);
+        if (next.page === 'workbench' || next.page === 'pair') setWorkspaceVisited(true);
+      };
+      window.addEventListener('popstate', pop);
+      return () => window.removeEventListener('popstate', pop);
+    }, []);
+
+    watchError(() => {
+      if (accountLoading) return;
+      onAccountSessionChange(() => void refreshHosts());
+      void deviceSession
+        .init()
+        .then(refreshHosts)
+        .catch(() => setError('无法读取本机配对，请检查浏览器存储权限'))
+        .finally(() => setReady(true));
+      return deviceSession.onChange(() => void refreshHosts().catch(() => {}));
+    }, [refreshHosts, accountLoading, user?.id]);
+    watchInterval(() => {
+      if (!user?.encrypted) return;
+      const sync = () => {
+        if (document.visibilityState !== 'hidden')
+          void syncAccountHosts(messaging.account)
+            .then(refreshHosts)
+            .catch(() => {});
+      };
+      const timer = setInterval(sync, 30000);
+      window.addEventListener('focus', sync);
+      return () => {
+        clearInterval(timer);
+        window.removeEventListener('focus', sync);
+      };
+    }, [user?.id, user?.encrypted, refreshHosts]);
+    watchRoute2(() => {
+      if (ready && route.page !== 'pair') void deviceSession.init().catch(() => {});
+    }, [route.page, ready]);
+    const chooser = route.page === 'workbench' && !route.backend && !route.thread && !!deviceSession.host;
+    const workspaceRoute =
+      route.page === 'workbench' || route.page === 'pair' ? route : workbenchRoute.current;
+    const backendId = workspaceRoute.backend ?? DEFAULT_BACKEND;
+    const selectedBackend = selectedBackendState.value;
+    watchSelectedBackend(() => {
+      deviceSession.selectBackend(backendId);
+      setSelectedBackend(backendId);
+    }, [backendId]);
+    const activeWorkspace = route.page === 'workbench' || route.page === 'pair';
+    const root =
+      ['messages', 'contacts', 'workbench', 'me'].includes(route.page) &&
+      !route.thread &&
+      !route.conversation;
+    const messagingPage = ['messages', 'contacts', 'profile', 'integrations'].includes(route.page);
+    const showNavigation = route.page !== 'pair';
+    const activeModule =
+      route.page === 'messages' || route.page === 'contacts' || route.page === 'workbench'
+        ? route.page
+        : route.page === 'integrations'
+          ? 'contacts'
+          : 'me';
+    const back = () => backTo(parentRoute(route), navigate);
+    return (
+      <AccountSecurity>
+        {() => (
+          <>
+            <div
+              class={`app-shell ${root ? 'shell-root' : 'shell-detail'} ${showNavigation ? 'has-navigation' : ''}`}
             >
-              {user ? <Avatar user={user} /> : <Icon name="user" />}
-            </button>
-            {modules.map((module) => (
-              <button
-                key={module.id}
-                aria-current={activeModule === module.id ? 'page' : undefined}
-                onClick={() =>
-                  navigate(
-                    module.id === 'workbench'
-                      ? workbenchRoute.current
-                      : module.id === 'messages'
-                        ? route.page === 'messages'
-                          ? route
-                          : resumeMessages()
-                        : { page: module.id },
-                  )
-                }
-              >
-                <Icon name={module.icon} size={24} />
-                <span>{module.title}</span>
-                {module.id === 'messages' && unread > 0 && (
-                  <b className="navigation-unread" aria-hidden="true">
-                    {unread > 99 ? '99+' : unread}
-                  </b>
+              <div class="shell-content">
+                {chooser && <BackendChooser key={hostId} navigate={navigate} />}
+                {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
+                  <section class="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
+                    <Suspense timeout={0}>
+                      {{
+                        fallback: () => <PageLoading label="正在打开工作台…" />,
+                        default: () => (
+                          <>
+                            <PageBoundary
+                              page="workbench"
+                              backLabel="返回消息"
+                              onBack={() => navigate(resumeMessages())}
+                            >
+                              {() => (
+                                <>
+                                  <AgentWorkspace
+                                    key={`${hostId || 'unpaired'}:${backendId}`}
+                                    active={activeWorkspace}
+                                    route={workspaceRoute}
+                                    navigate={navigate}
+                                    onBusy={setBusy}
+                                  />
+                                </>
+                              )}
+                            </PageBoundary>
+                          </>
+                        ),
+                      }}
+                    </Suspense>
+                  </section>
                 )}
-              </button>
-            ))}
-          </nav>
+                {activeWorkspace && !ready && (
+                  <div class="page-loading" role="status">
+                    正在打开…
+                  </div>
+                )}
+                {route.page === 'pair' && (
+                  <button class="pair-back icon-button" aria-label="返回" onClick={back}>
+                    <Icon name="back" />
+                  </button>
+                )}
+                {messagingPage && (
+                  <Suspense timeout={0}>
+                    {{
+                      fallback: () => <PageLoading />,
+                      default: () => (
+                        <>
+                          <PageBoundary
+                            key={route.page}
+                            page={route.page}
+                            backLabel="返回工作台"
+                            onBack={() => navigate({ page: 'workbench' })}
+                          >
+                            {() => (
+                              <>
+                                <MessagingPages route={route} navigate={navigate} />
+                              </>
+                            )}
+                          </PageBoundary>
+                        </>
+                      ),
+                    }}
+                  </Suspense>
+                )}
+                {!activeWorkspace && !messagingPage && (
+                  <Suspense timeout={0}>
+                    {{
+                      fallback: () => <PageLoading />,
+                      default: () => (
+                        <>
+                          <PageBoundary
+                            key={route.page}
+                            page={route.page}
+                            backLabel="返回工作台"
+                            onBack={() => navigate({ page: 'workbench' })}
+                          >
+                            {() => (
+                              <>
+                                <MePages
+                                  route={route}
+                                  navigate={navigate}
+                                  back={back}
+                                  hosts={hosts}
+                                  hostId={hostId}
+                                  busy={busy}
+                                  refreshHosts={refreshHosts}
+                                />
+                              </>
+                            )}
+                          </PageBoundary>
+                        </>
+                      ),
+                    }}
+                  </Suspense>
+                )}
+                {error && (activeWorkspace || route.page === 'devices') && (
+                  <p class="shell-error" role="alert">
+                    {error}
+                  </p>
+                )}
+                {accountSyncError && (
+                  <p class="shell-error" role="status">
+                    {accountSyncError}
+                  </p>
+                )}
+              </div>
+              {showNavigation && (
+                <nav class="bottom-navigation" aria-label="主要功能">
+                  <button
+                    class="shell-account"
+                    aria-label={user ? `我的账号：${user.displayName}` : '登录账号'}
+                    title={user?.displayName ?? '登录账号'}
+                    onClick={() => navigate({ page: 'me' })}
+                  >
+                    {user ? <Avatar user={user} /> : <Icon name="user" />}
+                  </button>
+                  {modules.map((module) => (
+                    <button
+                      key={module.id}
+                      aria-current={activeModule === module.id ? 'page' : undefined}
+                      onClick={() =>
+                        navigate(
+                          module.id === 'workbench'
+                            ? workbenchRoute.current
+                            : module.id === 'messages'
+                              ? route.page === 'messages'
+                                ? route
+                                : resumeMessages()
+                              : { page: module.id },
+                        )
+                      }
+                    >
+                      <Icon name={module.icon} size={24} />
+                      <span>{module.title}</span>
+                      {module.id === 'messages' && unread > 0 && (
+                        <b class="navigation-unread" aria-hidden="true">
+                          {unread > 99 ? '99+' : unread}
+                        </b>
+                      )}
+                    </button>
+                  ))}
+                </nav>
+              )}
+            </div>
+          </>
         )}
-      </div>
-    </AccountSecurity>
-  );
-}
+      </AccountSecurity>
+    );
+  };
+});

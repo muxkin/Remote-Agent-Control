@@ -1,44 +1,49 @@
-import type { ReactNode } from 'react';
+import { tsxComponent } from './tsx-component';
+import { type VNodeChild } from 'vue';
+
 import { Icon } from './Icon';
 
-export function OutgoingContent({
-  text,
-  files,
-  children,
-}: {
+export const OutgoingContent = tsxComponent(function OutgoingContent(_props: {
   text: string;
   files: { id: string; name: string }[];
-  children?: ReactNode;
+  children?: VNodeChild;
 }) {
-  return (
-    <div className="outgoing-content">
-      {children}
-      {text && <div className="outgoing-text">{text}</div>}
-      {!!files.length && (
-        <ul className="outgoing-files">
-          {files.map((file) => (
-            <li key={file.id}>
-              <Icon name="attach" size={15} />
-              <span>{file.name}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
+  return ({ text, files, children }) => {
+    return (
+      <div class="outgoing-content">
+        {children}
+        {text && <div class="outgoing-text">{text}</div>}
+        {!!files.length && (
+          <ul class="outgoing-files">
+            {files.map((file) => (
+              <li key={file.id}>
+                <Icon name="attach" size={15} />
+                <span>{file.name}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  };
+});
 
-export function OutgoingStatus({ activity, children }: { activity?: string; children?: ReactNode }) {
-  return (
-    <div className="outgoing-status">
-      {activity ? (
-        <span role="status">
-          <span className="sending-spinner" aria-hidden="true" />
-          {activity}
-        </span>
-      ) : (
-        children
-      )}
-    </div>
-  );
-}
+export const OutgoingStatus = tsxComponent(function OutgoingStatus(_props: {
+  activity?: string;
+  children?: VNodeChild;
+}) {
+  return ({ activity, children }) => {
+    return (
+      <div class="outgoing-status">
+        {activity ? (
+          <span role="status">
+            <span class="sending-spinner" aria-hidden="true" />
+            {activity}
+          </span>
+        ) : (
+          children
+        )}
+      </div>
+    );
+  };
+});

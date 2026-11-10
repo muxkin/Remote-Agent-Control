@@ -1,10 +1,10 @@
-import type { ComponentProps } from 'react';
-import type { Icon } from '../Icon';
+import type { IconName } from '../icon-paths';
+
 /** Built-in modules are shipped code. No arbitrary remote JavaScript or desktop RPC. */
 export const modules: {
   id: 'messages' | 'contacts' | 'workbench' | 'me';
   title: string;
-  icon: ComponentProps<typeof Icon>['name'];
+  icon: IconName;
 }[] = [
   { id: 'messages', title: '消息', icon: 'chat' },
   { id: 'contacts', title: '联系人', icon: 'contacts' },

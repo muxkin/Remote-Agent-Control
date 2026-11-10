@@ -1,6 +1,6 @@
 # 前端模块：消息、联系人、工作台、我的
 
-前端继续使用 React、Vite 和 TypeScript。应用壳承载多个功能模块，复用已有输入框、消息渲染和设备通信；不为每个 Agent 创建另一套前端。
+前端使用 Vue 3、Vite 和 TypeScript。组件采用 Vue 单文件组件（.vue）或 Vue TSX，两者均由 Vue 渲染。各 Agent 共享应用壳、输入框、消息渲染和设备通信。
 
 ## 页面与导航
 
