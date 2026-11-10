@@ -6,7 +6,7 @@ use crate::{
     files::{Attachment, Download},
     gateway::{Database, Packet, reply, reply_packet},
     history_media,
-    plugins::{Adapter, Delivery, Subscription, Write},
+    plugins::{Adapter, Control, CreationSettings, Delivery, ModelSettings, Subscription, Write},
     queue, requests, settings,
     state::Device,
 };
@@ -578,8 +578,39 @@ impl DeviceSession {
 
     fn plugin_write(&self, plugin: Arc<dyn Adapter>, method: &str, call: &Value) -> Result<Value> {
         let thread = plugin_thread(&call["params"]["id"])?;
-        let (request, action) =
-            serde_json::from_value::<PluginRequest>(call["body"].clone())?.parse(method)?;
+        let (request, action) = match method {
+            "settings.update" => {
+                let mut body = call["body"].clone();
+                let fields = body.as_object_mut().context("DSH 模型设置无效")?;
+                let request =
+                    serde_json::from_value(fields.remove("requestId").unwrap_or_default())?;
+                ensure!(
+                    fields.contains_key("expectedModel") && fields.contains_key("expectedEffort"),
+                    "DSH 模型状态缺失"
+                );
+                (
+                    request,
+                    Write::Settings(serde_json::from_value::<ModelSettings>(body)?),
+                )
+            }
+            "control.execute" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct ControlRequest {
+                    request_id: Uuid,
+                    control: Control,
+                }
+                let body: ControlRequest = serde_json::from_value(call["body"].clone())?;
+                if matches!(&body.control, Control::Permission { .. }) {
+                    ensure!(
+                        call["body"]["control"].get("expected").is_some(),
+                        "DSH 权限状态缺失"
+                    );
+                }
+                (body.request_id, Write::Control(body.control))
+            }
+            _ => serde_json::from_value::<PluginRequest>(call["body"].clone())?.parse(method)?,
+        };
         let live = self
             .plugin_watches
             .get(&(plugin.id().to_owned(), thread.to_owned()))
@@ -660,9 +691,8 @@ impl DeviceSession {
                     Ok(Some(json!(operations)))
                 }
                 "message.send" | "turn.steer" | "turn.interrupt" | "thread.rename"
-                | "thread.create" | "queue.add" | "queue.remove" => {
-                    self.plugin_write(plugin, method, &call).map(Some)
-                }
+                | "thread.create" | "queue.add" | "queue.remove" | "settings.update"
+                | "control.execute" => self.plugin_write(plugin, method, &call).map(Some),
                 _ => plugin.read(method, &call["params"], &call["query"]).await,
             };
         }
@@ -1058,6 +1088,11 @@ struct PluginRequest {
     title: Option<String>,
     prompt: Option<String>,
     project_id: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+    permission: Option<String>,
+    agent_preset: Option<String>,
+    plan: Option<bool>,
     expected_queue_fingerprint: Option<String>,
     message_id: Option<String>,
     upload_ids: Option<Vec<Uuid>>,
@@ -1089,9 +1124,16 @@ impl PluginRequest {
                 .map(str::to_owned)
                 .context("当前回合无效")
         };
+        let settings = CreationSettings {
+            model: self.model,
+            thinking: self.thinking,
+            permission: self.permission,
+            preset: self.agent_preset,
+            plan: self.plan,
+        };
         if method != "thread.create" {
             ensure!(
-                self.prompt.is_none() && self.project_id.is_none(),
+                self.prompt.is_none() && self.project_id.is_none() && settings.is_empty(),
                 "DSH 请求参数无效"
             );
         }
@@ -1182,6 +1224,7 @@ impl PluginRequest {
                     title,
                     prompt: text(self.prompt, 16_000)?,
                     project,
+                    settings,
                 }
             }
             _ => anyhow::bail!("DSH 请求参数无效"),

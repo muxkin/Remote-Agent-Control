@@ -15,6 +15,14 @@ import { apiCall } from '../../src/shared/rpc.js';
 import { createIdentity } from '../../src/shared/secure-channel.js';
 
 const state = await mkdtemp(join(tmpdir(), 'native-dsh-smoke-'));
+const modelId = (model: string) => JSON.stringify(['fixture', model]);
+const defaultProjections = () => ({
+  modelSelection: { next: { provider: 'fixture', model: 'base' } },
+  permissions: { currentValue: 'ask' },
+  agentPreset: 'standard',
+  plan: { active: false },
+  turnOutline: [],
+});
 const instances = ['dsh-one', 'dsh-two'].map((id) => ({
   id,
   token: randomBytes(16).toString('hex'),
@@ -22,6 +30,9 @@ const instances = ['dsh-one', 'dsh-two'].map((id) => ({
   created: new Map<string, string>(),
   inbox: [] as { id: string; content: { type: string; text: string }[] }[],
   followers: new Map<WebSocket, string>(),
+  controls: new Map<WebSocket, string>(),
+  projections: new Map<string, Record<string, unknown>>([['shared', defaultProjections()]]),
+  projectionSeq: 1,
   calls: [] as { method: string; request: any }[],
   records: [
     {
@@ -55,7 +66,7 @@ const dsh = createServer(async (request, response) => {
   for await (const chunk of request) chunks.push(chunk);
   const rpc = JSON.parse(Buffer.concat(chunks).toString());
   assert.equal(path.pathname, '/api/' + rpc.method);
-  const args = rpc.payload.args.request;
+  const args = rpc.payload.args.request ?? rpc.payload.args;
   let value;
   switch (rpc.method) {
     case 'session/list':
@@ -74,9 +85,84 @@ const dsh = createServer(async (request, response) => {
       assert.equal(args.workspaceId, 'work-' + instance.id);
       const id = 'created-' + args.sessionId;
       instance.created.set(id, '新会话');
+      instance.projections.set(id, { ...defaultProjections(), agentPreset: args.agentPreset ?? 'standard' });
       value = { sessionId: id };
       break;
     }
+    case 'session/projections':
+      assert(instance.projections.has(args.sessionId));
+      value = { kind: 'sequenced', ...baseline(instance, args.sessionId) };
+      break;
+    case 'session/modelCatalog':
+      assert.deepEqual(args, {});
+      value = {
+        groups: [
+          {
+            id: 'fixture',
+            name: 'Fixture',
+            models: [
+              { id: 'base', name: 'Base' },
+              {
+                id: 'advanced',
+                name: 'Advanced',
+                reasoning: { efforts: [{ id: 'high' }], defaultEffort: 'high' },
+              },
+              { id: 'drop', name: 'Drop response' },
+            ],
+          },
+        ],
+      };
+      break;
+    case 'session/selectModel': {
+      const { sessionId, ...selected } = args;
+      assert.equal(selected.provider, 'fixture');
+      project(instance, sessionId, 'modelSelection', { next: selected });
+      if (selected.model === 'drop') {
+        instance.calls.push({ method: rpc.method, request: args });
+        return response.destroy();
+      }
+      value = { selected };
+      break;
+    }
+    case 'permissionPresets/catalog':
+      assert.deepEqual(args, {});
+      value = {
+        defaultPreset: 'ask',
+        options: [
+          { value: 'ask', name: 'Ask' },
+          { value: 'restricted', name: 'Restricted' },
+          { value: 'ask\n/plan', name: 'Invalid preset identifier' },
+        ],
+      };
+      break;
+    case 'agentPresets/list':
+      value = {
+        presets: [
+          { id: 'standard', isDefault: true },
+          { id: 'custom', isDefault: false },
+          { id: 'broken', isDefault: false, broken: 'unavailable' },
+        ],
+      };
+      break;
+    case 'agentPresets/select':
+      assert.equal(args.agentPreset, 'custom');
+      project(instance, args.agentId, 'agentPreset', args.agentPreset);
+      value = args.agentPreset;
+      break;
+    case 'commands/list':
+      assert(instance.projections.has(args.agentId));
+      value = [{ name: 'permission' }, { name: 'plan' }];
+      break;
+    case 'commands/execute':
+      assert.deepEqual(args.submittedAttachments, []);
+      if (args.line === '/permission restricted' || args.line === '/permission ask') {
+        project(instance, args.agentId, 'permissions', { currentValue: args.line.split(' ')[1] });
+      } else {
+        assert(['/plan', '/plan off'].includes(args.line));
+        project(instance, args.agentId, 'plan', { active: args.line === '/plan' });
+      }
+      value = { commandId: randomUUID(), result: { kind: 'success' } };
+      break;
     case 'session/prompt':
       assert(args.sessionId === 'shared' || instance.created.has(args.sessionId));
       if (['lost response', 'lost initial response'].includes(args.content[0].text)) {
@@ -158,6 +244,25 @@ dshSocket.on('connection', (socket, request) => {
       );
       return;
     }
+    if (frame.endpoint === 'session/control') {
+      assert.deepEqual(frame.payload.args, {});
+      instance.controls.set(socket, frame.streamId);
+      socket.send(
+        JSON.stringify({
+          type: 'item',
+          streamId: frame.streamId,
+          value: {
+            type: 'baseline',
+            value: {
+              projections: Object.fromEntries(
+                [...instance.projections.keys()].map((id) => [id, baseline(instance, id)]),
+              ),
+            },
+          },
+        }),
+      );
+      return;
+    }
     assert.equal(frame.endpoint, 'session/follow');
     const id = frame.payload.args.request.address.sessionId;
     const isShared = id === 'shared';
@@ -171,7 +276,9 @@ dshSocket.on('connection', (socket, request) => {
           type: 'snapshot',
           header: { id, version: 4, cwd: '/fixture', createdAt: 123 },
           projections: {
+            ...baseline(instance, id),
             values: {
+              ...instance.projections.get(id),
               title: isShared ? instance.title : instance.created.get(id),
               inbox: { 'next-turn': isShared ? instance.inbox : [], 'next-step': [] },
             },
@@ -187,8 +294,29 @@ dshSocket.on('connection', (socket, request) => {
       instance.followers.set(socket, frame.streamId);
     }
   });
-  socket.once('close', () => instance.followers.delete(socket));
+  socket.once('close', () => {
+    instance.followers.delete(socket);
+    instance.controls.delete(socket);
+  });
 });
+function baseline(instance: typeof one, id: string) {
+  return {
+    values: instance.projections.get(id),
+    asOfSeq: Math.max(instance.records.length, instance.projectionSeq),
+  };
+}
+function projectionFrame(instance: typeof one, value: object) {
+  for (const [socket, streamId] of instance.controls)
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'item', streamId, value }));
+}
+function project(instance: typeof one, sessionId: string, key: string, value: unknown, publish = true) {
+  const projections = instance.projections.get(sessionId);
+  assert(projections);
+  projections[key] = value;
+  instance.projectionSeq = Math.max(instance.records.length, instance.projectionSeq) + 1;
+  if (publish)
+    projectionFrame(instance, { type: 'projection', sessionId, key, value, seq: instance.projectionSeq });
+}
 function push(instance: typeof one, value: object) {
   for (const [socket, streamId] of instance.followers)
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'item', streamId, value }));
@@ -431,6 +559,99 @@ try {
     await operation(rename, 'completed');
 
     await wait(() => views.get(one.id)?.thread.title === 'renamed');
+    const models = await rpc<{ models: { id: string; efforts: string[] }[] }>(one.id, '/models');
+    assert.deepEqual(
+      models.models.map(({ id, efforts }) => [id, efforts]),
+      [
+        [modelId('base'), ['default']],
+        [modelId('advanced'), ['high']],
+        [modelId('drop'), ['default']],
+      ],
+    );
+    const controls = await rpc<{ actions: string[]; presets: { id: string }[] }>(
+      one.id,
+      '/threads/shared/controls',
+    );
+    assert.deepEqual(controls.actions, ['permission', 'preset', 'plan']);
+    assert.deepEqual(
+      controls.presets.map(({ id }) => id),
+      ['standard', 'custom'],
+    );
+    await wait(() => views.get(one.id)?.thread.model === modelId('base'));
+    const modelChange = {
+      requestId: randomUUID(),
+      model: modelId('advanced'),
+      effort: 'high',
+      mode: 'default',
+      expectedMode: 'default',
+      serviceTier: 'default',
+      expectedServiceTier: null,
+      expectedModel: modelId('base'),
+      expectedEffort: 'default',
+    };
+    await rpc(one.id, '/threads/shared/settings', 'POST', modelChange);
+    await operation(modelChange.requestId, 'completed');
+    await wait(() => views.get(one.id)?.thread.reasoningEffort === 'high');
+    await rpc(one.id, '/threads/shared/settings', 'POST', modelChange);
+    assert.equal(one.calls.filter((call) => call.method === 'session/selectModel').length, 1);
+    assert.equal(views.get(two.id)?.thread.model, modelId('base'));
+    projectionFrame(one, {
+      type: 'projection',
+      sessionId: 'shared',
+      key: 'modelSelection',
+      seq: one.projectionSeq - 1,
+      value: defaultProjections().modelSelection,
+    });
+    project(one, 'shared', 'plan', { active: true }, false);
+    const staleModel = {
+      ...modelChange,
+      requestId: randomUUID(),
+      expectedModel: modelId('advanced'),
+      expectedEffort: 'high',
+    };
+    await rpc(one.id, '/threads/shared/settings', 'POST', staleModel);
+    await operation(staleModel.requestId, 'rejected');
+    assert.equal(one.calls.filter((call) => call.method === 'session/selectModel').length, 1);
+    assert.equal(views.get(one.id)?.thread.model, modelId('advanced'));
+
+    const control = async (value: object, expected = 'completed') => {
+      const requestId = randomUUID();
+      await rpc(one.id, '/threads/shared/control', 'POST', { requestId, control: value });
+      await operation(requestId, expected);
+    };
+    const permissionRevision = views.get(one.id)?.thread.controls.permissionRevision;
+    assert.equal(typeof permissionRevision, 'string');
+    await control({ action: 'permission', expected: 'ask', value: 'ask\n/plan' }, 'rejected');
+    await control({ action: 'permission', expected: 'restricted', value: 'ask' }, 'rejected');
+    assert(!one.calls.some((call) => call.method === 'commands/execute'));
+    await control({
+      action: 'permission',
+      expected: 'ask',
+      expectedRevision: permissionRevision,
+      value: 'restricted',
+    });
+    await wait(() => views.get(one.id)?.thread.controls.permission === 'restricted');
+    await control({ action: 'plan', enabled: false });
+    await wait(() => views.get(one.id)?.thread.controls.plan === false);
+    await control({ action: 'plan', enabled: true });
+    await wait(() => views.get(one.id)?.thread.mode === 'plan');
+    project(one, 'shared', 'turnOutline', [{ turn: 8 }], false);
+    await control({ action: 'preset', value: 'custom' }, 'rejected');
+    project(one, 'shared', 'turnOutline', []);
+    await control({ action: 'preset', value: 'custom' });
+    await wait(() => views.get(one.id)?.thread.controls.preset === 'custom');
+    const lostSetting = {
+      ...staleModel,
+      requestId: randomUUID(),
+      model: modelId('drop'),
+      effort: 'default',
+      mode: 'plan',
+      expectedMode: 'plan',
+    };
+    await rpc(one.id, '/threads/shared/settings', 'POST', lostSetting);
+    await operation(lostSetting.requestId, 'uncertain');
+    await wait(() => views.get(one.id)?.thread.model === modelId('drop'));
+
     const grouped = await rpc<{ threads: { id: string; projectId: string }[] }>(
       one.id,
       '/threads?project=work-dsh-one',
@@ -447,10 +668,29 @@ try {
       title: 'new session',
       prompt: 'initial',
       projectId: 'work-dsh-one',
+      model: modelId('advanced'),
+      thinking: 'high',
+      permission: 'restricted',
+      agentPreset: 'custom',
+      plan: true,
     });
     const completed = (await operation(create, 'completed')) as { resultThreadId?: string };
     assert.equal(completed.resultThreadId, 'created-' + create);
     assert.equal(one.created.get('created-' + create), 'new session');
+    assert.deepEqual(one.projections.get('created-' + create), {
+      modelSelection: { next: { provider: 'fixture', model: 'advanced', reasoningEffort: 'high' } },
+      permissions: { currentValue: 'restricted' },
+      agentPreset: 'custom',
+      plan: { active: true },
+      turnOutline: [],
+    });
+    const createOrder = one.calls
+      .filter(
+        ({ request }) => request.sessionId === 'created-' + create || request.agentId === 'created-' + create,
+      )
+      .map(({ method }) => method);
+    assert.equal(createOrder.at(-1), 'session/prompt');
+    assert(createOrder.indexOf('session/selectModel') < createOrder.indexOf('session/prompt'));
     const partial = randomUUID();
     await rpc(one.id, '/threads/new/create', 'POST', {
       requestId: partial,
@@ -478,6 +718,13 @@ try {
     });
     remove = listen();
     await watch(one.id);
+    await rpc(one.id, '/threads/shared/settings', 'POST', lostSetting);
+    await operation(lostSetting.requestId, 'uncertain');
+    assert.equal(
+      one.calls.filter(({ method, request }) => method === 'session/selectModel' && request.model === 'drop')
+        .length,
+      1,
+    );
     await rpc(one.id, '/threads/shared/messages', 'POST', { requestId: lost, text: 'lost response' });
     await operation(lost, 'uncertain');
     assert.equal(one.calls.length, restartCount);
@@ -501,6 +748,7 @@ try {
     await watch(one.id);
     assert.equal(views.get(one.id)?.thread.canSend, false);
     assert.equal((await rpc<{ writesEnabled: boolean }>(one.id, '/status')).writesEnabled, false);
+    assert.deepEqual((await rpc<{ actions: string[] }>(one.id, '/threads/shared/controls')).actions, []);
     const blocked = randomUUID();
     const before = one.calls.length;
     await rpc(one.id, '/threads/shared/messages', 'POST', {
@@ -509,12 +757,14 @@ try {
     });
     await operation(blocked, 'rejected');
     assert.equal(one.calls.length, before);
+    await control({ action: 'plan', enabled: false }, 'rejected');
+    assert.equal(one.calls.length, before);
   } finally {
     remove();
     session.close();
   }
   console.log(
-    'Rust DSH: isolated instances, live deltas and recovery, send/steer/cancel/rename/create, projects, queue, replay, uncertain restart recovery and migrated read-only policy passed.',
+    'Rust DSH: isolated instances, live sync, model/permission/preset/plan controls, configured creation, queue, replay, uncertain restart recovery and migrated read-only policy passed.',
   );
 } finally {
   await stop();

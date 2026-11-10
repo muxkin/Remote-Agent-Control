@@ -71,6 +71,75 @@ pub(crate) enum Write {
         title: Option<String>,
         prompt: String,
         project: Option<String>,
+        #[serde(skip_serializing_if = "CreationSettings::is_empty")]
+        settings: CreationSettings,
+    },
+    Settings(ModelSettings),
+    Control(Control),
+}
+
+#[derive(Clone, Default, Serialize)]
+pub(crate) struct CreationSettings {
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub permission: Option<String>,
+    pub preset: Option<String>,
+    pub plan: Option<bool>,
+}
+
+impl CreationSettings {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.thinking.is_none()
+            && self.permission.is_none()
+            && self.preset.is_none()
+            && self.plan.is_none()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ModelSettings {
+    pub model: String,
+    pub effort: String,
+    pub mode: Option<Mode>,
+    pub service_tier: Option<String>,
+    pub expected_service_tier: Option<String>,
+    pub expected_mode: Option<Mode>,
+    pub expected_model: Option<String>,
+    pub expected_effort: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum Mode {
+    Default,
+    Plan,
+}
+
+impl Mode {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum Control {
+    Permission {
+        value: String,
+        expected: Option<String>,
+        #[serde(rename = "expectedRevision")]
+        expected_revision: Option<String>,
+    },
+    Preset {
+        value: String,
+    },
+    Plan {
+        enabled: bool,
     },
 }
 
@@ -84,6 +153,8 @@ impl Write {
             Self::RemoveQueued { .. } => "queue-remove",
             Self::Rename { .. } => "rename",
             Self::Create { .. } => "create",
+            Self::Settings(_) => "settings",
+            Self::Control(_) => "control",
         }
     }
 }

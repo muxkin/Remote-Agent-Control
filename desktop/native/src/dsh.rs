@@ -26,10 +26,18 @@ use url::{Host, Url};
 use uuid::Uuid;
 
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
-const READS: [&str; 2] = ["session/list", "session/page"];
+const READS: &[&str] = &[
+    "session/list",
+    "session/page",
+    "session/projections",
+    "session/modelCatalog",
+    "permissionPresets/catalog",
+    "agentPresets/list",
+    "commands/list",
+];
 
 #[derive(Clone)]
-struct Session {
+pub(crate) struct Session {
     cookie: String,
     stream: Url,
     obtained: Instant,
@@ -167,13 +175,18 @@ impl Dsh {
         }
     }
 
-    async fn call(&self, endpoint: &str, args: Value) -> Result<Value> {
+    pub(crate) async fn call(&self, endpoint: &str, args: Value) -> Result<Value> {
         ensure!(READS.contains(&endpoint), "不支持此 DSH 查询");
         let session = self.authenticate().await?;
         self.exchange(&session, endpoint, args).await
     }
 
-    async fn exchange(&self, session: &Session, endpoint: &str, args: Value) -> Result<Value> {
+    pub(crate) async fn exchange(
+        &self,
+        session: &Session,
+        endpoint: &str,
+        args: Value,
+    ) -> Result<Value> {
         let request = Uuid::new_v4();
         let mut response = self.http.post(self.base.join(&format!("api/{endpoint}"))?)
             .header(header::COOKIE, &session.cookie)
@@ -231,26 +244,16 @@ impl Dsh {
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_RESPONSE))
             .max_frame_size(Some(MAX_RESPONSE));
-        let stream = Uuid::new_v4().to_string();
-        let (mut socket, _) = connect_async_with_config(request, Some(config), true)
+        let (socket, _) = connect_async_with_config(request, Some(config), true)
             .await
             .map_err(|_| anyhow::anyhow!("无法打开 DSH 事件流"))?;
-        socket
-            .send(Message::Text(
-                json!({
-                    "type":"open", "streamId":stream, "endpoint":endpoint,
-                    "payload":{"args":args}
-                })
-                .to_string()
-                .into(),
-            ))
-            .await?;
-        socket
-            .send(Message::Text(
-                json!({"type":"end","streamId":stream}).to_string().into(),
-            ))
-            .await?;
-        Ok(Follow { socket, stream })
+        let mut follow = Follow {
+            socket,
+            stream: String::new(),
+            control: None,
+        };
+        follow.stream = follow.open(endpoint, args).await?;
+        Ok(follow)
     }
 
     async fn follow(&self, session: &Session, id: &str, live: bool) -> Result<Follow> {
@@ -307,14 +310,27 @@ impl Dsh {
         &self,
         session: &Session,
         request: Uuid,
-        title: Option<String>,
-        prompt: String,
-        project: Option<String>,
+        action: Write,
         created: &RecordCreated<'_>,
     ) -> Delivery {
+        let Write::Create {
+            title,
+            prompt,
+            project,
+            mut settings,
+        } = action
+        else {
+            unreachable!()
+        };
+        let Ok(selection) = self.creation_selection(&settings).await else {
+            return Delivery::Rejected("DSH 新会话设置不可用");
+        };
         let mut options = json!({"sessionId":request});
         if let Some(project) = project {
             options["workspaceId"] = json!(project);
+        }
+        if let Some(preset) = settings.preset.take() {
+            options["agentPreset"] = json!(preset);
         }
         let result = self
             .exchange(session, "session/create", json!({"request":options}))
@@ -328,6 +344,14 @@ impl Dsh {
             return Delivery::Uncertain;
         };
         if created(id).is_err() {
+            return Delivery::Uncertain;
+        }
+        if !self.initialize_controls(session, id, settings).await {
+            return Delivery::Uncertain;
+        }
+        if let Some(selection) = selection
+            && self.select_model(session, id, selection).await.is_err()
+        {
             return Delivery::Uncertain;
         }
         if let Some(title) = title {
@@ -420,6 +444,7 @@ impl Dsh {
         let (mut follow, mut timeline) = timeout(Duration::from_secs(10), async {
             let mut follow = self.follow(session, id, true).await?;
             let (frame, bytes) = follow.baseline(id).await?;
+            follow.control = Some(follow.open("session/control", json!({})).await?);
             Ok::<_, anyhow::Error>((follow, Timeline::snapshot(id, frame, bytes)?))
         })
         .await??;
@@ -441,7 +466,7 @@ impl Dsh {
                     timeline = Timeline::snapshot(id, frame, bytes)?;
                     break;
                 }
-                if timeline.advance(frame, bytes)? {
+                if timeline.advance(id, frame, bytes)? {
                     break;
                 }
             }
@@ -510,7 +535,7 @@ struct Workspace {
 }
 
 #[derive(Debug)]
-struct Refused;
+pub(crate) struct Refused;
 impl std::fmt::Display for Refused {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         out.write_str("DSH 拒绝请求")
@@ -521,9 +546,29 @@ impl std::error::Error for Refused {}
 struct Follow {
     socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     stream: String,
+    control: Option<String>,
 }
 
 impl Follow {
+    async fn open(&mut self, endpoint: &'static str, args: Value) -> Result<String> {
+        let stream = Uuid::new_v4().to_string();
+        self.socket
+            .send(Message::Text(
+                json!({
+                    "type":"open","streamId":stream,"endpoint":endpoint,"payload":{"args":args}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await?;
+        self.socket
+            .send(Message::Text(
+                json!({"type":"end","streamId":stream}).to_string().into(),
+            ))
+            .await?;
+        Ok(stream)
+    }
+
     async fn next(&mut self) -> Result<(Value, usize)> {
         let mut waiting_for_pong = false;
         loop {
@@ -542,11 +587,19 @@ impl Follow {
                 continue;
             };
             let mut frame: Value = serde_json::from_str(&packet)?;
-            if frame["streamId"] != self.stream {
+            let control = self
+                .control
+                .as_deref()
+                .is_some_and(|id| frame["streamId"] == id);
+            if !control && frame["streamId"] != self.stream {
                 continue;
             }
             ensure!(frame["type"] == "item", "DSH 事件流已结束");
-            return Ok((frame["value"].take(), packet.len()));
+            let mut value = frame["value"].take();
+            if control && value["type"] == "baseline" {
+                value["type"] = json!("control-baseline");
+            }
+            return Ok((value, packet.len()));
         }
     }
 
@@ -720,12 +773,12 @@ impl Adapter for Dsh {
             "skills",
             "plugins",
         ] {
-            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"))) {"experimental"} else {"unavailable"}}));
+            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"|"settings"))) {"experimental"} else {"unavailable"}}));
         }
         json!({"id":self.id,"name":self.name,"product":"dsh","version":self.version,"connected":connected,
         "profile":"rust-native","capabilities":capabilities,"presentation":{
-            "description":"DSH Web","creation":{"empty":false,"permission":"native","preset":false,"plan":false},
-            "plan":"none","fileReferences":false,"exportLog":false,"nativeCommands":false,
+            "description":"DSH Web","creation":{"empty":false,"permission":if self.read_only {"native"} else {"select"},"preset":!self.read_only,"plan":!self.read_only},
+            "plan":if self.read_only {"none"} else {"control"},"fileReferences":false,"exportLog":false,"nativeCommands":!self.read_only,
         }})
     }
     async fn status(&self) -> Value {
@@ -739,11 +792,19 @@ impl Adapter for Dsh {
             None
         };
         json!({"connected":connected,"writesEnabled":writable,"supportedVersion":self.version == "0.2.1-rc.5",
-            "reason":reason,"capabilities":{"send":writable,"steer":writable,"interrupt":writable,"newThread":writable,"queue":writable}})
+            "reason":reason,"capabilities":{"send":writable,"steer":writable,"interrupt":writable,"newThread":writable,"queue":writable,"modelSettings":writable}})
     }
     async fn read(&self, method: &str, params: &Value, query: &Value) -> Result<Option<Value>> {
         match method {
             "threads.list" => return self.threads(query).await.map(Some),
+            "models.list" => return self.models().await.map(Some),
+            "controls.read" => {
+                let id = params["id"]
+                    .as_str()
+                    .filter(|id| valid_thread(id))
+                    .context("DSH 会话标识无效")?;
+                return self.controls(id, self.read_only).await.map(Some);
+            }
             "projects.list" => {
                 let (rows, workspaces) = self.catalog().await?;
                 let mut counts = HashMap::new();
@@ -847,24 +908,21 @@ impl Adapter for Dsh {
         let view = live
             .and_then(|live| live.0.borrow().clone())
             .filter(|view| view.thread["synchronized"] == true);
-        if let Write::Create {
-            title,
-            prompt,
-            project,
-        } = action
-        {
+        if matches!(&action, Write::Create { .. }) {
             if thread != "new" && view.is_none() {
                 return Delivery::Rejected("DSH 会话尚未同步");
             }
-            return self
-                .create(&session, request, title, prompt, project, created)
-                .await;
+            return self.create(&session, request, action, created).await;
         }
         let Some(view) = view else {
             return Delivery::Rejected("DSH 会话尚未同步");
         };
         let active = view.thread["activeTurnId"].as_str();
         let (endpoint, args, accepted) = match action {
+            Write::Settings(settings) => {
+                return self.change_model(&session, thread, settings).await;
+            }
+            Write::Control(control) => return self.change_control(&session, thread, control).await,
             Write::Send { text } if active.is_none() => (
                 "session/prompt",
                 json!({"sessionId":thread,"requestId":request,"mode":"queue","content":[{"type":"text","text":text}]}),

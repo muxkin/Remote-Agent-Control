@@ -9,6 +9,7 @@ mod device;
 mod direct;
 mod dsh;
 mod dsh_live;
+mod dsh_settings;
 mod files;
 mod gateway;
 mod history_media;

@@ -1,4 +1,5 @@
 use crate::{
+    dsh_settings,
     plugins::{Observation, View},
     state::hash,
 };
@@ -16,6 +17,8 @@ const MAX_STREAM_TEXT: usize = 12_000;
 pub(crate) struct Timeline {
     header: Value,
     projections: Value,
+    projection_cut: i64,
+    projection_seq: HashMap<String, i64>,
     cursor: i64,
     records: Vec<Value>,
     durable: Durable,
@@ -133,7 +136,13 @@ impl Timeline {
             .transpose()?;
         Ok(Self {
             header: frame["header"].clone(),
-            projections: frame["projections"]["values"].clone(),
+            projections: frame["projections"]["values"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into(),
+            projection_cut: frame["projections"]["asOfSeq"].as_i64().unwrap_or(cursor),
+            projection_seq: HashMap::new(),
             cursor,
             durable: Durable::from_records(&records),
             records,
@@ -143,7 +152,7 @@ impl Timeline {
         })
     }
 
-    pub(crate) fn advance(&mut self, mut frame: Value, bytes: usize) -> Result<bool> {
+    pub(crate) fn advance(&mut self, thread: &str, mut frame: Value, bytes: usize) -> Result<bool> {
         match frame["type"].as_str() {
             Some("event") => {
                 let event = frame["event"].take();
@@ -216,9 +225,69 @@ impl Timeline {
                     return Ok(false);
                 }
             }
+            Some("control-baseline") => {
+                let baseline = &mut frame["value"]["projections"][thread];
+                if baseline.is_null() {
+                    return Ok(false);
+                }
+                let seq = baseline["asOfSeq"].as_i64().context("DSH 控制游标无效")?;
+                let Some(values) = baseline["values"].as_object_mut() else {
+                    return Ok(false);
+                };
+                let mut changed = false;
+                for &key in dsh_settings::PROJECTIONS {
+                    let previous = self
+                        .projection_seq
+                        .get(key)
+                        .copied()
+                        .unwrap_or(self.projection_cut);
+                    if seq >= previous {
+                        changed |= self.project(key, values.remove(key), seq);
+                    }
+                }
+                self.projection_cut = self.projection_cut.max(seq);
+                return Ok(changed);
+            }
+            Some("projection") if frame["sessionId"] == thread => {
+                let Some(key) = frame["key"]
+                    .as_str()
+                    .filter(|key| dsh_settings::PROJECTIONS.contains(key))
+                    .map(str::to_owned)
+                else {
+                    return Ok(false);
+                };
+                let seq = frame["seq"].as_i64().context("DSH 控制游标无效")?;
+                if seq
+                    <= self
+                        .projection_seq
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(self.projection_cut)
+                {
+                    return Ok(false);
+                }
+                return Ok(self.project(&key, Some(frame["value"].take()), seq));
+            }
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    fn project(&mut self, key: &str, value: Option<Value>, seq: i64) -> bool {
+        self.projection_seq.insert(key.to_owned(), seq);
+        let map = self
+            .projections
+            .as_object_mut()
+            .expect("DSH projections are an object");
+        match value {
+            Some(value) => {
+                map.get(key) != Some(&value) && {
+                    map.insert(key.to_owned(), value);
+                    true
+                }
+            }
+            None => map.remove(key).is_some(),
+        }
     }
 
     fn update_inbox(&mut self, data: &Value) -> Result<()> {
@@ -288,13 +357,16 @@ impl Timeline {
             })
             .collect();
         let queue_fingerprint = inbox.is_object().then(|| hash(&json!(queue).to_string()));
+        let selection = &self.projections["modelSelection"]["next"];
         View {
             thread: json!({
                 "id":id,"title":self.projections["title"].as_str().unwrap_or("新会话"),
                 "cwd":self.header["cwd"].as_str().unwrap_or_default(),
                 "updatedAt":self.header["createdAt"].as_i64().unwrap_or_default(),
                 "owner":writable,"synchronized":true,"runtimeStatus":if running {"running"} else {"idle"},
-                "revision":revision,"activeTurnId":turn,"model":null,"pendingRequests":0,"requests":[],
+                "revision":revision,"activeTurnId":turn,"model":dsh_settings::model(selection),
+                "reasoningEffort":dsh_settings::effort(selection),"mode":dsh_settings::mode(&self.projections),
+                "controls":dsh_settings::state(&self.projections),"pendingRequests":0,"requests":[],
                 "canSend":writable && !running,"canSteer":writable && running,"canInterrupt":writable && running,
                 "queuedMessages":queued,"queueFingerprint":queue_fingerprint,
                 "reason":if writable {Value::Null} else {json!("DSH 原生只读")},"projectId":null,"projectName":null,
