@@ -75,7 +75,7 @@ fn command(root: &Path, directory: &Path, origin: &str) -> std::process::Command
             child.env(target, value);
         }
     }
-    child.arg("--import").arg(root.join("scripts/env.mjs"));
+    child.args(["--import", "./scripts/env.mjs"]);
     child
 }
 

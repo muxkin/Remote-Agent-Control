@@ -30,7 +30,7 @@ try {
   await relay.app.listen({ host: '127.0.0.1', port: address.port });
   const child = spawn(
     join(root, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node'),
-    ['--import', join(root, 'scripts/env.mjs'), join(root, 'dist/server/main.js')],
+    ['--import', './scripts/env.mjs', join(root, 'dist/server/main.js')],
     {
       cwd: root,
       windowsHide: true,
