@@ -138,10 +138,19 @@ Codex 目录按 `POCKET_NATIVE_CODEX_HOME`、`CODEX_HOME`、`~/.codex` 的顺序
 | DSH 原生交互 | [DSH 验收](../scripts/desktop/native-dsh-smoke.ts)覆盖历史和工作区附件、发送和追加、审批和同步提问、模型权限和计划、技能、目标、反馈、ZIP 导出及断线恢复。 |
 | 独立插件 | [插件宿主验收](../scripts/desktop/native-plugin-smoke.ts)验证外部插件安装、故障恢复、在线切换及回滚。安装包验收还确认首次启动登记官方 Codex 和 DSH，随包升级后可以回滚并跨重启保留绑定。 |
 | 独立 Agent | [消息与通话验收](../scripts/desktop/native-rust-im-smoke.ts)验证复用旧身份和游标、新注册账号与旧客户端互通、流式回复、加密附件和审批。语音和视频通过 WebRTC 双向传输，Linux 另验证独立 `--im-call` 入口。 |
-| 安装与签名更新 | [安装器矩阵](../.github/workflows/desktop-native.yml)安装 DEB、挂载并检查 DMG、安装及卸载 Windows EXE。[更新验收](../scripts/desktop/native-rust-update-smoke.mjs)使用一次性发布密钥验证实际安装器交接和配对保留。Linux 另用归档的 v0.2.8 混合 DEB 验证过渡到 v0.3.34，保留配对并迁移自定义更新源。 |
+| 安装与签名更新 | [安装器矩阵](../.github/workflows/desktop-native.yml)安装 DEB、挂载并检查 DMG、安装及卸载 Windows EXE。[更新验收](../scripts/desktop/native-rust-update-smoke.mjs)使用一次性发布密钥验证实际安装器交接和配对保留。[混合版过渡验收](../scripts/desktop/native-hybrid-bridge-smoke.ts)使用归档的 v0.2.8 混合 DEB 验证过渡到 v0.3.35，保留配对、迁移自定义更新源并登记随包插件。 |
 | VPS/Node 和 Cloudflare | `npm test` 和 `npm run test:cf` 包含共享的中继协议用例。`npm run check:deployments` 用相同公开参数逐文件比较两端的前端输出。网关及独立 Agent 的验收入口支持通过 `POCKET_NATIVE_TEST_RELAY=cloudflare` 切换中继。 |
 
 验收中的 Codex Socket、Windows Named Pipe、DSH 及通话对端使用测试夹具。用户实际安装的桌面应用版本、自编插件和媒体处理器需要在各自环境验证。
+
+重跑混合版过渡验收时，在未安装适配器的一次性 Linux x64 容器或虚拟机中安装仓库测试依赖和 DEB 运行依赖，并启动系统 D-Bus 以供 PolicyKit 授权。以 root 从仓库根目录运行以下命令，传入归档的 v0.2.8 DEB、新版 DEB 和构建新版 DEB 所用的 Rust 二进制。旧版适配器的更新公钥只在该环境中替换为一次性测试公钥。测试结束后销毁该环境。
+
+```sh
+POCKET_QA_DISPOSABLE_INSTALL=1 node --import tsx scripts/desktop/native-hybrid-bridge-smoke.ts \
+  /path/to/AgentSpace-Native-0.2.8-linux-x64.deb \
+  /path/to/AgentSpace-Native-0.3.35-linux-x64.deb \
+  /path/to/agent-space-native
+```
 
 从仓库根目录执行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts <适配器路径>` 可复跑网关验收。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
 
