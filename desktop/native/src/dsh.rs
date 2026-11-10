@@ -837,6 +837,16 @@ impl Adapter for Dsh {
     fn id(&self) -> &str {
         &self.id
     }
+    fn validate_selection(&self, skills: &[String], plugins: &[String]) -> Result<()> {
+        ensure!(plugins.is_empty(), "DSH 不支持 Codex 插件");
+        ensure!(
+            skills
+                .iter()
+                .all(|name| crate::dsh_settings::skill_name(name)),
+            "DSH 技能选项无效"
+        );
+        Ok(())
+    }
     fn uploads_enabled(&self) -> bool {
         !self.read_only
     }
@@ -1071,6 +1081,7 @@ impl Adapter for Dsh {
                 text,
                 files,
                 skills,
+                ..
             } if active.is_none() => {
                 let Ok(text) = self.skill_prompt(thread, text, skills).await else {
                     return Delivery::Rejected("DSH 技能已失效，请重新选择");

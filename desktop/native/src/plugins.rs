@@ -16,6 +16,9 @@ use uuid::Uuid;
 #[async_trait]
 pub(crate) trait Adapter: Send + Sync {
     fn id(&self) -> &str;
+    fn validate_selection(&self, _skills: &[String], _plugins: &[String]) -> Result<()> {
+        Ok(())
+    }
     fn uploads_enabled(&self) -> bool;
     async fn info(&self) -> Value;
     async fn status(&self) -> Value;
@@ -73,6 +76,8 @@ pub(crate) enum Write {
         files: Vec<VerifiedUpload>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         skills: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        plugin_ids: Vec<String>,
     },
     Steer {
         expected: String,
@@ -241,6 +246,7 @@ struct Instance {
     id: String,
     name: String,
     plugin: String,
+    version: Option<String>,
     #[serde(default)]
     config: Value,
     #[serde(default)]
@@ -278,6 +284,7 @@ impl ConfigRow {
                 id,
                 name,
                 plugin: "@agent-remote/adapter-dsh".to_owned(),
+                version: None,
                 config: json!({"url":url,"version":version}),
                 secrets: HashMap::from([("token".to_owned(), token_env)]),
             }),
@@ -340,7 +347,7 @@ impl Registry {
             });
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
         for row in rows.into_iter().filter_map(ConfigRow::into_instance) {
-            if row.plugin != "@agent-remote/adapter-dsh" {
+            if row.id == "codex-local" && row.plugin == "@agent-remote/adapter-codex" {
                 continue;
             }
             ensure!(
@@ -351,8 +358,48 @@ impl Registry {
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
                     && (1..=160).contains(&row.name.len()),
-                "DSH 实例标识无效"
+                "插件实例标识无效"
             );
+            if row.plugin != "@agent-remote/adapter-dsh" {
+                let package = crate::plugin_catalog::Catalog::open(directory)
+                    .and_then(|catalog| catalog.bind(&row.id, &row.plugin, row.version.as_deref()))
+                    .ok()
+                    .flatten();
+                let mut config = row.config.as_object().cloned().unwrap_or_default();
+                for (key, variable) in row.secrets {
+                    ensure!(
+                        !variable.is_empty()
+                            && variable
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+                        "插件凭据变量无效"
+                    );
+                    let value = env::var(&variable)
+                        .ok()
+                        .or_else(|| secrets.get(&variable).cloned())
+                        .unwrap_or_default();
+                    config.insert(key, json!(value));
+                }
+                let private = directory
+                    .join("native-plugins")
+                    .join("instances")
+                    .join(&row.id);
+                let instance_read_only = read_only || config.get("readOnly") == Some(&json!(true));
+                let id = row.id;
+                let host = crate::plugin_host::Host::new(
+                    id.clone(),
+                    row.name,
+                    package,
+                    Value::Object(config),
+                    private,
+                    instance_read_only,
+                );
+                ensure!(
+                    plugins.insert(id, Arc::new(host)).is_none(),
+                    "插件实例标识重复"
+                );
+                continue;
+            }
             let token = if let Some(variable) = row.secrets.get("token") {
                 ensure!(
                     !variable.is_empty()

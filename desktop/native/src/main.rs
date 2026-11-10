@@ -16,6 +16,8 @@ mod files;
 mod gateway;
 mod history_media;
 mod operations;
+mod plugin_catalog;
+mod plugin_host;
 mod plugins;
 mod queue;
 mod reply_fork;
@@ -66,6 +68,9 @@ fn start() -> Result<()> {
         .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")))
         .context("无法定位状态目录")?;
     let directory = std::path::absolute(directory)?;
+    if arguments.first().is_some_and(|flag| flag == "--adapter") {
+        return plugin_catalog::cli(&directory, &arguments[1..]);
+    }
     if arguments
         .first()
         .is_some_and(|flag| flag == update::APPLY_FLAG)

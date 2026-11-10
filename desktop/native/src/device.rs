@@ -666,6 +666,7 @@ impl DeviceSession {
                 let scope = Scope::plugin(plugin.id(), thread);
                 serde_json::from_value::<PluginRequest>(call["body"].clone())?.parse(
                     method,
+                    plugin.as_ref(),
                     |ids| {
                         let store = self.db.lock().expect("database mutex poisoned");
                         ids.iter()
@@ -1229,21 +1230,22 @@ impl PluginRequest {
     fn parse(
         self,
         method: &str,
+        adapter: &dyn Adapter,
         resolve: impl FnOnce(&[Uuid]) -> Result<Vec<VerifiedUpload>>,
     ) -> Result<(Uuid, Write)> {
-        ensure!(
-            self.plugin_ids.as_ref().is_none_or(Vec::is_empty),
-            "DSH 不支持 Codex 插件"
-        );
         let skills = self.skill_ids.unwrap_or_default();
+        let plugin_ids = self.plugin_ids.unwrap_or_default();
         ensure!(
             skills.len() <= 10
-                && (skills.is_empty() || method == "message.send")
-                && skills
-                    .iter()
-                    .all(|name| crate::dsh_settings::skill_name(name)),
-            "DSH 技能选项无效"
+                && plugin_ids.len() <= 10
+                && ((skills.is_empty() && plugin_ids.is_empty()) || method == "message.send")
+                && skills.iter().chain(&plugin_ids).all(|name| {
+                    (1..=200).contains(&name.encode_utf16().count())
+                        && !name.chars().any(char::is_control)
+                }),
+            "插件工具选项无效"
         );
+        adapter.validate_selection(&skills, &plugin_ids)?;
         let uploads = self.upload_ids.as_deref().unwrap_or_default();
         ensure!(
             uploads.len() <= 10
@@ -1316,6 +1318,7 @@ impl PluginRequest {
                     text: prompt_text(self.text)?,
                     files,
                     skills,
+                    plugin_ids,
                 }
             }
             "turn.steer" if self.title.is_none() => Write::Steer {

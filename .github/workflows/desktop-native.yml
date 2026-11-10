@@ -121,6 +121,11 @@ jobs:
         env:
           POCKET_NATIVE_TEST_IPC: '1'
         run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }}
+      - name: Build the independent Rust plugin fixture
+        working-directory: desktop/native
+        run: cargo build --release --locked --no-default-features --example native-plugin-fixture
+      - name: Verify native plugin install, recovery and rollback
+        run: node --import tsx scripts/desktop/native-plugin-smoke.ts desktop/native/target/release/${{ matrix.binary }} desktop/native/target/release/examples/native-plugin-fixture${{ runner.os == 'Windows' && '.exe' || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: agent-space-native-${{ matrix.platform }}-${{ matrix.arch }}

@@ -2,7 +2,24 @@
 
 网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口；产品协议和系统连接器分别位于 `packages/adapter-codex`、`packages/adapter-dsh`。默认附带两款官方插件。每个配置实例有独立 Node 宿主、配置、状态目录与订阅；宿主只连接已有 Agent。
 
-本页描述 Node 网关的插件 SDK 与监督器。纯 Rust Ely 适配器使用独立 Rust 网关，复用 `instances.json` 配置独立的 DSH 实例，支持历史、实时回复、文本和附件发送、队列和会话设置。Rust 版当前通过编译期注册接入 DSH，第三方运行时插件宿主仍在迁移。 [原生安装与更新](DESKTOP_ADAPTER.md)
+纯 Rust Ely 适配器复用 `instances.json` 和设备配对。第三方插件使用原生进程，官方 Codex 与 DSH 目前由内建连接器提供。 [原生安装与更新](DESKTOP_ADAPTER.md)
+
+## Rust 原生插件
+
+将当前平台的自包含可执行文件与 `adapter.json` 放在同一目录。清单包含 `sdk: 1`、`name`、确切的 `version`、`product`、正整数 `stateVersion`、入口文件名 `entry` 和入口的十六进制 `sha256`。Windows 入口使用 `.exe`。安装会校验摘要和 SDK 握手。同名同版本包不可覆盖。
+
+```sh
+agent-space-native --adapter install /absolute/path/plugin-directory
+agent-space-native --adapter list
+agent-space-native --adapter upgrade another-agent my-agent-adapter@1.1.0
+agent-space-native --adapter rollback another-agent
+```
+
+实例沿用下方 `instances.json` 的 `id`、`name`、`plugin`、`version`、`config` 和 `secrets` 格式。首次启动绑定已安装的确切版本。之后以私有 registry 为准，升级和回滚在重启时应用，要求插件名称、产品及 `stateVersion` 一致。每个实例保留同一个私有状态目录。插件是本机受信任代码，进程隔离不等于安全沙箱。
+
+原生 SDK 使用标准 `Content-Length` 帧传递 JSON-RPC 2.0。请求在 `params.generation` 中带进程代次，响应在顶层回显代次与请求 ID。`adapter/check` 和 `adapter/initialize` 返回 `{ "sdk": 1 }`。初始化包含 `id`、`name`、`config`、`stateDirectory`、`readOnly`，只有该实例的凭据进入其 `config`。`adapter/status` 返回 `{info,status}`。`adapter/read` 接收共享只读方法和参数。`adapter/view` 返回 `{thread,messages,observations}`，网关在已订阅时读取快照。`adapter/write` 接收会话、请求 ID 和操作，返回 `{state,turnId?,resultThreadId?}`。`adapter/media` 与 `adapter/export` 可返回实例目录内的 `{path,name}`，文件由网关加密传输。进程退出后重建连接与快照，已发出的写操作保留原请求 ID。完整示例见 `desktop/native/examples/native-plugin-fixture.rs`。
+
+下面的安装、npm 发布和在线监督器说明适用于旧 Node 网关。
 
 ```mermaid
 flowchart LR
