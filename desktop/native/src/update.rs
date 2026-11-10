@@ -1,6 +1,7 @@
 use crate::{
     gateway::{Database, Snapshot},
     state::{lock_directory, now, private_directory, private_file},
+    update_preferences::{Preferences, https_base},
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -18,8 +19,8 @@ use std::{
 };
 use tokio::{
     io::AsyncWriteExt,
-    sync::{mpsc, watch},
-    time::{interval, sleep},
+    sync::{mpsc, oneshot, watch},
+    time::{interval, sleep_until},
 };
 use url::Url;
 use uuid::Uuid;
@@ -32,6 +33,12 @@ const KEY: &str = include_str!("../update-release.pub");
 const SPKI_HEADER: &[u8] = b"\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00";
 
 pub(crate) const APPLY_FLAG: &str = "--apply-native-update";
+
+pub(crate) enum UpdateCommand {
+    Check,
+    Install,
+    Configure(Preferences, oneshot::Sender<Result<()>>),
+}
 
 #[derive(Clone, Copy, PartialEq)]
 struct Target {
@@ -205,21 +212,11 @@ impl Drop for Client {
     }
 }
 
-fn feed(origin: &Url, target: Target) -> Result<Url> {
-    let base = match env::var("POCKET_NATIVE_UPDATE_BASE_URL") {
-        Ok(value) => origin.join(&value)?,
-        Err(env::VarError::NotPresent) => origin.join("/downloads/desktop/native/rust/")?,
-        Err(error) => return Err(error.into()),
-    };
-    ensure!(
-        base.scheme() == "https"
-            && base.username().is_empty()
-            && base.password().is_none()
-            && base.query().is_none()
-            && base.fragment().is_none(),
-        "原生更新源必须使用 HTTPS"
-    );
-    let mut result = base;
+fn feed(origin: &Url, target: Target, base: Option<&str>) -> Result<Url> {
+    let mut result = https_base(match base {
+        Some(value) => Url::parse(value)?,
+        None => origin.join("/downloads/desktop/native/rust/")?,
+    })?;
     result
         .path_segments_mut()
         .map_err(|_| anyhow::anyhow!("更新地址无效"))?
@@ -371,98 +368,181 @@ pub(crate) async fn run(
     directory: PathBuf,
     db: Database,
     gate: UpdateGate,
-    install: mpsc::Receiver<()>,
+    commands: mpsc::Receiver<UpdateCommand>,
     status: watch::Sender<Snapshot>,
 ) {
-    let Some(target) = target() else { return };
-    if env::var("POCKET_NATIVE_UPDATES").as_deref() == Ok("0")
-        || !crate::update_install::installed(&executable)
-    {
+    let unavailable = |message: &str| {
+        status.send_modify(|snapshot| snapshot.update = message.to_owned());
+    };
+    let Some(target) = target().filter(|_| crate::update_install::installed(&executable)) else {
+        unavailable("此版本需要手动更新");
+        return;
+    };
+    remove_expired_staging(&directory);
+    if env::var("POCKET_NATIVE_UPDATES").as_deref() == Ok("0") {
+        unavailable("自动更新已通过环境变量关闭");
         return;
     }
-    let Ok(base) = feed(&origin, target) else {
+    let Ok(preferences) = Preferences::load(&directory, &origin) else {
+        unavailable("无法读取更新设置，请检查状态目录及旧版配置");
         return;
     };
     let Ok(client) = client_builder().build() else {
+        unavailable("无法初始化更新连接");
         return;
     };
-    let source = UpdateSource {
+    Updater {
+        origin,
         client,
-        base,
         target,
-    };
-    run_ready(source, executable, directory, db, gate, install, status).await;
+        executable,
+        directory,
+        db,
+        gate,
+    }
+    .run(preferences, commands, status)
+    .await;
 }
 
-async fn run_ready(
-    source: UpdateSource,
+struct Updater {
+    origin: Url,
+    client: Http,
+    target: Target,
     executable: PathBuf,
     directory: PathBuf,
     db: Database,
     gate: UpdateGate,
-    mut install: mpsc::Receiver<()>,
-    status: watch::Sender<Snapshot>,
-) {
-    let manual = source.target.platform == "linux";
-    remove_expired_staging(&directory);
-    let mut checks = interval(CHECK_INTERVAL);
-    checks.tick().await;
-    sleep(Duration::from_secs(15)).await;
-    let mut staged = None;
-    let mut requested = false;
-    let mut apply = interval(Duration::from_secs(15));
-    let mut next = Some(stage(&source, &directory).await);
-    loop {
-        if let Some(result) = next.take() {
-            let message = match result {
-                Ok(Some(package)) => {
-                    let message = format!(
-                        "已下载 v{}，{}",
-                        package.release.version,
-                        if manual {
-                            "安装需要系统授权"
-                        } else {
-                            "等待连接空闲后安装"
-                        }
-                    );
-                    staged = Some(package);
-                    message
-                }
-                Ok(None) => "已是最新版本".into(),
-                Err(_) => "检查或下载更新失败，将在后台重试".into(),
-            };
+}
+
+impl Updater {
+    async fn run(
+        self,
+        mut preferences: Preferences,
+        mut commands: mpsc::Receiver<UpdateCommand>,
+        status: watch::Sender<Snapshot>,
+    ) {
+        let manual = self.target.platform == "linux";
+        let mut check_at = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut download = None;
+        let mut staged = None;
+        let mut requested = false;
+        let mut apply = interval(Duration::from_secs(15));
+        let start_download = |preferences: &Preferences| {
+            let base = feed(&self.origin, self.target, preferences.base.as_deref());
+            let client = self.client.clone();
+            let target = self.target;
+            let directory = self.directory.as_path();
             status.send_modify(|snapshot| {
-                snapshot.update = message.clone();
-                snapshot.manual_update = manual && staged.is_some();
+                snapshot.update = "正在检查或下载更新".into();
+                snapshot.update_checking = true;
             });
-        }
-        if let Some(package) = &staged
-            && (!manual || requested)
-            && gate.drain(&db).unwrap_or(false)
-        {
-            match handoff(package, &executable, &directory) {
-                Ok(()) => {
-                    staged.take().unwrap().directory.keep();
-                    status.send_modify(|snapshot| snapshot.exit_for_update = true);
-                    return;
-                }
-                Err(_) => {
-                    gate.resume();
+            Box::pin(async move {
+                stage(
+                    &UpdateSource {
+                        client,
+                        target,
+                        base: base?,
+                    },
+                    directory,
+                )
+                .await
+            })
+        };
+        status.send_modify(|snapshot| set_preferences(snapshot, &preferences));
+        loop {
+            tokio::select! {
+                biased;
+                command = commands.recv() => match command {
+                    None => return,
+                    Some(UpdateCommand::Check)
+                        if preferences.auto_update && download.is_none() && staged.is_none() =>
+                    {
+                        download = Some(start_download(&preferences));
+                    }
+                    Some(UpdateCommand::Configure(next, response)) => {
+                        let result = next.save(&self.directory).context("无法保存更新设置");
+                        if result.is_ok() && next != preferences {
+                            drop(download.take());
+                            drop(staged.take());
+                            requested = false;
+                            preferences = next;
+                            check_at = tokio::time::Instant::now();
+                            status.send_modify(|snapshot| set_preferences(snapshot, &preferences));
+                        }
+                        let _ = response.send(result);
+                    }
+                    Some(UpdateCommand::Install) if manual && staged.is_some() => {
+                        requested = true;
+                        apply.reset_immediately();
+                        status.send_modify(|snapshot| {
+                            snapshot.update = "等待连接空闲后请求系统安装授权".into();
+                            snapshot.manual_update = false;
+                        });
+                    }
+                    Some(_) => {}
+                },
+                result = async { download.as_mut().expect("active update check").await },
+                    if download.is_some() =>
+                {
+                    download = None;
+                    check_at = tokio::time::Instant::now() + CHECK_INTERVAL;
+                    let message = match result {
+                        Ok(Some(package)) => {
+                            let message = format!(
+                                "已下载 v{}，{}",
+                                package.release.version,
+                                if manual { "安装需要系统授权" } else { "等待连接空闲后安装" }
+                            );
+                            staged = Some(package);
+                            apply.reset_immediately();
+                            message
+                        }
+                        Ok(None) => "已是最新版本".into(),
+                        Err(_) => "检查或下载更新失败，将在后台重试".into(),
+                    };
                     status.send_modify(|snapshot| {
-                        snapshot.update = "安装未启动，将在后台重试".into()
+                        snapshot.update = message;
+                        snapshot.update_checking = false;
+                        snapshot.manual_update = manual && staged.is_some();
                     });
                 }
-            }
-        }
-        tokio::select! {
-            _ = checks.tick(), if staged.is_none() => next = Some(stage(&source, &directory).await),
-            _ = apply.tick(), if staged.is_some() => {},
-            command = install.recv() => {
-                if command.is_none() { return; }
-                requested = true;
+                _ = sleep_until(check_at), if preferences.auto_update && download.is_none() && staged.is_none() => {
+                    download = Some(start_download(&preferences));
+                }
+                _ = apply.tick(), if staged.is_some() && (!manual || requested) => {
+                    if !self.gate.drain(&self.db).unwrap_or(false) {
+                        continue;
+                    }
+                    let package = staged.as_ref().expect("downloaded update");
+                    match handoff(package, &self.executable, &self.directory) {
+                        Ok(()) => {
+                            staged.take().expect("downloaded update").directory.keep();
+                            status.send_modify(|snapshot| snapshot.exit_for_update = true);
+                            return;
+                        }
+                        Err(_) => {
+                            self.gate.resume();
+                            status.send_modify(|snapshot| {
+                                snapshot.update = "安装未启动，将在后台重试".into();
+                            });
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+fn set_preferences(snapshot: &mut Snapshot, preferences: &Preferences) {
+    snapshot.update_preferences = Some(preferences.clone());
+    snapshot.update_checking = false;
+    snapshot.manual_update = false;
+    snapshot.update = if preferences.auto_update {
+        "自动更新已启用，等待检查"
+    } else {
+        "自动更新已关闭"
+    }
+    .into();
 }
 
 fn remove_expired_staging(directory: &Path) {
@@ -561,6 +641,7 @@ mod tests {
         signature::{Ed25519KeyPair, KeyPair},
     };
     use serde_json::{Value, json};
+    use tokio::time::sleep;
 
     const LINUX: Target = Target {
         platform: "linux",
@@ -601,7 +682,7 @@ mod tests {
         let certificate = reqwest::Certificate::from_pem(&fs::read(root)?)?;
         let source = |name: &str, trust_fixture: bool| -> Result<UpdateSource> {
             let base = if name == "good" {
-                feed(&origin, target)?
+                feed(&origin, target, None)?
             } else {
                 origin.join(&format!("{name}/{}/{}/", target.platform, target.arch))?
             };
@@ -653,17 +734,92 @@ mod tests {
         let gate = UpdateGate::default();
         let active = gate.admit().context("测试连接未接入")?;
         let db = Arc::new(Mutex::new(store));
-        let (requests, install) = mpsc::channel(1);
+        let (requests, commands) = mpsc::channel(8);
         let (status, mut updates) = watch::channel(Snapshot::default());
-        let work = tokio::spawn(run_ready(
-            source("good", true)?,
-            executable.clone(),
-            directory.clone(),
-            db.clone(),
+        let updater = Updater {
+            origin: origin.clone(),
+            client: source("good", true)?.client,
+            target,
+            executable: executable.clone(),
+            directory: directory.clone(),
+            db: db.clone(),
             gate,
-            install,
-            status,
-        ));
+        };
+        let settings = |enabled, path: &str| Preferences::new(enabled, origin.join(path)?.as_str());
+        let configure = |preferences| {
+            let requests = requests.clone();
+            async move {
+                let (reply, saved) = oneshot::channel();
+                requests
+                    .send(UpdateCommand::Configure(preferences, reply))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+                saved.await?
+            }
+        };
+        let work = tokio::spawn(updater.run(settings(true, "partial/")?, commands, status));
+        requests
+            .send(UpdateCommand::Check)
+            .await
+            .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+        let partial = tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                if let Some(path) = fs::read_dir(&directory)?.flatten().find_map(|entry| {
+                    let path = entry.path();
+                    if !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".native-update-")
+                    {
+                        return None;
+                    }
+                    let entries = fs::read_dir(&path).ok()?;
+                    entries
+                        .flatten()
+                        .any(|file| {
+                            file.file_name()
+                                .to_string_lossy()
+                                .starts_with("AgentSpace-Native-")
+                                && file.metadata().is_ok_and(|metadata| metadata.len() > 0)
+                        })
+                        .then_some(path)
+                }) {
+                    return Ok::<_, std::io::Error>(path);
+                }
+                sleep(Duration::from_millis(40)).await;
+            }
+        })
+        .await??;
+        configure(settings(true, "abandoned/")?).await?;
+        tokio::time::timeout(
+            Duration::from_secs(35),
+            updates.wait_for(|snapshot| snapshot.update.starts_with("已下载")),
+        )
+        .await??;
+        ensure!(!partial.exists(), "改源后保留了旧源未完成的下载");
+        if target.platform == "linux" {
+            requests
+                .send(UpdateCommand::Install)
+                .await
+                .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+        }
+        configure(settings(false, "abandoned/")?).await?;
+        ensure!(
+            !updates.borrow().manual_update && !updates.borrow().update_checking,
+            "关闭更新后仍可安装旧源已下载的包"
+        );
+        ensure!(
+            !fs::read_dir(&directory)?.flatten().any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".native-update-")),
+            "关闭更新后保留了下载包"
+        );
+        requests
+            .send(UpdateCommand::Check)
+            .await
+            .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+        configure(Preferences::default()).await?;
         tokio::time::timeout(
             Duration::from_secs(50),
             updates.wait_for(|snapshot| snapshot.update.starts_with("已下载")),
@@ -674,7 +830,10 @@ mod tests {
             "安装授权模式与平台不符"
         );
         if target.platform == "linux" {
-            requests.send(()).await?;
+            requests
+                .send(UpdateCommand::Install)
+                .await
+                .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
         }
         // Hold the client through the next installation check after downloading.
         sleep(Duration::from_secs(17)).await;

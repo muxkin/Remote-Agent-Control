@@ -20,7 +20,8 @@ const platform = process.platform;
 const arch = process.arch;
 assert(platform === 'linux' || platform === 'win32' || platform === 'darwin');
 const program = platform === 'win32' ? 'agent-space-native.exe' : 'agent-space-native';
-const manifest = await readFile('desktop/native/Cargo.toml', 'utf8');
+const lf = (text) => text.replaceAll('\r\n', '\n');
+const manifest = lf(await readFile('desktop/native/Cargo.toml', 'utf8'));
 const release = manifest.match(/^version = "(\d+\.\d+\.\d+)"$/m)?.[1];
 assert(release && release !== '0.0.0');
 const filename = updateFilename(release, platform, arch);
@@ -49,7 +50,7 @@ async function buildOldAdapter() {
     .replace(/^version = "[^"]+"$/m, 'version = "0.0.0"')
     .replace(/^default-run = .*\n/m, '');
   await writeFile(join(crate, 'Cargo.toml'), previous + '\n[[bin]]\nname = "agent-space-update-fixture"\npath = "src/main.rs"\n');
-  const lock = await readFile('desktop/native/Cargo.lock', 'utf8');
+  const lock = lf(await readFile('desktop/native/Cargo.lock', 'utf8'));
   await writeFile(join(crate, 'Cargo.lock'), lock.replace(
     /(name = "agent-space-native"\nversion = ")[^"]+(")/, (_match, prefix, suffix) => prefix + '0.0.0' + suffix,
   ));
@@ -125,7 +126,7 @@ async function serveRelease() {
   server = createServer({ key: await readFile(key), cert: await readFile(certificate) }, (req, res) => {
     const path = req.url ?? '';
     requests.push(path);
-    for (const name of ['good', 'corrupt', 'foreign', 'redirect']) {
+    for (const name of ['good', 'corrupt', 'foreign', 'redirect', 'partial', 'abandoned']) {
       const prefix = name === 'good' ? good : '/' + name + root;
       if (path === prefix + 'latest.json') {
         if (name === 'redirect') {
@@ -137,8 +138,10 @@ async function serveRelease() {
         }
         return;
       }
-      if (path === prefix + filename && (name === 'good' || name === 'corrupt')) {
-        res.writeHead(200, { 'Content-Length': payload.length }).end(name === 'good' ? payload : corrupt);
+      if (path === prefix + filename && ['good', 'corrupt', 'partial', 'abandoned'].includes(name)) {
+        res.writeHead(200, { 'Content-Length': payload.length });
+        if (name === 'partial') res.write(payload.subarray(0, 64 * 1024));
+        else res.end(name === 'corrupt' ? corrupt : payload);
         return;
       }
     }
@@ -176,6 +179,8 @@ try {
   assert.equal(requests.filter((path) => path === good + 'latest.json').length, 1);
   assert(requests.includes(good + filename));
   assert(requests.includes('/corrupt' + root + filename));
+  assert(requests.includes('/partial' + root + filename));
+  assert(requests.includes('/abandoned' + root + filename));
   assert(!requests.includes('/foreign' + root + filename));
   assert.equal(createHash('sha512').update(await readFile(installed)).digest('hex'), expected);
 } finally {

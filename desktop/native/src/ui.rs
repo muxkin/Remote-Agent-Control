@@ -2,6 +2,8 @@ use crate::{
     desktop_shell,
     gateway::{Phase, Snapshot},
     state::now,
+    update::UpdateCommand,
+    update_preferences::Preferences,
 };
 use anyhow::{Result, anyhow};
 use ely_core::{
@@ -19,7 +21,7 @@ use gpui::{
     size,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 const INK: u32 = 0x1b2238;
 const MUTED: u32 = 0x56617b;
@@ -82,7 +84,7 @@ impl Page {
             Self::Overview => "查看这台电脑的远程连接状态。",
             Self::Pair => "首次使用时，扫码添加这台电脑。",
             Self::Diagnostics => "分别检查服务连接和本机 Agent 状态。",
-            Self::Settings => "查看原生适配器使用的连接配置。",
+            Self::Settings => "管理服务连接、自动更新和后台运行。",
         }
     }
 }
@@ -92,7 +94,10 @@ struct AdapterWindow {
     focus: gpui::FocusHandle,
     snapshot: Snapshot,
     pair: mpsc::Sender<()>,
-    install: mpsc::Sender<()>,
+    updater: mpsc::Sender<UpdateCommand>,
+    update_base: gpui::Entity<TextInput>,
+    update_error: Option<String>,
+    saving_update: bool,
     connection: Rc<RefCell<Connection>>,
     fields: Option<ConnectionFields>,
     startup: bool,
@@ -103,12 +108,21 @@ impl AdapterWindow {
     fn new(
         updates: watch::Receiver<Snapshot>,
         pair: mpsc::Sender<()>,
-        install: mpsc::Sender<()>,
+        updater: mpsc::Sender<UpdateCommand>,
         connection: Rc<RefCell<Connection>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let snapshot = updates.borrow().clone();
+        let update_base = cx.new(|cx| {
+            let mut input = TextInput::new(window, cx)
+                .label("独立更新地址")
+                .placeholder("留空则跟随服务地址");
+            if let Some(base) = saved_update_base(&snapshot) {
+                input.set_text(base, cx);
+            }
+            input
+        });
         cx.spawn(async move |view, cx| {
             loop {
                 cx.background_executor()
@@ -118,6 +132,11 @@ impl AdapterWindow {
                 if view
                     .update(cx, |view, cx| {
                         if view.snapshot != snapshot || snapshot.pairing.is_some() {
+                            if saved_update_base(&view.snapshot) != saved_update_base(&snapshot) {
+                                let base = saved_update_base(&snapshot).unwrap_or_default();
+                                view.update_base
+                                    .update(cx, |input, cx| input.set_text(base, cx));
+                            }
                             view.snapshot = snapshot;
                             cx.notify();
                         }
@@ -152,7 +171,10 @@ impl AdapterWindow {
             focus: cx.focus_handle(),
             snapshot,
             pair,
-            install,
+            updater,
+            update_base,
+            update_error: None,
+            saving_update: false,
             connection,
             fields,
             startup: desktop_shell::startup()
@@ -394,7 +416,6 @@ impl AdapterWindow {
         let panel = card().child(section_title("连接配置"));
         let Some(fields) = &self.fields else {
             let view = cx.weak_entity();
-            let install = self.install.clone();
             return div()
                 .flex()
                 .flex_col()
@@ -407,6 +428,9 @@ impl AdapterWindow {
                         ))
                         .child(note("更改服务地址可在退出后以 --configure 启动。")),
                 )
+                .when(!self.snapshot.update.is_empty(), |panel| {
+                    panel.child(self.update_settings(cx))
+                })
                 .child(
                     card()
                         .child(section_title("启动与运行"))
@@ -441,16 +465,6 @@ impl AdapterWindow {
                         ))
                         .when(self.startup_error, |card| {
                             card.child(note("无法修改自启动，请检查系统设置。"))
-                        })
-                        .when(!self.snapshot.update.is_empty(), |card| {
-                            card.child(row("自动更新", note(self.snapshot.update.clone())))
-                        })
-                        .when(self.snapshot.manual_update, |card| {
-                            card.child(Button::new("install-update", "安装已下载更新").on_click(
-                                move |_, _, _| {
-                                    let _ = install.try_send(());
-                                },
-                            ))
                         })
                         .child(div().flex().child(
                             Button::new("quit", "退出适配器").on_click(|_, _, cx| cx.quit()),
@@ -517,6 +531,128 @@ impl AdapterWindow {
                     .child(note("记住服务地址，接入密钥只在本次启动使用。")),
             )
     }
+
+    fn update_settings(&self, cx: &Context<Self>) -> Div {
+        let panel = card()
+            .child(section_title("自动更新"))
+            .child(note(self.snapshot.update.clone()));
+        let Some(preferences) = &self.snapshot.update_preferences else {
+            return panel;
+        };
+        let enabled = preferences.auto_update;
+        let base = preferences.base.clone().unwrap_or_default();
+        let view = cx.weak_entity();
+        let save = view.clone();
+        let check = self.updater.clone();
+        let install = self.updater.clone();
+        panel
+            .child(row(
+                "自动下载更新",
+                Button::new(
+                    "auto-update",
+                    if enabled {
+                        "关闭自动更新"
+                    } else {
+                        "启用自动更新"
+                    },
+                )
+                .disabled(self.saving_update)
+                .on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |view, cx| view.save_update(!enabled, &base, cx));
+                }),
+            ))
+            .child(note("独立更新地址"))
+            .child(Input::new(&self.update_base))
+            .child(note(
+                "留空则跟随服务地址。独立更新源需提供纯 Rust 安装版的 HTTPS 发布目录。",
+            ))
+            .when_some(self.update_error.clone(), |panel, error| {
+                panel.child(note(error).text_color(rgb(0xb13938)))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("save-update-source", "保存更新源")
+                            .disabled(self.saving_update)
+                            .on_click(move |_, _, cx| {
+                                let _ = save.update(cx, |view, cx| {
+                                    let base = view.update_base.read(cx).text().to_owned();
+                                    view.save_update(enabled, &base, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("check-update", "检查更新")
+                            .disabled(
+                                self.saving_update || !enabled || self.snapshot.update_checking,
+                            )
+                            .on_click(move |_, _, _| {
+                                let _ = check.try_send(UpdateCommand::Check);
+                            }),
+                    )
+                    .when(self.snapshot.manual_update, |actions| {
+                        actions.child(
+                            Button::new("install-update", "安装已下载更新")
+                                .disabled(self.saving_update)
+                                .on_click(move |_, _, _| {
+                                    let _ = install.try_send(UpdateCommand::Install);
+                                }),
+                        )
+                    }),
+            )
+    }
+
+    fn save_update(&mut self, enabled: bool, base: &str, cx: &mut Context<Self>) {
+        let preferences = match Preferences::new(enabled, base) {
+            Ok(preferences) => preferences,
+            Err(error) => {
+                self.update_error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let (reply, saved) = oneshot::channel();
+        if self
+            .updater
+            .try_send(UpdateCommand::Configure(preferences.clone(), reply))
+            .is_err()
+        {
+            self.update_error = Some("更新服务暂不可用，请稍后再试".into());
+            cx.notify();
+            return;
+        }
+        self.update_error = None;
+        self.saving_update = true;
+        cx.spawn(async move |view, cx| {
+            let result = saved
+                .await
+                .unwrap_or_else(|_| Err(anyhow!("更新服务已退出")));
+            let _ = view.update(cx, |view, cx| {
+                view.saving_update = false;
+                match result {
+                    Ok(()) => {
+                        if saved_update_base(&view.snapshot) != preferences.base.as_deref() {
+                            let base = preferences.base.as_deref().unwrap_or_default();
+                            view.update_base
+                                .update(cx, |input, cx| input.set_text(base, cx));
+                        }
+                        view.snapshot.update_preferences = Some(preferences);
+                    }
+                    Err(error) => view.update_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+fn saved_update_base(snapshot: &Snapshot) -> Option<&str> {
+    snapshot.update_preferences.as_ref()?.base.as_deref()
 }
 
 impl Render for AdapterWindow {
@@ -588,8 +724,11 @@ impl Render for AdapterWindow {
             .child(sidebar)
             .child(
                 div()
+                    .id("adapter-page")
                     .flex_1()
                     .min_w_0()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .p_8()
                     .flex()
                     .flex_col()
@@ -683,7 +822,7 @@ fn open_window(
     window: &mut Option<WindowHandle<AdapterWindow>>,
     updates: &watch::Receiver<Snapshot>,
     pair: &mpsc::Sender<()>,
-    install: &mpsc::Sender<()>,
+    updater: &mpsc::Sender<UpdateCommand>,
     connection: &Rc<RefCell<Connection>>,
     cx: &mut App,
 ) -> Result<()> {
@@ -714,7 +853,7 @@ fn open_window(
             AdapterWindow::new(
                 updates.clone(),
                 pair.clone(),
-                install.clone(),
+                updater.clone(),
                 connection.clone(),
                 window,
                 cx,
@@ -728,7 +867,7 @@ fn open_window(
 pub fn run(
     updates: watch::Receiver<Snapshot>,
     pair: mpsc::Sender<()>,
-    install: mpsc::Sender<()>,
+    updater: mpsc::Sender<UpdateCommand>,
     origin: Option<String>,
     connect: Connect,
     background: bool,
@@ -772,14 +911,14 @@ pub fn run(
                     let window = window.clone();
                     let updates = updates.clone();
                     let pair = pair.clone();
-                    let install = install.clone();
+                    let updater = updater.clone();
                     let connection = connection.clone();
                     move |cx: &mut App| {
                         if let Err(error) = open_window(
                             &mut window.borrow_mut(),
                             &updates,
                             &pair,
-                            &install,
+                            &updater,
                             &connection,
                             cx,
                         ) {
@@ -804,7 +943,7 @@ pub fn run(
                         &mut window.borrow_mut(),
                         &updates,
                         &pair,
-                        &install,
+                        &updater,
                         &connection,
                         cx,
                     )?;

@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.18 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.19 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
@@ -72,7 +72,9 @@ DSH 技能选择使用会话的原生目录，发送前会重新验证。会话�
 
 ### 原生安装版自动更新
 
-原生更新代码内置 `desktop/native/update-release.pub` 的 Ed25519 公钥。默认跟随当前服务，使用 `/downloads/desktop/native/rust/<平台>/<架构>/latest.json`。可用 `POCKET_NATIVE_UPDATE_BASE_URL` 指定 HTTPS 更新根目录，或用 `POCKET_NATIVE_UPDATES=0` 关闭，修改后重启。便携包需手动替换。
+原生更新代码内置 `desktop/native/update-release.pub` 的 Ed25519 公钥。安装版在「设置 → 自动更新」提供开关、独立 HTTPS 更新源和检查按钮。留空时跟随当前服务，使用 `/downloads/desktop/native/rust/<平台>/<架构>/latest.json`。保存后立即生效，切换更新源或关闭更新会清除尚未安装的旧包。便携包需手动替换。
+
+偏好保存在原生状态目录。首次使用时可从旧 Electron 的 `settings.json` 导入更新开关和独立来源，独立来源自动补上 `native/rust/`。自定义状态目录可用 `POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS` 显式指定旧文件。尚未保存偏好时，`POCKET_NATIVE_UPDATE_BASE_URL` 可指定初始来源。`POCKET_NATIVE_UPDATES=0` 在进程启动时关闭更新。
 
 更新会验证签名清单的运行时、平台、架构和版本，再下载并校验长度与 SHA-512。手机会话、直连和正在分发的写操作结束后，适配器才交接给独立的 Rust 安装进程。Linux DEB 由 apt 和 PolicyKit 授权。Windows 和 macOS 可使用发布密钥验签的安装器，macOS 同时验证应用代码签名并由系统打开更新后的应用。
 

@@ -64,6 +64,8 @@ pub struct Snapshot {
     pub history: bool,
     pub agents: Vec<ManagedAgent>,
     pub update: String,
+    pub(crate) update_preferences: Option<crate::update_preferences::Preferences>,
+    pub(crate) update_checking: bool,
     pub manual_update: bool,
     pub exit_for_update: bool,
 }

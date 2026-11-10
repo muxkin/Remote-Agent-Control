@@ -38,6 +38,7 @@ mod tool_activity;
 mod tools_catalog;
 mod update;
 mod update_install;
+mod update_preferences;
 mod usage;
 
 #[cfg(windows)]
@@ -107,8 +108,8 @@ pub fn start() -> Result<()> {
     let runtime = Runtime::new()?;
     let (state, updates) = watch::channel(Snapshot::default());
     let (pair, commands) = mpsc::channel(1);
-    let (install, installs) = mpsc::channel(1);
-    let mut installs = Some(installs);
+    let (update_commands, update_requests) = mpsc::channel(8);
+    let mut update_requests = Some(update_requests);
     let mut commands = Some(commands);
     let handle = runtime.handle().clone();
     let im_workers = im_agent::Workers::default();
@@ -139,7 +140,7 @@ pub fn start() -> Result<()> {
                 directory.clone(),
                 db.clone(),
                 gate.clone(),
-                installs.take().context("连接已初始化")?,
+                update_requests.take().context("连接已初始化")?,
                 state.clone(),
             ));
         }
@@ -164,7 +165,7 @@ pub fn start() -> Result<()> {
             ui::run(
                 updates,
                 pair,
-                install,
+                update_commands,
                 configured,
                 Box::new(connect),
                 background,
@@ -172,7 +173,7 @@ pub fn start() -> Result<()> {
         }
         #[cfg(not(feature = "ely"))]
         {
-            let _ = install;
+            let _ = update_commands;
             Err(anyhow::anyhow!(
                 "此二进制没有编译 Ely 界面，请使用 --headless"
             ))
