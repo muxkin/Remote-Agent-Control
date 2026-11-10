@@ -178,7 +178,9 @@ try {
     let synced = false;
     const remove = session!.onEvent((packet) => {
       if (packet.type === 'sync' && packet.backendId === backendId)
-        synced = packet.updates.some((update) => update.thread.synchronized);
+        synced = packet.updates.some(
+          (update: { thread: { synchronized?: boolean } }) => update.thread.synchronized === true,
+        );
     });
     try {
       await session!.request('watch', { backendId, threadId: thread });
