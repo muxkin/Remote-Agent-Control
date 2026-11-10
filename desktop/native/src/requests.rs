@@ -31,6 +31,48 @@ pub struct Response {
 }
 
 impl Response {
+    pub(crate) fn dsh_value(&self, shown: &Value) -> Result<Value> {
+        ensure!(
+            shown["id"] == self.target_request_id
+                && shown["turnId"] == self.expected_turn_id
+                && shown["fingerprint"] == self.expected_fingerprint
+                && shown["actionable"] == true,
+            "DSH 请求已处理或内容已变化"
+        );
+        if shown["kind"] == "command" {
+            return Ok(json!(match self.decision.as_deref() {
+                Some("accept") => "allowed-once",
+                Some("decline") => "rejected",
+                Some("cancel") => "cancelled",
+                _ => bail!("不支持此 DSH 审批选项"),
+            }));
+        }
+        ensure!(
+            matches!(shown["kind"].as_str(), Some("question" | "async-question")),
+            "DSH 问题不可用"
+        );
+        let answers = self.checked_answers(shown)?;
+        let questions = shown["questions"].as_array().context("DSH 问题不可用")?;
+        let mut rows = Vec::with_capacity(answers.len());
+        for ((id, values), question) in answers.into_iter().zip(questions) {
+            ensure!(
+                question["multiSelect"] == true || values.len() == 1,
+                "此问题只接受一项回答"
+            );
+            let options = question["options"].as_array().context("DSH 问题选项无效")?;
+            let (selected, custom): (Vec<_>, Vec<_>) = values.iter().partition(|value| {
+                options
+                    .iter()
+                    .any(|option| option["label"].as_str() == Some(value.as_str()))
+            });
+            rows.push(json!({
+                "id":id, "selected":selected,
+                "custom":custom.into_iter().map(String::as_str).collect::<Vec<_>>().join("\n")
+            }));
+        }
+        Ok(json!({"answers":rows}))
+    }
+
     pub fn validate(&self) -> Result<()> {
         let forms = [
             self.decision.is_some(),

@@ -16,6 +16,7 @@ pub(crate) const PROJECTIONS: &[&str] = &[
     "plan",
     "turnOutline",
     "imageLimits",
+    "userQuestions",
 ];
 
 pub(crate) fn model(selection: &Value) -> Option<String> {
@@ -219,7 +220,7 @@ impl Dsh {
         Ok(())
     }
 
-    async fn projections(&self, thread: &str) -> Result<Value> {
+    pub(crate) async fn projections(&self, thread: &str) -> Result<Value> {
         let mut result = self
             .call(
                 "session/projections",

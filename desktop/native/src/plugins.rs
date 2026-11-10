@@ -48,6 +48,7 @@ pub(crate) struct View {
     pub streamed: Option<Value>,
     pub observations: Arc<[Observation]>,
     pub image_limits: Value,
+    pub continued_questions: Value,
 }
 
 #[derive(Clone)]
@@ -93,6 +94,7 @@ pub(crate) enum Write {
     },
     Settings(ModelSettings),
     Control(Control),
+    Respond(crate::requests::Response),
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -179,6 +181,7 @@ impl Write {
             Self::Create { .. } => "create",
             Self::Settings(_) => "settings",
             Self::Control(_) => "control",
+            Self::Respond(_) => "respond",
         }
     }
 }

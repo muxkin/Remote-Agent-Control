@@ -35,6 +35,13 @@ const instances = ['dsh-one', 'dsh-two'].map((id) => ({
   inbox: [] as { id: string; content: { type: string; text: string }[] }[],
   followers: new Map<WebSocket, string>(),
   controls: new Map<WebSocket, string>(),
+  eventClients: new Map<WebSocket, { stream: string; peer: string; client: string }>(),
+  eventSessions: 0,
+  eventReplies: [] as { clientId: string; eventId: string; outcome: any }[],
+  timed: new Map<string, number>(),
+  releasedWaits: [] as string[],
+  lostEvents: new Set<string>(),
+  competingEvents: new Set<string>(),
   receipts: new Map<string, { attachmentId: string; name: string; bytes: number }>(),
   images: new Map<string, { attachment: object; data: string }>(),
   projections: new Map<string, Record<string, unknown>>([['shared', defaultProjections()]]),
@@ -56,16 +63,25 @@ const instances = ['dsh-one', 'dsh-two'].map((id) => ({
   opens: 0,
 }));
 const [one, two] = instances;
-const cookie = (value?: string) => instances.find(({ id }) => value === 'session=' + id);
+const cookie = (value?: string) => instances.find(({ id }) => value?.split('; ')[0] === 'session=' + id);
+const answerPeer = (value?: string) =>
+  value
+    ?.split('; ')
+    .find((part) => part.startsWith('answer='))
+    ?.slice(7);
 const dsh = createServer(async (request, response) => {
   const path = new URL(request.url!, 'http://localhost');
   if (path.pathname === '/connect') {
     const instance = instances.find(({ token }) => path.searchParams.get('token') === token);
     if (!instance) return response.writeHead(403).end();
-    assert.equal(path.searchParams.get('interactions'), 'none');
-    return response
-      .writeHead(302, { Location: '/api/remote.mux', 'Set-Cookie': 'session=' + instance.id })
-      .end();
+    const mode = path.searchParams.get('interactions');
+    assert(mode === 'none' || mode === 'answer');
+    const cookies = ['session=' + instance.id];
+    if (mode === 'answer') {
+      instance.eventSessions++;
+      cookies.push('answer=' + randomUUID());
+    }
+    return response.writeHead(302, { Location: '/api/remote.mux', 'Set-Cookie': cookies }).end();
   }
   const instance = cookie(request.headers.cookie);
   if (!instance) return response.writeHead(403).end();
@@ -99,6 +115,29 @@ const dsh = createServer(async (request, response) => {
   const args = rpc.payload.args.request ?? rpc.payload.args;
   let value;
   switch (rpc.method) {
+    case '$events/result':
+      assert(
+        [...instance.eventClients.values()].some(
+          (binding) =>
+            binding.client === args.clientId && binding.peer === answerPeer(request.headers.cookie),
+        ),
+      );
+      instance.eventReplies.push(args);
+      if (instance.lostEvents.delete(args.eventId)) return response.destroy();
+      if (instance.competingEvents.delete(args.eventId)) {
+        eventFrame(instance, { type: 'cancel', eventId: args.eventId });
+        await delay(250);
+      }
+      break;
+    case 'userQuestions/answer': {
+      assert.equal(args.agentId, 'shared');
+      assert(answerPeer(request.headers.cookie));
+      const question = instance.projections.get('shared')?.userQuestions as { active: { callId: string }[] };
+      const active = question.active.filter((entry) => entry.callId !== args.callId);
+      value = active.length !== question.active.length;
+      if (value) project(instance, 'shared', 'userQuestions', { active, settled: [] });
+      break;
+    }
     case 'session/page': {
       assert.deepEqual(args.address, { kind: 'session', sessionId: 'shared' });
       const earlier = instance.records.filter(
@@ -298,9 +337,44 @@ const dshSocket = new WebSocketServer({ server: dsh, path: '/api/remote.mux' });
 dshSocket.on('connection', (socket, request) => {
   const instance = cookie(request.headers.cookie);
   assert(instance);
+  const waits = new Map<string, string>();
   socket.on('message', (buffer) => {
     const frame = JSON.parse(buffer.toString());
+    if (frame.type === 'cancel' && waits.has(frame.streamId)) {
+      instance.releasedWaits.push(waits.get(frame.streamId)!);
+      waits.delete(frame.streamId);
+      return;
+    }
     if (frame.type !== 'open') return;
+    if (frame.endpoint === '$events') {
+      const peer = answerPeer(request.headers.cookie);
+      assert(peer);
+      assert.deepEqual(frame.payload, { args: {} });
+      const client = randomUUID();
+      instance.eventClients.set(socket, { stream: frame.streamId, peer, client });
+      socket.send(
+        JSON.stringify({
+          type: 'item',
+          streamId: frame.streamId,
+          value: {
+            type: 'ready',
+            clientId: client,
+            host: { home: '/fixture' },
+          },
+        }),
+      );
+      return;
+    }
+    if (frame.endpoint === 'userQuestions/attachWait') {
+      assert(instance.eventClients.has(socket));
+      const { agentId, callId } = frame.payload.args;
+      assert.equal(agentId, 'shared');
+      const remainingMs = instance.timed.get(callId);
+      assert(remainingMs !== undefined);
+      waits.set(frame.streamId, callId);
+      socket.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { remainingMs } }));
+      return;
+    }
     if (frame.endpoint === 'workspace/follow') {
       socket.send(
         JSON.stringify({
@@ -376,8 +450,19 @@ dshSocket.on('connection', (socket, request) => {
   socket.once('close', () => {
     instance.followers.delete(socket);
     instance.controls.delete(socket);
+    instance.eventClients.delete(socket);
   });
 });
+function eventFrame(instance: typeof one, value: object) {
+  for (const [socket, { stream }] of instance.eventClients)
+    if (socket.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify({ type: 'item', streamId: stream, value }));
+}
+function interaction(instance: typeof one, event: string, request: object, agentId = 'shared') {
+  const eventId = randomUUID();
+  eventFrame(instance, { type: 'waterfall', event, eventId, agentId, request });
+  return eventId;
+}
 function baseline(instance: typeof one, id: string) {
   return {
     values: instance.projections.get(id),
@@ -756,6 +841,121 @@ try {
     assert(!one.calls.some((call) => call.request.requestId === race.requestId));
     record(one, 'turn/end', { turn: 21, reason: { kind: 'completed' } });
     await wait(() => views.get(one.id)?.thread.canSend === true);
+
+    const cards = () => (views.get(one.id)?.thread.requests ?? []) as any[];
+    const cardFor = (eventId: string) => wait(() => cards().find((card) => card.id.endsWith(':' + eventId)));
+    const responseTo = (card: any, reply: object, requestId = randomUUID()) => ({
+      requestId,
+      targetRequestId: card.id,
+      expectedTurnId: card.turnId,
+      expectedFingerprint: card.fingerprint,
+      ...reply,
+    });
+    const respond = async (body: ReturnType<typeof responseTo>, state: string) => {
+      await rpc(one.id, '/threads/shared/responses', 'POST', body);
+      await operation(body.requestId, state);
+    };
+    const outcome = (id: string) =>
+      wait(() => one.eventReplies.find((entry) => entry.eventId === id)?.outcome);
+    const approval = { toolName: 'fixture-tool', reason: 'Isolated approval' };
+    const questions = [
+      {
+        id: 'mode',
+        question: 'Select mode',
+        multiSelect: true,
+        options: [{ label: 'A', description: 'Fixture choice' }, { label: 'B' }],
+      },
+    ];
+    await wait(() => one.eventClients.size === 1 && two.eventClients.size === 1);
+    const unwatched = interaction(one, 'approval/request', approval, 'not-watched');
+    assert.deepEqual(await outcome(unwatched), { kind: 'next' });
+    const unknown = interaction(one, 'unsupported/event', {});
+    assert.deepEqual(await outcome(unknown), { kind: 'next' });
+    record(one, 'turn/start', { turn: 22 });
+    await wait(() => views.get(one.id)?.thread.activeTurnId === '22');
+    const asked = interaction(one, 'approval/request', approval);
+    const card = await cardFor(asked);
+    assert.deepEqual(card.decisions, ['accept', 'decline', 'cancel']);
+    assert.equal(card.turnId, '22');
+    assert.deepEqual(views.get(two.id)?.thread.requests, []);
+    await respond(responseTo(card, { decision: 'accept', expectedTurnId: '21' }), 'rejected');
+    await respond(responseTo(card, { decision: 'acceptForSession' }), 'rejected');
+    await respond(responseTo(card, { decision: 'decline', expectedFingerprint: '0'.repeat(64) }), 'rejected');
+    const decision = responseTo(card, { decision: 'accept' });
+    await respond(decision, 'completed');
+    assert.deepEqual(await outcome(asked), { kind: 'result', value: 'allowed-once' });
+    await respond(decision, 'completed');
+    assert.equal(one.eventReplies.filter((entry) => entry.eventId === asked).length, 1);
+    await wait(() => !cards().length);
+
+    const cancelled = interaction(one, 'approval/request', approval);
+    const obsolete = await cardFor(cancelled);
+    eventFrame(one, { type: 'cancel', eventId: cancelled });
+    await wait(() => !cards().length);
+    await respond(responseTo(obsolete, { decision: 'accept' }), 'rejected');
+    assert(!one.eventReplies.some((entry) => entry.eventId === cancelled));
+
+    const concurrent = interaction(one, 'approval/request', approval);
+    const competingCard = await cardFor(concurrent);
+    one.competingEvents.add(concurrent);
+    await respond(responseTo(competingCard, { decision: 'decline' }), 'rejected');
+    await wait(() => !cards().length);
+
+    const question = interaction(one, 'user-questions/request', { questions });
+    const pending = await cardFor(question);
+    assert.equal(pending.kind, 'question');
+    await respond(responseTo(pending, { answers: { other: ['A'] } }), 'rejected');
+    await respond(responseTo(pending, { answers: { mode: ['A', 'Other'] } }), 'completed');
+    assert.deepEqual(await outcome(question), {
+      kind: 'result',
+      value: { answers: [{ id: 'mode', selected: ['A'], custom: 'Other' }] },
+    });
+    one.timed.set('call-timed', 900);
+    const timed = interaction(one, 'user-questions/request', {
+      questions,
+      wait: { timed: true, callId: 'call-timed' },
+    });
+    const timedCard = await cardFor(timed);
+    assert.deepEqual(await outcome(timed), { kind: 'next' });
+    await wait(() => one.releasedWaits.includes('call-timed') && !cards().length);
+    await respond(responseTo(timedCard, { answers: { mode: ['B'] } }), 'rejected');
+    project(one, 'shared', 'userQuestions', {
+      active: [{ state: 'continued', callId: 'call-timed', questions }],
+      settled: [],
+    });
+    const late = await wait(() => cards().find((card) => card.kind === 'async-question'));
+    assert.equal(late.turnId, null);
+    await respond(responseTo(late, { answers: { mode: ['B'] } }), 'completed');
+    await wait(() => !cards().length);
+
+    const uncertainEvent = interaction(one, 'approval/request', approval);
+    const uncertainCard = await cardFor(uncertainEvent);
+    one.lostEvents.add(uncertainEvent);
+    const uncertainResponse = responseTo(uncertainCard, { decision: 'decline' });
+    await respond(uncertainResponse, 'uncertain');
+    await respond(uncertainResponse, 'uncertain');
+    assert.equal(one.eventReplies.filter((entry) => entry.eventId === uncertainEvent).length, 1);
+
+    const beforeDisconnect = interaction(one, 'approval/request', approval);
+    const disconnectedCard = await cardFor(beforeDisconnect);
+    const [eventSocket, binding] = [...one.eventClients][0];
+    eventSocket.terminate();
+    await wait(
+      () => !cards().length && [...one.eventClients.values()].some(({ client }) => client !== binding.client),
+    );
+    await respond(responseTo(disconnectedCard, { decision: 'accept' }), 'rejected');
+    assert(!one.eventReplies.some((entry) => entry.eventId === beforeDisconnect));
+    assert.equal(views.get(one.id)?.thread.synchronized, true);
+
+    const noWatcher = interaction(one, 'approval/request', approval);
+    await cardFor(noWatcher);
+    await session.request('unwatch', { backendId: one.id, threadId: 'shared' });
+    assert.deepEqual(await outcome(noWatcher), { kind: 'next' });
+    await wait(() => one.eventClients.size === 0);
+    views.delete(one.id);
+    await watch(one.id);
+    record(one, 'turn/end', { turn: 22, reason: { kind: 'completed' } });
+    await wait(() => views.get(one.id)?.thread.canSend === true);
     const models = await rpc<{ models: { id: string; efforts: string[] }[] }>(one.id, '/models');
     assert.deepEqual(
       models.models.map(({ id, efforts }) => [id, efforts]),
@@ -935,6 +1135,7 @@ try {
     session.close();
     await stop();
     await writeFile(join(state, 'gateway.env'), 'POCKET_READ_ONLY=1\n', { mode: 0o600 });
+    const beforeReadOnly = one.eventSessions;
     await launch();
     views.clear();
     session = await nodeSession(origin, host, phone, ready.ticket, {
@@ -944,6 +1145,7 @@ try {
     });
     remove = listen();
     await watch(one.id);
+    assert.equal(one.eventSessions, beforeReadOnly);
     assert.equal(views.get(one.id)?.thread.canSend, false);
     assert.equal((await rpc<{ writesEnabled: boolean }>(one.id, '/status')).writesEnabled, false);
     assert.deepEqual((await rpc<{ actions: string[] }>(one.id, '/threads/shared/controls')).actions, []);
@@ -968,7 +1170,7 @@ try {
     session.close();
   }
   console.log(
-    'Rust DSH: scoped file/image send and preview, legacy receipts, live sync and settings, configured creation, queue, replay, uncertain restart recovery and read-only policy passed.',
+    'Rust DSH: scoped media, settings, approvals and questions, timed delegation and late answers, recovery, replay and read-only policy passed.',
   );
 } finally {
   await stop();

@@ -1,4 +1,5 @@
 use crate::{
+    dsh_events::Hub,
     dsh_live::Timeline,
     plugins::{Adapter, Delivery, Media, RecordCreated, Subscription, Write},
 };
@@ -54,6 +55,7 @@ pub(crate) struct Dsh {
     pub(crate) http: reqwest::Client,
     session: Mutex<Option<Session>>,
     subscriptions: SyncMutex<HashMap<String, Weak<Subscription>>>,
+    events: SyncMutex<Weak<Hub>>,
     read_only: bool,
 }
 
@@ -103,6 +105,7 @@ impl Dsh {
             http,
             session: Mutex::new(None),
             subscriptions: SyncMutex::new(HashMap::new()),
+            events: SyncMutex::new(Weak::new()),
             read_only,
         })
     }
@@ -115,11 +118,17 @@ impl Dsh {
         {
             return Ok(session.clone());
         }
+        let session = self.connect("none").await?;
+        *cached = Some(session.clone());
+        Ok(session)
+    }
+
+    pub(crate) async fn connect(&self, interactions: &'static str) -> Result<Session> {
         ensure!(!self.token.is_empty(), "DSH 访问凭据未配置");
         let mut url = self.base.join("connect")?;
         url.query_pairs_mut()
             .append_pair("token", &self.token)
-            .append_pair("interactions", "none");
+            .append_pair("interactions", interactions);
         let response = self
             .http
             .get(url)
@@ -163,7 +172,6 @@ impl Dsh {
             stream,
             obtained: Instant::now(),
         };
-        *cached = Some(session.clone());
         Ok(session)
     }
 
@@ -228,7 +236,7 @@ impl Dsh {
             .header(header::ORIGIN, self.base.origin().ascii_serialization())
     }
 
-    async fn open_stream(
+    pub(crate) async fn open_stream(
         &self,
         session: &Session,
         endpoint: &'static str,
@@ -392,7 +400,7 @@ impl Dsh {
     }
 
     async fn subscribe_loop(
-        &self,
+        self: Arc<Self>,
         id: String,
         update: watch::Sender<Option<Arc<crate::plugins::View>>>,
     ) {
@@ -419,6 +427,8 @@ impl Dsh {
                 let mut stale = (*previous).clone();
                 stale.thread["revision"] = json!(revision);
                 stale.thread["synchronized"] = json!(false);
+                stale.thread["requests"] = json!([]);
+                stale.thread["pendingRequests"] = json!(0);
                 for capability in ["canSend", "canSteer", "canInterrupt"] {
                     stale.thread[capability] = json!(false);
                 }
@@ -435,7 +445,7 @@ impl Dsh {
     }
 
     async fn publish_follow(
-        &self,
+        self: &Arc<Self>,
         session: &Session,
         id: &str,
         update: &watch::Sender<Option<Arc<crate::plugins::View>>>,
@@ -448,20 +458,31 @@ impl Dsh {
             Ok::<_, anyhow::Error>((follow, Timeline::snapshot(id, frame, bytes)?))
         })
         .await??;
+        let mut events: Option<(Arc<Hub>, watch::Receiver<u64>)> = None;
         loop {
             *revision += 1;
-            if update
-                .send(Some(Arc::new(timeline.view(
-                    id,
-                    *revision,
-                    !self.read_only,
-                ))))
-                .is_err()
-            {
+            let mut view = timeline.view(id, *revision, !self.read_only);
+            if let Some((hub, _)) = &events {
+                hub.decorate(id, &mut view);
+            }
+            if update.send(Some(Arc::new(view))).is_err() {
                 return Ok(());
             }
+            if events.is_none() && !self.read_only {
+                let hub = self.event_hub();
+                let receiver = hub.updates();
+                events = Some((hub, receiver));
+            }
             loop {
-                let (frame, bytes) = follow.next().await?;
+                let (frame, bytes) = tokio::select! {
+                    frame = follow.next() => frame?,
+                    _ = async {
+                        match &mut events {
+                            Some((_, updates)) => { let _ = updates.changed().await; }
+                            None => std::future::pending().await,
+                        }
+                    } => break,
+                };
                 if frame["type"] == "snapshot" {
                     timeline = Timeline::snapshot(id, frame, bytes)?;
                     break;
@@ -471,6 +492,27 @@ impl Dsh {
                 }
             }
         }
+    }
+
+    fn event_hub(self: &Arc<Self>) -> Arc<Hub> {
+        let mut current = self.events.lock().expect("DSH events mutex poisoned");
+        if let Some(hub) = current.upgrade() {
+            return hub;
+        }
+        let hub = Hub::start(self.clone());
+        *current = Arc::downgrade(&hub);
+        hub
+    }
+
+    pub(crate) fn watched_view(&self, thread: &str) -> Option<Arc<crate::plugins::View>> {
+        let subscription = self
+            .subscriptions
+            .lock()
+            .expect("DSH subscription mutex poisoned")
+            .get(thread)
+            .and_then(Weak::upgrade)?;
+        let view = subscription.0.borrow().clone()?;
+        (view.thread["synchronized"] == true).then_some(view)
     }
 
     async fn threads(&self, query: &Value) -> Result<Value> {
@@ -553,14 +595,14 @@ impl std::fmt::Display for Refused {
 }
 impl std::error::Error for Refused {}
 
-struct Follow {
+pub(crate) struct Follow {
     socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-    stream: String,
+    pub(crate) stream: String,
     control: Option<String>,
 }
 
 impl Follow {
-    async fn open(&mut self, endpoint: &'static str, args: Value) -> Result<String> {
+    pub(crate) async fn open(&mut self, endpoint: &'static str, args: Value) -> Result<String> {
         let stream = Uuid::new_v4().to_string();
         self.socket
             .send(Message::Text(
@@ -579,24 +621,47 @@ impl Follow {
         Ok(stream)
     }
 
-    async fn next(&mut self) -> Result<(Value, usize)> {
+    pub(crate) async fn cancel(&mut self, stream: &str) -> Result<()> {
+        self.socket
+            .send(Message::Text(
+                json!({"type":"cancel","streamId":stream})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn ping(&mut self) -> Result<()> {
+        self.socket.send(Message::Ping(Default::default())).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn packet(&mut self) -> Result<Option<(Value, usize)>> {
+        let packet = self.socket.next().await.context("DSH 事件流已断开")??;
+        match packet {
+            Message::Text(packet) => Ok(Some((serde_json::from_str(&packet)?, packet.len()))),
+            Message::Close(_) => bail!("DSH 事件流已断开"),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) async fn next(&mut self) -> Result<(Value, usize)> {
         let mut waiting_for_pong = false;
         loop {
-            let packet = match timeout(Duration::from_secs(20), self.socket.next()).await {
-                Ok(Some(packet)) => packet?,
-                Ok(None) => bail!("DSH 事件流已断开"),
+            let packet = match timeout(Duration::from_secs(20), self.packet()).await {
+                Ok(packet) => packet?,
                 Err(_) if waiting_for_pong => bail!("DSH 事件流响应超时"),
                 Err(_) => {
-                    self.socket.send(Message::Ping(Default::default())).await?;
+                    self.ping().await?;
                     waiting_for_pong = true;
                     continue;
                 }
             };
             waiting_for_pong = false;
-            let Message::Text(packet) = packet else {
+            let Some((mut frame, len)) = packet else {
                 continue;
             };
-            let mut frame: Value = serde_json::from_str(&packet)?;
             let control = self
                 .control
                 .as_deref()
@@ -609,7 +674,7 @@ impl Follow {
             if control && value["type"] == "baseline" {
                 value["type"] = json!("control-baseline");
             }
-            return Ok((value, packet.len()));
+            return Ok((value, len));
         }
     }
 
@@ -790,7 +855,7 @@ impl Adapter for Dsh {
             "skills",
             "plugins",
         ] {
-            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"|"settings"|"attachments"))) {"experimental"} else {"unavailable"}}));
+            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"|"settings"|"attachments"|"respond"))) {"experimental"} else {"unavailable"}}));
         }
         json!({"id":self.id,"name":self.name,"product":"dsh","version":self.version,"connected":connected,
         "profile":"rust-native","capabilities":capabilities,"presentation":{
@@ -812,7 +877,7 @@ impl Adapter for Dsh {
             None
         };
         json!({"connected":connected,"writesEnabled":writable,"supportedVersion":self.version == "0.2.1-rc.5",
-            "reason":reason,"capabilities":{"send":writable,"steer":writable,"interrupt":writable,"newThread":writable,"queue":writable,"modelSettings":writable}})
+            "reason":reason,"capabilities":{"send":writable,"steer":writable,"interrupt":writable,"newThread":writable,"queue":writable,"modelSettings":writable,"approvals":writable,"questions":writable}})
     }
     async fn read(&self, method: &str, params: &Value, query: &Value) -> Result<Option<Value>> {
         match method {
@@ -950,6 +1015,17 @@ impl Adapter for Dsh {
                 return self.change_model(&session, thread, settings).await;
             }
             Write::Control(control) => return self.change_control(&session, thread, control).await,
+            Write::Respond(response) => {
+                let hub = self
+                    .events
+                    .lock()
+                    .expect("DSH events mutex poisoned")
+                    .upgrade();
+                let Some(hub) = hub else {
+                    return Delivery::Rejected("DSH 交互连接不可用");
+                };
+                return hub.respond(self, thread, &view, response).await;
+            }
             Write::Send { text, files } if active.is_none() => {
                 let Ok(content) = self
                     .prompt_content(&session, thread, &text, files, &view.image_limits)

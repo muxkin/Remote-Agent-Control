@@ -616,6 +616,12 @@ impl DeviceSession {
     fn plugin_write(&self, plugin: Arc<dyn Adapter>, method: &str, call: &Value) -> Result<Value> {
         let thread = plugin_thread(&call["params"]["id"])?;
         let (request, action) = match method {
+            "request.respond" => {
+                let response: crate::requests::Response =
+                    serde_json::from_value(call["body"].clone())?;
+                response.validate()?;
+                (response.request_id, Write::Respond(response))
+            }
             "settings.update" => {
                 let mut body = call["body"].clone();
                 let fields = body.as_object_mut().context("DSH 模型设置无效")?;
@@ -804,7 +810,9 @@ impl DeviceSession {
                 }
                 "message.send" | "turn.steer" | "turn.interrupt" | "thread.rename"
                 | "thread.create" | "queue.add" | "queue.remove" | "settings.update"
-                | "control.execute" => self.plugin_write(plugin, method, &call).map(Some),
+                | "control.execute" | "request.respond" => {
+                    self.plugin_write(plugin, method, &call).map(Some)
+                }
                 _ => plugin.read(method, &call["params"], &call["query"]).await,
             };
         }
