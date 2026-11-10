@@ -30,6 +30,8 @@ pub struct Backends {
     pub desktop: Option<Desktop>,
     pub direct: Option<crate::direct::Direct>,
     pub storage: Option<crate::storage::Storage>,
+    pub update_gate: crate::update::UpdateGate,
+    pub plugins: crate::plugins::Registry,
 }
 
 impl Backends {
@@ -209,13 +211,23 @@ impl DeviceSession {
                         continue;
                     }
                     let mut reply_bytes = Vec::new();
+                    let mut snapshot = None;
                     let result = match request["type"].as_str() {
                         Some("rpc") if !self.bulk && bytes.is_empty() => self.rpc(request["call"].clone()).await,
                         Some("file") if codex(&request) => self.file(request.clone(), bytes).await.map(|(value, bytes)| {
                             reply_bytes = bytes;
                             Some(value)
                         }),
-                        Some("watch") if !self.bulk && bytes.is_empty() && codex(&request) => self.watch(&request).await.map(Some),
+                        Some("watch") if !self.bulk && bytes.is_empty() => {
+                            if codex(&request) {
+                                self.watch(&request).await.map(Some)
+                            } else {
+                                self.plugin_snapshot(&request).await.map(|sync| {
+                                    snapshot = sync;
+                                    snapshot.as_ref().map(|_| json!({"ok":true}))
+                                })
+                            }
+                        },
                         Some("offer") if bytes.is_empty() && self.signaling.is_some() => self.offer(&request).await.map(Some),
                         Some("candidate") if bytes.is_empty() && self.signaling.is_some() => {
                             match &self.connection {
@@ -223,8 +235,10 @@ impl DeviceSession {
                                 None => Ok(None),
                             }
                         }
-                        Some("unwatch") if !self.bulk && bytes.is_empty() && codex(&request) => {
-                            self.watches.remove(&thread_id(&request["threadId"])?);
+                        Some("unwatch") if !self.bulk && bytes.is_empty() => {
+                            if codex(&request) {
+                                self.watches.remove(&thread_id(&request["threadId"])?);
+                            }
                             Ok(Some(json!({"ok": true})))
                         }
                         Some("ping") => Ok(Some(json!({"ok": true}))),
@@ -242,6 +256,9 @@ impl DeviceSession {
                         Err(_) => json!({"type":"response","id":id,"status":400,"error":"请求未完成，请核对本机会话和参数"}),
                     };
                     reply_packet(io, value, &reply_bytes).await?;
+                    if let Some(snapshot) = snapshot {
+                        reply(io, snapshot).await?;
+                    }
                     if !self.bulk && request["call"]["method"] == "device.revoke" {
                         // Let the encrypted response reach the requesting client.
                         tokio::time::sleep(Duration::from_millis(35)).await;
@@ -485,16 +502,55 @@ impl DeviceSession {
         .await?
     }
 
+    async fn plugin_snapshot(&self, request: &Value) -> Result<Option<Value>> {
+        let Some(plugin) = request["backendId"]
+            .as_str()
+            .and_then(|id| self.backends.plugins.get(id))
+        else {
+            return Ok(None);
+        };
+        let id = request["threadId"].as_str().context("会话 ID 无效")?;
+        let mut value = plugin
+            .read("thread.read", &json!({"id":id}), &Value::Null)
+            .await?
+            .context("找不到此会话")?;
+        let order = value["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|message| message["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        Ok(Some(
+            json!({"type":"sync","backendId":plugin.id(),"threadId":id,"updates":[{
+                "kind":"manifest","epoch":Uuid::new_v4(),"thread":value["thread"].take(),
+                "order":order,"changed":value["messages"].take()
+            }]}),
+        ))
+    }
+
     async fn rpc(&mut self, call: Value) -> Result<Option<Value>> {
         let method = call["method"].as_str().unwrap_or_default();
         let online = self.online();
         if method == "backends.list" {
-            return Ok(Some(
-                json!({"backends":self.backends.info(online).into_iter().collect::<Vec<_>>()}),
-            ));
+            let mut backends: Vec<_> = self.backends.info(online).into_iter().collect();
+            backends.extend(self.backends.plugins.infos().await);
+            return Ok(Some(json!({"backends":backends})));
         }
-        if !codex(&call) {
-            return Ok(None);
+        if method != "device.revoke" && !codex(&call) {
+            let Some(plugin) = call["backendId"]
+                .as_str()
+                .and_then(|id| self.backends.plugins.get(id))
+            else {
+                return Ok(None);
+            };
+            return match method {
+                "status.read" => Ok(Some(plugin.status().await)),
+                "session.read" => Ok(Some(json!({
+                    "device":{"id":self.device.id,"name":self.device.name},
+                    "status":plugin.status().await,"backend":plugin.info().await,
+                }))),
+                _ => plugin.read(method, &call["params"], &call["query"]).await,
+            };
         }
         match method {
             "status.read" => Ok(Some(self.backends.status(online))),

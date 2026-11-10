@@ -3,6 +3,7 @@ use crate::{
     codex_live::Desktop,
     device::{Backends, DeviceSession},
     state::{Device, Pairing, Route, Store, hash, now},
+    update::{Client, UpdateGate},
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -96,6 +97,7 @@ pub struct RelayConfig {
     pub desktop: Option<Desktop>,
     pub direct: Option<crate::direct::Direct>,
     pub storage: Option<crate::storage::Storage>,
+    pub plugins: crate::plugins::Registry,
 }
 
 impl RelayConfig {
@@ -120,6 +122,7 @@ impl RelayConfig {
             desktop: None,
             direct: None,
             storage: None,
+            plugins: Default::default(),
         })
     }
 }
@@ -154,12 +157,13 @@ pub async fn run(
     db: Database,
     generate: mpsc::Receiver<()>,
     state: watch::Sender<Snapshot>,
+    gate: UpdateGate,
 ) {
     let (_unused, bulk) = mpsc::channel(1);
     let (bulk_state, _receiver) = watch::channel(Snapshot::default());
     tokio::select! {
-        _ = run_lane(&config, &db, Lane::Control, generate, state) => {}
-        _ = run_lane(&config, &db, Lane::Bulk, bulk, bulk_state) => {}
+        _ = run_lane(&config, &db, Lane::Control, generate, state, &gate) => {}
+        _ = run_lane(&config, &db, Lane::Bulk, bulk, bulk_state, &gate) => {}
     }
 }
 
@@ -169,6 +173,7 @@ async fn run_lane(
     lane: Lane,
     mut generate: mpsc::Receiver<()>,
     state: watch::Sender<Snapshot>,
+    gate: &UpdateGate,
 ) {
     let identity = db.lock().expect("database mutex poisoned").identity.clone();
     let mut pairing = None;
@@ -186,6 +191,7 @@ async fn run_lane(
             &mut generate,
             &state,
             &mut pairing,
+            gate,
         )
         .await;
         if result.is_ok() || generate.is_closed() {
@@ -209,6 +215,7 @@ async fn run_connection(
     generate: &mut mpsc::Receiver<()>,
     state: &watch::Sender<Snapshot>,
     pairing: &mut Option<Pairing>,
+    gate: &UpdateGate,
 ) -> Result<()> {
     let mut url = config.origin.join("/connect")?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
@@ -332,8 +339,10 @@ async fn run_connection(
                             let routes = read_routes(db)?;
                             let route = routes.iter().find(|route| route.ticket == ticket && route.expires > now()
                                 && (lane == Lane::Control || route.peer_id.is_some()));
-                            if let Some(route) = route.filter(|_| wires.len() < 32 && !wires.contains_key(&id)) {
-                                wires.insert(id, spawn_wire(id, route.clone(), db.clone(), identity.clone(), lane, Backends { history: config.history.clone(), desktop: config.desktop.clone(), direct: config.direct.clone(), storage: config.storage.clone() }, outgoing.clone()));
+                            if let Some(route) = route.filter(|_| wires.len() < 32 && !wires.contains_key(&id))
+                                && let Some(client) = gate.admit()
+                            {
+                                wires.insert(id, spawn_wire(id, route.clone(), db.clone(), identity.clone(), lane, Backends { history: config.history.clone(), desktop: config.desktop.clone(), direct: config.direct.clone(), storage: config.storage.clone(), update_gate: gate.clone(), plugins: config.plugins.clone() }, outgoing.clone(), client));
                             } else if !wires.contains_key(&id) {
                                 send(&mut socket, text(json!({"type": "close", "id": id}))).await?;
                             }
@@ -392,10 +401,12 @@ fn spawn_wire(
     lane: Lane,
     backends: Backends,
     events: mpsc::Sender<WireEvent>,
+    client: Client,
 ) -> Wire {
     let (inbound, mut from_relay) = mpsc::channel::<Vec<u8>>(8);
     let (transport, session) = tokio::io::duplex(128 * 1024);
     let task = tokio::spawn(async move {
+        let _client = client;
         let (mut output, mut input) = tokio::io::split(transport);
         let outgoing = async {
             let mut buffer = vec![0; 16 * 1024];
@@ -519,15 +530,19 @@ pub(crate) fn direct_serve(
     backends: Backends,
     session: Uuid,
 ) -> futures::future::BoxFuture<'static, Result<()>> {
-    Box::pin(serve(
-        transport,
-        route,
-        db,
-        identity,
-        lane,
-        backends,
-        Some(session),
-    ))
+    Box::pin(async move {
+        let _client = backends.update_gate.admit().context("适配器正在安装更新")?;
+        serve(
+            transport,
+            route,
+            db,
+            identity,
+            lane,
+            backends,
+            Some(session),
+        )
+        .await
+    })
 }
 
 fn authenticate(db: &Database, peer: PeerId, route: &Route, auth: Auth) -> Result<(Uuid, Device)> {

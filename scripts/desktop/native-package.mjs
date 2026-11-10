@@ -5,16 +5,14 @@ import { readFile, readdir, mkdir, mkdtemp, rm, writeFile, copyFile, chmod } fro
 import { homedir, tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { zipSync } from 'fflate';
-import { buildInstaller, stageGateway } from './native-installer.mjs';
+import { buildInstaller } from './native-installer.mjs';
 import { windowsSign } from './native-signing.mjs';
 
 const args = process.argv.slice(2);
 const installer = args.includes('--installer');
 const signed = args.includes('--signed');
-const releaseKeyOnly = args.includes('--release-key-only');
-const [platform, binary, triple] = args.filter(
-  (arg) => !['--installer', '--signed', '--release-key-only'].includes(arg),
-);
+assert(!process.env.POCKET_NATIVE_GATEWAY_PAYLOAD, 'The Rust adapter cannot bundle a gateway runtime');
+const [platform, binary, triple] = args.filter((arg) => !['--installer', '--signed'].includes(arg));
 const targets = {
   win32: ['x86_64-pc-windows-msvc', 'x86_64-pc-windows-gnullvm', 'x86_64-pc-windows-gnu'],
   linux: ['x86_64-unknown-linux-gnu'],
@@ -22,20 +20,10 @@ const targets = {
 };
 assert(
   Object.hasOwn(targets, platform) && binary && (platform !== 'darwin' || installer),
-  'Usage: native-package.mjs <linux|win32|darwin> <binary> [rust-target] [--installer] [--signed|--release-key-only]',
+  'Usage: native-package.mjs <linux|win32|darwin> <binary> [rust-target] [--installer] [--signed]',
 );
-assert(
-  !releaseKeyOnly || (!signed && platform !== 'linux'),
-  'Release-key-only installers are for Windows and macOS',
-);
-if (signed || releaseKeyOnly)
-  assert(
-    installer &&
-      process.platform === platform &&
-      process.env.POCKET_NATIVE_GATEWAY_PAYLOAD &&
-      process.env.POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE,
-    'Signed releases require a native installer and the bundled update trust key',
-  );
+if (signed)
+  assert(installer && process.platform === platform, 'Sign native installers on the target platform');
 const native = resolve('desktop/native');
 const name = platform === 'win32' ? 'agent-space-native.exe' : 'agent-space-native';
 const target = triple ?? targets[platform][0];
@@ -95,15 +83,10 @@ ${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境
     thirdParty += `\nllvm-mingw\n\n${await readFile(toolchainNotice, 'utf8')}`;
   }
   await writeFile(join(dir, 'THIRD-PARTY-NOTICES.txt'), thirdParty);
-  const hasGateway = await stageGateway(dir);
   if (signed && platform === 'win32') windowsSign(join(dir, name));
   if (platform !== 'darwin') {
     const path = join(output, `${folder}.${platform === 'win32' ? 'zip' : 'tar.xz'}`);
-    if (platform === 'win32' && hasGateway) {
-      if (process.platform === 'win32')
-        execFileSync('tar.exe', ['-a', '-cf', path, '-C', stage, folder], { stdio: 'inherit' });
-      else execFileSync('zip', ['-qr', path, folder], { cwd: stage, stdio: 'inherit' });
-    } else if (platform === 'win32') {
+    if (platform === 'win32') {
       const contents = {};
       for (const entry of await readdir(dir))
         contents[`${folder}/${entry}`] = await readFile(join(dir, entry));
@@ -114,7 +97,6 @@ ${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境
     await checksum(path);
   }
   if (installer) {
-    if (releaseKeyOnly) await writeFile(join(dir, 'gateway/native-update-release-key-only'), '');
     const suffix = { win32: '-setup.exe', linux: '.deb', darwin: '.dmg' }[platform];
     const path = join(output, folder + suffix);
     await rm(path, { force: true });

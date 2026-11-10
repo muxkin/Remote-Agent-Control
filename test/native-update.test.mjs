@@ -79,5 +79,13 @@ describe('signed native updates', () => {
     expect(get(file)).toBe('desktop-releases/' + prefix + file);
     expect(get('another.exe')).toBeNull();
     expect(get('../' + file)).toBeNull();
+    const rust = '/downloads/desktop/native/rust/' + platform + '/' + arch + '/';
+    expect(releaseKey(rust + 'latest.json')).toBe(
+      'desktop-releases/native/rust/' + platform + '/' + arch + '/latest.json',
+    );
+    expect(releaseKey(rust + file)).toBe(
+      'desktop-releases/native/rust/' + platform + '/' + arch + '/' + file,
+    );
+    expect(releaseKey(rust + 'untrusted.exe')).toBeNull();
   });
 });

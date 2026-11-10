@@ -42,11 +42,6 @@ Section "Install"
   File "${PACKAGE_DIR}\LICENSE"
   File "${PACKAGE_DIR}\README.txt"
   File "${PACKAGE_DIR}\THIRD-PARTY-NOTICES.txt"
-!ifdef BUNDLE_GATEWAY
-  SetOutPath "$INSTDIR\gateway"
-  File /r "${PACKAGE_DIR}\gateway\*"
-  SetOutPath "$INSTDIR"
-!endif
   IfErrors in_use
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateShortcut "$SMPROGRAMS\Agent Space Adapter.lnk" "$INSTDIR\agent-space-native.exe"

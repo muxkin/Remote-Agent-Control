@@ -7,11 +7,12 @@ mod codex_live;
 mod codex_peer;
 mod device;
 mod direct;
+mod dsh;
 mod files;
 mod gateway;
 mod history_media;
-mod managed;
 mod operations;
+mod plugins;
 mod queue;
 mod reply_fork;
 mod requests;
@@ -20,6 +21,8 @@ mod state;
 mod storage;
 mod tool_activity;
 mod tools_catalog;
+mod update;
+mod update_install;
 mod usage;
 
 #[cfg(windows)]
@@ -54,30 +57,23 @@ fn start() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("无法初始化 TLS 加密提供程序"))?;
     let arguments: Vec<String> = env::args().skip(1).collect();
-    let executable = env::current_exe()?;
-    let payload = managed::payload(&executable);
     let directory = env::var_os("POCKET_NATIVE_STATE_DIR")
         .map(PathBuf::from)
         .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")))
         .context("无法定位状态目录")?;
     let directory = std::path::absolute(directory)?;
-    if let Some(flag @ ("--adapter" | "--im" | "--im-call")) = arguments.first().map(String::as_str)
+    if arguments
+        .first()
+        .is_some_and(|flag| flag == update::APPLY_FLAG)
     {
-        let root = payload.context("此构建没有附带插件网关")?;
-        let origin =
-            state::saved_origin(&directory)?.unwrap_or_else(|| "http://127.0.0.1:4317".into());
-        return if flag == "--adapter" {
-            managed::adapter_cli(&root, &directory, &origin, &arguments[1..])
-        } else {
-            managed::im_cli(
-                &root,
-                &directory,
-                &origin,
-                flag == "--im-call",
-                &arguments[1..],
-            )
-        };
+        ensure!(arguments.len() == 3, "更新交接参数无效");
+        return update::apply(
+            std::path::Path::new(&arguments[1]),
+            std::path::Path::new(&arguments[2]),
+            &directory,
+        );
     }
+    let executable = env::current_exe()?;
     let headless = arguments.iter().any(|value| value == "--headless");
     let configure = arguments.iter().any(|value| value == "--configure");
     let background = arguments.iter().any(|value| value == "--background");
@@ -103,39 +99,11 @@ fn start() -> Result<()> {
     let (state, updates) = watch::channel(Snapshot::default());
     let (pair, commands) = mpsc::channel(1);
     let (install, installs) = mpsc::channel(1);
-    let (stop, stopping) = watch::channel(false);
-    let managed_task = Arc::new(Mutex::new(None));
-    let task = managed_task.clone();
     let mut installs = Some(installs);
     let mut commands = Some(commands);
     let handle = runtime.handle().clone();
     let mut connect = move |origin: &str, enrollment: String| -> Result<String> {
         let mut config = RelayConfig::new(origin, enrollment)?;
-        if let Some(root) = &payload {
-            let origin = config.origin.origin().ascii_serialization();
-            let gateway = managed::Gateway {
-                root: root.clone(),
-                directory: directory.clone(),
-                executable: executable.clone(),
-                origin: origin.clone(),
-                enrollment: config.enrollment,
-                lock: state::lock_directory(&directory)?,
-            };
-            let commands = commands.take().context("连接已初始化")?;
-            let installs = installs.take().context("连接已初始化")?;
-            let stopping = stopping.clone();
-            let state = state.clone();
-            *task.lock().unwrap() = Some(handle.spawn(async move {
-                if let Err(error) = gateway
-                    .run(commands, installs, stopping, state.clone())
-                    .await
-                {
-                    eprintln!("{error:#}");
-                    state.send_modify(|current| current.phase = Phase::Unavailable);
-                }
-            }));
-            return Ok(origin);
-        }
         let explicit = env::var_os("POCKET_NATIVE_CODEX_HOME");
         let home = explicit
             .as_ref()
@@ -159,11 +127,24 @@ fn start() -> Result<()> {
         }
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
         let transports = storage::Transports::load(&directory)?;
+        config.plugins = plugins::Registry::load(&directory)?;
         config.direct = transports.direct;
         config.storage = transports.storage;
         let origin = config.origin.origin().ascii_serialization();
         let receiver = commands.take().context("连接已初始化")?;
-        handle.spawn(gateway::run(config, db, receiver, state.clone()));
+        let gate = update::UpdateGate::default();
+        if !headless {
+            handle.spawn(update::run(
+                config.origin.clone(),
+                executable.clone(),
+                directory.clone(),
+                db.clone(),
+                gate.clone(),
+                installs.take().context("连接已初始化")?,
+                state.clone(),
+            ));
+        }
+        handle.spawn(gateway::run(config, db, receiver, state.clone(), gate));
         Ok(origin)
     };
     let configured = if let Some(origin) = configured_origin {
@@ -175,7 +156,7 @@ fn start() -> Result<()> {
         None
     };
 
-    let result = if headless {
+    if headless {
         ensure!(configured.is_some(), "请先设置 POCKET_NATIVE_ORIGIN");
         runtime.block_on(run_headless(updates, pair, print_pair))
     } else {
@@ -197,12 +178,7 @@ fn start() -> Result<()> {
                 "此二进制没有编译 Ely 界面，请使用 --headless"
             ))
         }
-    };
-    let _ = stop.send(true);
-    if let Some(task) = managed_task.lock().unwrap().take() {
-        let _ = runtime.block_on(task);
     }
-    result
 }
 
 async fn run_headless(

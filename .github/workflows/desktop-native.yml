@@ -1,8 +1,8 @@
-name: Native desktop releases
+name: Pure Rust desktop installer checks
 on:
   workflow_dispatch:
   push:
-    tags: [native-v*, native-publish-v*, native-preview-installers-v*]
+    tags: [native-rust-qa-v*]
   pull_request:
     paths:
       - 'desktop/native/**'
@@ -10,7 +10,6 @@ on:
       - 'src/web/public/app-icon-*.png'
       - 'scripts/desktop/native-*.ts'
       - 'scripts/desktop/native-*.mjs'
-      - 'scripts/desktop/prepare.mjs'
       - 'src/server/**'
       - 'packages/**'
       - 'package-lock.json'
@@ -51,23 +50,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - uses: astral-sh/setup-uv@v6
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils
       - if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
       - run: npm ci --ignore-scripts
-      - name: Prepare the shared plugin gateway
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv python install 3.12
-          python_path="$(uv python find --managed-python 3.12)"
-          export POCKET_DESKTOP_PYTHON="$(python -c "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.parent if sys.platform == 'win32' else p.parent.parent)" "$python_path")"
-          npm run build
-          npm run desktop:prepare
-          node --import tsx scripts/desktop/payload-smoke.ts
-          node -e 'console.log("POCKET_NATIVE_GATEWAY_PAYLOAD=" + require("node:path").resolve("dist/desktop-payload"))' >> "$GITHUB_ENV"
       - name: Select Rust with stable map_or_default for the macOS UI
         if: runner.os == 'macOS'
         shell: bash
@@ -79,16 +66,8 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: cargo build --release --locked
-      - name: Package the native adapter
-        shell: bash
-        run: |
-          set -euo pipefail
-          flags=(--installer)
-          if [[ "$GITHUB_REF_NAME" == native-preview-installers-v* && "${{ matrix.platform }}" != linux ]]; then
-            export POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE="$(node -p 'require("node:path").resolve("desktop/native/update-release.pub")')"
-            flags+=(--release-key-only)
-          fi
-          node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }} ${{ matrix.target }} "${flags[@]}"
+      - name: Package the Rust adapter
+        run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }} ${{ matrix.target }} --installer
       - name: Install and verify the Debian package
         if: runner.os == 'Linux'
         env:
@@ -97,7 +76,11 @@ jobs:
           sudo dpkg -i dist/desktop-native-preview/*.deb
           cmp /usr/bin/agent-space-native desktop/native/target/release/agent-space-native
           desktop-file-validate /usr/share/applications/org.agent-space.adapter.desktop
-          env -u POCKET_NATIVE_GATEWAY_PAYLOAD node --import tsx scripts/desktop/native-managed-smoke.ts /usr/bin/agent-space-native
+          test ! -e /usr/lib/agent-space-native/gateway
+          node --import tsx scripts/desktop/native-smoke.ts /usr/bin/agent-space-native
+          node --import tsx scripts/desktop/native-dsh-smoke.ts /usr/bin/agent-space-native
+          cd desktop/native
+          cargo test --release --locked update::tests
       - name: Mount and verify the macOS installer
         if: runner.os == 'macOS'
         env:
@@ -110,11 +93,8 @@ jobs:
           app="$mount/Agent Space Adapter.app"
           test -L "$mount/Applications"
           codesign --verify --deep --strict "$app"
-          if [[ "$GITHUB_REF_NAME" == native-preview-installers-v* ]]; then
-            cmp desktop/native/update-release.pub "$app/Contents/Resources/gateway/native-update-key.pem"
-            test -f "$app/Contents/Resources/gateway/native-update-release-key-only"
-          fi
-          env -u POCKET_NATIVE_GATEWAY_PAYLOAD node --import tsx scripts/desktop/native-managed-smoke.ts "$app/Contents/MacOS/agent-space-native"
+          test ! -e "$app/Contents/Resources/gateway"
+          node --import tsx scripts/desktop/native-smoke.ts "$app/Contents/MacOS/agent-space-native"
       - name: Verify Windows install, reinstall and uninstall
         if: runner.os == 'Windows'
         run: |
@@ -126,13 +106,8 @@ jobs:
             $process = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
             if ($process.ExitCode -ne 0 -or (Get-FileHash $exe).Hash -ne $expected) { throw 'Installation failed' }
           }
-          if (!(Test-Path (Join-Path $dir 'gateway\scripts\native-manager.mjs'))) { throw 'Plugin gateway not installed' }
-          if ($env:GITHUB_REF_NAME -like 'native-preview-installers-v*') {
-            $key = Join-Path $dir 'gateway\native-update-key.pem'
-            $policy = Join-Path $dir 'gateway\native-update-release-key-only'
-            if (!(Test-Path $policy) -or (Get-FileHash $key).Hash -ne (Get-FileHash desktop/native/update-release.pub).Hash) { throw 'Update trust policy not installed' }
-            if ((Get-AuthenticodeSignature -LiteralPath $setup).Status -ne 'NotSigned') { throw 'Unexpected publisher signature' }
-          }
+          if (Test-Path (Join-Path $dir 'gateway')) { throw 'Unexpected gateway runtime' }
+          if ((Get-AuthenticodeSignature -LiteralPath $setup).Status -ne 'NotSigned') { throw 'Unexpected publisher signature' }
           # Uninstall only the packaged files, even when an unrelated file exists alongside them.
           New-Item -Path (Join-Path $dir 'keep.txt') -ItemType File | Out-Null
           $process = Start-Process -FilePath (Join-Path $dir 'Uninstall.exe') -ArgumentList '/S' -Wait -PassThru
@@ -141,17 +116,11 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: desktop/native
         run: cargo build --release --locked --no-default-features
-      - name: Verify the standalone Rust gateway
+      - name: Verify the Rust gateway and Named Pipe on Windows
+        if: runner.os == 'Windows'
         env:
           POCKET_NATIVE_TEST_IPC: '1'
-        shell: bash
-        run: env -u POCKET_NATIVE_GATEWAY_PAYLOAD node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }}
-      - name: Verify encrypted Agent messages and WebRTC in the prepared payload
-        if: runner.os == 'Linux'
-        run: node --import tsx scripts/desktop/native-im-smoke.mjs
-      - name: Verify the managed gateway on Windows
-        if: runner.os == 'Windows'
-        run: node --import tsx scripts/desktop/native-managed-smoke.ts desktop/native/target/release/${{ matrix.binary }}
+        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }}
       - uses: actions/upload-artifact@v4
         with:
           name: agent-space-native-${{ matrix.platform }}-${{ matrix.arch }}
@@ -163,57 +132,3 @@ jobs:
             dist/desktop-native-preview/AgentSpace-Native-*-setup.exe
             dist/desktop-native-preview/AgentSpace-Native-*.sha256
           if-no-files-found: error
-
-  publish:
-    if: >-
-      startsWith(github.ref, 'refs/tags/native-v') ||
-      startsWith(github.ref, 'refs/tags/native-publish-v') ||
-      startsWith(github.ref, 'refs/tags/native-preview-installers-v')
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: agent-space-native-*
-          merge-multiple: true
-          path: native-release
-      - name: Verify and publish the native packages
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          version=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' desktop/native/Cargo.toml)
-          release_tag="native-v$version"
-          suffixes=(linux-x64.tar.xz linux-x64.deb windows-x64.zip windows-x64-setup.exe macos-arm64.dmg macos-x64.dmg)
-          update_notes='Preview installers are updated manually.'
-          if [ "$GITHUB_REF_NAME" = "native-preview-installers-v$version" ]; then
-            release_tag="$GITHUB_REF_NAME"
-            suffixes=(windows-x64-setup.exe macos-arm64.dmg macos-x64.dmg)
-            update_notes='Installed copies verify the Ed25519 release manifest and SHA-512 before applying updates.'
-          elif [ "$GITHUB_REF_NAME" = "native-publish-v$version" ]; then
-            # Retry a release after verification-only fixes, keeping its source tag immutable.
-            git diff --exit-code "$release_tag" HEAD -- desktop/native scripts/desktop/native-package.mjs \
-              scripts/desktop/native-installer.mjs scripts/desktop/native-manager.mjs scripts/desktop/native-update*.mjs \
-              scripts/desktop/native-im.mjs scripts/desktop/native-signing.mjs scripts/desktop/prepare.mjs scripts/build-server.mjs \
-              scripts/im-agent.ts scripts/im-call-agent.ts src/client src/server src/shared packages package.json package-lock.json assets/branding/agent-space.ico \
-              src/web/public/app-icon-32.png src/web/public/app-icon-192.png src/web/public/app-icon-512.png
-          else
-            test "$GITHUB_REF_NAME" = "$release_tag"
-          fi
-          cd native-release
-          prefix="AgentSpace-Native-$version"
-          files=()
-          for suffix in "${suffixes[@]}"; do
-            file="$prefix-$suffix"
-            sha256sum --check "$file.sha256"
-            files+=("$file" "$file.sha256")
-          done
-          gh release create "$release_tag" "${files[@]}" \
-            --verify-tag --prerelease --title "Agent Space Native $version Preview" \
-            --notes "Ely preview with the shared Codex, DSH, and third-party plugin gateway. The Windows installer has no publisher signature. The macOS app uses an ad-hoc signature and has no notarization. $update_notes"

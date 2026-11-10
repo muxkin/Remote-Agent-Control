@@ -12,7 +12,7 @@ export function releaseKey(path: string) {
   )
     return `desktop-releases/${name}`;
   const native =
-    /^native\/(linux\/x64|win32\/x64|darwin\/(?:arm64|x64))\/(latest\.json|AgentSpace-Native-\d+\.\d+\.\d+-([a-z0-9.-]+))$/.exec(
+    /^native\/(?:rust\/)?(linux\/x64|win32\/x64|darwin\/(?:arm64|x64))\/(latest\.json|AgentSpace-Native-\d+\.\d+\.\d+-([a-z0-9.-]+))$/.exec(
       name,
     );
   if (native) {

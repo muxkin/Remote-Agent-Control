@@ -1,5 +1,4 @@
 import { execFileSync } from 'node:child_process';
-import { createPublicKey } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -10,26 +9,6 @@ const appId = 'org.agent-space.adapter';
 const appName = 'Agent Space Adapter';
 const icon = resolve('src/web/public/app-icon-512.png');
 const program = 'agent-space-native';
-
-export async function stageGateway(source) {
-  const payload = process.env.POCKET_NATIVE_GATEWAY_PAYLOAD;
-  if (!payload) return false;
-  const gateway = join(source, 'gateway');
-  if (!existsSync(join(payload, 'scripts/native-manager.mjs')))
-    throw Error('Prepare the desktop gateway payload before packaging');
-  await cp(resolve(payload), gateway, { recursive: true, verbatimSymlinks: true });
-  const key = process.env.POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE;
-  if (key) {
-    const publicKey = createPublicKey(await readFile(key));
-    if (publicKey.asymmetricKeyType !== 'ed25519')
-      throw Error('Native updates require an Ed25519 public key');
-    await writeFile(
-      join(gateway, 'native-update-key.pem'),
-      publicKey.export({ format: 'pem', type: 'spki' }),
-    );
-  }
-  return true;
-}
 
 export async function buildInstaller(platform, source, version, output, signed = false) {
   const stage = await mkdtemp(join(tmpdir(), 'agent-space-native-installer-'));
@@ -49,7 +28,6 @@ export async function buildInstaller(platform, source, version, output, signed =
         `${define}OUTPUT_FILE=${output}`,
         `${define}VERSION=${version}`,
         `${define}APP_ICON=${resolve('assets/branding/agent-space.ico')}`,
-        ...(existsSync(join(source, 'gateway')) ? [`${define}BUNDLE_GATEWAY=1`] : []),
         resolve('desktop/native/installer.nsi'),
       ]);
       if (signed) windowsSign(output);
@@ -70,13 +48,6 @@ async function buildDeb(stage, source, version, output) {
   for (const [directory, files] of Object.entries(locations)) {
     await mkdir(join(stage, directory), { recursive: true });
     for (const file of files) await cp(join(source, file), join(stage, directory, file));
-  }
-  if (existsSync(join(source, 'gateway'))) {
-    await mkdir(join(stage, 'usr/lib/agent-space-native'), { recursive: true });
-    await cp(join(source, 'gateway'), join(stage, 'usr/lib/agent-space-native/gateway'), {
-      recursive: true,
-      verbatimSymlinks: true,
-    });
   }
   await writeFile(
     join(stage, 'DEBIAN/control'),
@@ -123,11 +94,6 @@ async function buildDmg(stage, source, version, output, signed) {
   await cp(join(source, program), join(contents, 'MacOS', program));
   for (const file of ['README.txt', 'LICENSE', 'THIRD-PARTY-NOTICES.txt'])
     await cp(join(source, file), join(resources, file));
-  if (existsSync(join(source, 'gateway')))
-    await cp(join(source, 'gateway'), join(resources, 'gateway'), {
-      recursive: true,
-      verbatimSymlinks: true,
-    });
   const iconset = join(stage, 'AgentSpace.iconset');
   await mkdir(iconset);
   for (const size of [16, 32, 128, 256, 512]) {

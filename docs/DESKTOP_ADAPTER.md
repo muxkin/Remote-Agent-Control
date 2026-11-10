@@ -2,11 +2,13 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。Windows、Linux 和 macOS 安装包与 CI 生成的便携包使用相同的 Ely 界面，并附带共享网关、Node、Python 和官方插件。Ely 管理托盘、自启动、配对和更新，Agent 由独立插件宿主连接。源码或无网关负载的构建仍可运行独立 Rust Codex 网关。两种模式使用相同的 Noise 配对协议和 SQLite 状态目录。
+原生适配器位于 `desktop/native`。v0.3.0 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+
+v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
 ### 原生安装包
 
-[原生预览发布页](https://github.com/muxkin/Remote-Agent-Control/releases)列出可下载的实际产物。已发布的 0.2.7 提供 Windows 和 Linux 便携包。以下安装包由新的构建流程生成，随通过验收的后续预览标签发布。
+[原生预览发布页](https://github.com/muxkin/Remote-Agent-Control/releases)列出可下载的实际产物。已发布的 0.2.7 提供 Windows 和 Linux 便携包。以下是 CI 生成的开发安装包格式。
 
 | 平台 | 安装包 | 安装方式 |
 | --- | --- | --- |
@@ -16,42 +18,17 @@
 
 安装版与便携版使用同一原生状态目录。切换前先从托盘退出原进程。如果便携版已开启自启动，先关闭，再在安装版启用，使自启动指向安装位置。卸载保留身份、配对和附件数据。Windows 预览安装包没有发布者签名。macOS 预览应用使用本地临时签名（ad-hoc），未经过 Apple 公证。预览安装器通过 GitHub Releases 提供 SHA-256 校验。启用发布密钥的安装版可自动获取更新。
 
-### Agent 插件
+### Agent 支持范围
 
-安装版沿用[插件 SDK 和监督器](ADAPTER_PLUGINS.md)。默认启用 `codex-local`，DSH 和第三方插件可按实例配置。同一种插件可以同时运行多个实例，各有独立宿主、凭据、数据目录和版本绑定。Ely 的概览和诊断显示各实例的连接状态。
-
-把实例数组保存为原生状态目录下的 `instances.json`，并在同目录下的私有 `gateway.env` 设置对应凭据。现有 `POCKET_ADAPTERS_FILE` 和 `POCKET_BACKENDS_FILE` 可继续使用，优先于默认文件。修改实例配置后重启适配器。终端中的 `agent-space-native --adapter list`、`install`、`upgrade` 和 `rollback` 调用原有插件 CLI。官方插件随整包更新交付，监督器按实例安全交接。
-
-从独立 Rust 网关切换时，安装版继续读取同一设备身份、配对、操作记录和已完成的上传。原生上传仍按设备及会话校验归属，并验证文件摘要。上传中的文件需要重新发送。原有 Rust `transport.env` 专用存储设置应按共享网关的 `gateway.env` 配置映射，已有数据目录保持原位。
-
-### 独立 Agent 的消息和通话
-
-独立 Agent 继续使用原来的加密账号状态文件。已有接入可改用 `agent-space-native --im` 和 `agent-space-native --im-call`，参数与原 CLI 一致。需要桌面端代管时，在原生状态目录放置私有 `im-agents.json`，或用 `POCKET_NATIVE_IM_AGENTS` 指向绝对路径。
-
-```json
-[
-  {
-    "id": "research",
-    "state": "/private/research-agent.json",
-    "messageHandler": "/private/message-handler.mjs",
-    "callHandler": "/private/media-handler.mjs"
-  }
-]
-```
-
-每个配置独立运行，可只启用消息或通话。消息模块导出 `onMessage(event, { messaging, signal })`，需要回复时沿用稳定请求 ID。进度在处理成功后提交，首次接入从当前 cursor 开始，也可通过配置中的 `cursor` 迁移已有进度。通话模块沿用 [Agent 通话处理器](AGENT_CALLS.md)。可选 `environmentFile` 仅加载该 Agent 的私有环境。迁移前退出同一身份的旧接听进程。消息处理或通话结束前，桌面更新会等待。
+当前 Rust 网关支持 Codex 会话。DSH 通过独立的 Rust 实例接口读取会话和历史，沿用私有 `instances.json` 中的实例 ID、连接地址与凭据变量。DSH 写操作和持续实时订阅、第三方插件宿主及独立 Agent 的消息与通话仍待迁移。已有独立 Agent 进程、加密账号和插件配置可继续保留。切换前先退出使用同一状态目录的旧适配器。
 
 ### 原生安装版自动更新
 
-附带 Ed25519 公钥的安装包默认启用更新。后台首次启动后检查，之后每四小时检查一次。默认跟随当前服务地址，使用 `/downloads/desktop/native/<平台>/<架构>/latest.json`。可在私有 `gateway.env` 用 `POCKET_NATIVE_UPDATE_BASE_URL` 指定 HTTPS 更新根目录，或用 `POCKET_NATIVE_UPDATES=0` 关闭，修改后重启。
+原生更新代码内置 `desktop/native/update-release.pub` 的 Ed25519 公钥。默认跟随当前服务，使用 `/downloads/desktop/native/rust/<平台>/<架构>/latest.json`。可用 `POCKET_NATIVE_UPDATE_BASE_URL` 指定 HTTPS 更新根目录，或用 `POCKET_NATIVE_UPDATES=0` 关闭，修改后重启。便携包需手动替换。
 
-更新先验证签名、平台、架构和版本，再从同源下载并验证长度与 SHA-512。安装前向网关确认手机连接、恢复宽限期和在途写操作均已结束。网关停止接入并退出后，独立更新进程才安装并重新启动适配器。使用平台证书的 Windows 安装版还验证 Authenticode。使用 Developer ID 的 macOS 安装版还验证 Gatekeeper。使用发布密钥的 Windows 和 macOS 安装版通过 Ed25519 清单及安装包 SHA-512 验证更新，macOS 另外验证应用内的临时签名。系统正常执行自己的启动策略。Linux DEB 在设置页点「安装已下载更新」，由 apt 和 PolicyKit 授权安装。便携包和缺少发布公钥的构建通过手动更新。
+更新会验证签名清单的运行时、平台、架构和版本，再下载并校验长度与 SHA-512。手机会话、直连和正在分发的写操作结束后，适配器才交接给独立的 Rust 安装进程。Linux DEB 由 apt 和 PolicyKit 授权。Windows 和 macOS 可使用发布密钥验签的安装器，macOS 同时验证应用代码签名并由系统打开更新后的应用。
 
-打包时用 `POCKET_NATIVE_GATEWAY_PAYLOAD` 指向已准备的共享网关，`POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE` 指向 Ed25519 公钥 PEM。CI 可用仓库变量 `POCKET_NATIVE_UPDATE_PUBLIC_KEY` 提供公钥。签名私钥只由发布者在本地持有。发布使用同一 Node/R2 工具，向原有命令增加 `--native-version <版本>`，并以 `POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE` 指定私钥文件。先发布不可覆盖的安装包，再发布签名清单。原有 Electron 清单和下载索引继续独立维护。正式发布前需提升原生版本号并完成各平台安装验收。
-
-仅发布 Windows 和 macOS 的预览安装器时，推送与 Cargo 版本一致的 `native-preview-installers-v<版本>` 标签。CI 以 `--installer --release-key-only` 打包内置发布公钥的 Windows x64 EXE、macOS Apple Silicon 和 Intel DMG，并发布安装器和 SHA-256 文件。验收后使用 `publish.mjs --native-version <版本> --release-key-only` 在可信机器上签署更新清单。更新私钥仅保存在发布机器上。
-
-正式包使用 `native-package.mjs … --installer --signed`。Linux 以 Ed25519 签名清单验证 DEB。Windows 在签名机的证书存储配置 `POCKET_NATIVE_WINDOWS_SIGN_CERT_SHA1`、`POCKET_NATIVE_WINDOWS_TIMESTAMP_URL`，必要时指定 `POCKET_NATIVE_SIGNTOOL`。macOS 在签名机配置 `POCKET_NATIVE_MAC_SIGN_IDENTITY` 和 `POCKET_NATIVE_MAC_NOTARY_PROFILE`，先签名并公证应用，再制作并公证 DMG。发布前在目标系统复核签名。
+验证各平台安装和升级后，可用 `publish.mjs --native-version <版本> --rust-native` 生成签名更新清单。Windows 和 macOS 无平台签名时增加 `--release-key-only`。更新私钥留在可信发布机器，先上传安装器，再发布清单。纯 Rust 和混合版分用各自的更新路径。
 
 ### 本地构建与功能范围
 
@@ -76,7 +53,7 @@ Codex 目录按 `POCKET_NATIVE_CODEX_HOME`、`CODEX_HOME`、`~/.codex` 的顺序
 
 三系统的安装和协议验证入口见 `.github/workflows/desktop-native.yml`。Linux CI 安装 DEB 并用安装后的程序验证协议。macOS CI 挂载 DMG，校验应用包并用其中的程序验证 Socket 对端和协议。Windows CI 验证安装、重装和卸载，并用同一提交的控制台构建验证 Named Pipe 和协议。Windows 和 macOS 的桌面实机验收仍需单独完成。
 
-独立 Rust 便携模式继续面向 Codex。Windows 和 macOS 签名发行及自动安装仍需实机验收。
+Windows 和 macOS 的实际更新交接仍需在对应系统验收。
 
 在仓库根目录运行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts`，可验证旧身份和配对、新配对、历史、原生会话控制、文件传输和重启恢复。设置 `POCKET_NATIVE_TEST_RELAY=cloudflare` 可使用同一个夹具验证 Cloudflare Worker。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
 

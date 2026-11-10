@@ -33,6 +33,8 @@ const origin = url?.origin;
 const directory = resolve(args.includes('--directory') ? get('--directory') : 'dist/desktop');
 const nativeVersion = args.includes('--native-version') ? get('--native-version') : null;
 const releaseKeyOnly = args.includes('--release-key-only');
+const rustNative = args.includes('--rust-native');
+if (rustNative && !nativeVersion) throw Error('--rust-native requires an explicit native release version');
 if (releaseKeyOnly && (!nativeVersion || platform === 'linux'))
   throw Error('--release-key-only requires a Windows or macOS native release');
 if (args.includes('--native-version') && !/^\d+\.\d+\.\d+$/.test(nativeVersion ?? ''))
@@ -145,10 +147,11 @@ if (nativeVersion) {
     if (!validInstaller) throw Error('Invalid native installer format');
   }
   if (!bytes.length || bytes.length > 512 * 1024 * 1024) throw Error('Installer size out of range');
-  const path = `native/${platform}/${arch}`;
+  const path = `native/${rustNative ? 'rust/' : ''}${platform}/${arch}`;
   const payload = Buffer.from(
     JSON.stringify({
       format: 1,
+      ...(rustNative ? { runtime: 'rust' } : {}),
       ...(releaseKeyOnly ? { publisher: 'release-key' } : {}),
       platform,
       arch,
