@@ -149,7 +149,7 @@ pub fn start() -> Result<()> {
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
         let (plugins, codex) = plugins::Registry::load(&directory, &handle)?;
         config.codex = codex_backend::Group::load(&directory, &handle, codex)?;
-        let transports = storage::Transports::load(&directory)?;
+        let transports = storage::Transports::load(&directory, &config.origin)?;
         config.plugins = plugins;
         config.direct = transports.direct;
         config.storage = transports.storage;

@@ -31,6 +31,7 @@ import { FrameReader, encodeFrame } from '../../packages/adapter-codex/src/frami
 
 const executable = resolve(process.argv[2] ?? 'desktop/native/target/release/agent-space-native');
 const codexPackage = process.argv[3] && resolve(process.argv[3]);
+const storageFixture = process.env.POCKET_NATIVE_TEST_STORAGE_PLUGIN;
 const directory = await mkdtemp(
   join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'native-adapter-smoke-'),
 );
@@ -1589,6 +1590,52 @@ async function verifyCodexSwitch(
   }
 }
 
+async function installStorageFixture(fixture: string) {
+  const directory = join(state, 'storage-fixture');
+  await mkdir(directory, { mode: 0o700 });
+  const entry = process.platform === 'win32' ? 'fixture.exe' : 'fixture';
+  await copyFile(resolve(fixture), join(directory, entry));
+  const sha256 = digest(await readFile(join(directory, entry)));
+  await writeFile(join(directory, 'adapter.json'), JSON.stringify({
+    sdk: 1, name: 'native-storage-fixture', version: '1.0.0', product: 'object-storage',
+    stateVersion: 1, entry, sha256,
+  }), { mode: 0o600 });
+  await adapter('install', directory);
+  const config = join(state, 'storage-config.json');
+  const profile = join(state, 'transport.env');
+  await writeFile(config, '{"token":"fixture-only"}', { mode: 0o600 });
+  await writeFile(profile, [
+    'POCKET_NATIVE_STORAGE_PLUGIN=native-storage-fixture@1.0.0',
+    'POCKET_NATIVE_STORAGE_PLUGIN_CONFIG=' + JSON.stringify(config),
+    'POCKET_MEDIA_PREFIX=fixture',
+  ].join('\n'), { mode: 0o600 });
+  if (process.platform === 'win32') {
+    platformRuntime().privateFile(config);
+    platformRuntime().privateFile(profile);
+  }
+}
+
+async function verifyStorageFixture(session: DeviceLink, downloaded: FileManifest) {
+  const download = { backendId: 'codex-local', threadId: THREAD, fileId: downloaded.id };
+  const { value: plan } = await session.request('file', { ...download, action: 'storage-plan', indices: [0] });
+  assert.equal(plan.url, `https://objects.example.org/${plan.objectId}?signed=fixture`);
+  const plugin = join(state, 'native-storage-plugin');
+  const stored = join(plugin, plan.objectId);
+  const encrypted = await readFile(stored);
+  assert.equal(encrypted.length, legacyBytes.length + 16);
+  assert.deepEqual(Buffer.from(await decryptBlock(downloaded, 0, encrypted)), legacyBytes);
+  await session.request('file', { ...download, action: 'storage-done', objectId: plan.objectId });
+  assert(!existsSync(stored));
+  for (const [index, encoding] of [[1, 'raw'], [2, 'multipart']] as const) {
+    const { value } = await session.request('file', {
+      ...legacyTransfer, action: 'storage-plan', indices: [index],
+    });
+    assert.equal(value.upload.encoding, encoding);
+    assert.equal(new URL(value.upload.url).origin, 'https://uploads.example.org');
+  }
+  console.log('Native storage plugin verified encrypted put, signed download, both upload grant types, and cleanup.');
+}
+
 try {
   const importer = () =>
     promisify(execFile)(executable, ['--import-node-state', legacyState, '--origin', origin], {
@@ -1607,6 +1654,7 @@ try {
   assert.deepEqual(await readFile(join(state, 'device-identity-v2.json')), identityBefore);
   assert.deepEqual(await readFile(join(legacyState, 'state.sqlite')), databaseBefore);
   await assert.rejects(importer(), /目标状态目录已存在/);
+  if (storageFixture) await installStorageFixture(storageFixture);
   const versions = codexPackage ? await installCodexVariants(codexPackage) : undefined;
   await verifyTlsClient();
   await relay.listen();
@@ -1628,7 +1676,10 @@ try {
     });
     for (const path of [migratedDraftPath, migratedNativePath]) {
       const manifest = await existing.rpc<FileManifest>(apiCall(`/threads/${THREAD}/media`, 'POST', { path }));
-      if (path === migratedNativePath) assert.equal(manifest.id, migratedNativeId);
+      if (path === migratedNativePath) {
+        assert.equal(manifest.id, migratedNativeId);
+        if (storageFixture) await verifyStorageFixture(existing, manifest);
+      }
       const bytes = await existing.request('file', {
         backendId: 'codex-local', threadId: THREAD, fileId: manifest.id, action: 'read', index: 0,
       });

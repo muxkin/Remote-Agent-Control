@@ -27,11 +27,26 @@ use url::Url;
 use uuid::Uuid;
 
 mod discovery;
+mod plugin;
 use discovery::Endpoints;
+use plugin::NativeStorage;
 
 #[derive(Clone)]
 pub struct Storage {
-    inner: Arc<Qiniu>,
+    inner: Arc<Transport>,
+}
+
+struct Transport {
+    http: Client,
+    provider: Provider,
+    prefix: String,
+    batch: usize,
+    jobs: Semaphore,
+}
+
+enum Provider {
+    Qiniu(Qiniu),
+    Plugin(NativeStorage),
 }
 
 struct Qiniu {
@@ -42,9 +57,6 @@ struct Qiniu {
     access_key: String,
     secret: hmac::Key,
     bucket: String,
-    prefix: String,
-    batch: usize,
-    jobs: Semaphore,
 }
 
 pub struct Transports {
@@ -53,7 +65,7 @@ pub struct Transports {
 }
 
 impl Transports {
-    pub fn load(directory: &Path) -> Result<Self> {
+    pub fn load(directory: &Path, relay: &Url) -> Result<Self> {
         let file = directory.join("transport.env");
         let profile = if file.exists() {
             dotenvy::Iter::new(private_file(&file, false)?)
@@ -100,7 +112,11 @@ impl Transports {
             Some(crate::direct::Direct::new(urls))
         };
         let upload = get("POCKET_NATIVE_QINIU_UPLOAD_URL").filter(|value| !value.is_empty());
-        let storage = if upload.is_some()
+        let storage = if let Some(key) = explicit("POCKET_NATIVE_STORAGE_PLUGIN") {
+            let config = explicit("POCKET_NATIVE_STORAGE_PLUGIN_CONFIG").map(PathBuf::from);
+            let plugin = NativeStorage::load(directory, relay, &key, config.as_deref())?;
+            Some(Storage::new(Provider::Plugin(plugin), &get)?)
+        } else if upload.is_some()
             || [
                 "POCKET_MEDIA_ORIGIN",
                 "POCKET_MEDIA_BUCKET",
@@ -110,7 +126,7 @@ impl Transports {
             .iter()
             .all(|key| get(key).is_some_and(|value| !value.is_empty()))
         {
-            Some(Storage::new(upload, &get)?)
+            Some(Storage::qiniu(upload, &get)?)
         } else {
             None
         };
@@ -180,7 +196,7 @@ fn transport_settings(file: std::fs::File, explicit: bool) -> Result<HashMap<Str
 }
 
 impl Storage {
-    fn new(upload: Option<String>, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
+    fn qiniu(upload: Option<String>, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
         let required = |name| {
             get(name)
                 .filter(|value| !value.is_empty())
@@ -194,6 +210,21 @@ impl Storage {
             required("POCKET_QINIU_SECRET_KEY")?.as_bytes(),
         );
         let bucket = required("POCKET_MEDIA_BUCKET")?;
+        Self::new(
+            Provider::Qiniu(Qiniu {
+                http: storage_client()?,
+                upload_override,
+                endpoints: OnceCell::new(),
+                download,
+                access_key,
+                secret,
+                bucket,
+            }),
+            get,
+        )
+    }
+
+    fn new(provider: Provider, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
         let prefix = get("POCKET_MEDIA_PREFIX").unwrap_or_else(|| "codex-pocket".to_owned());
         ensure!(
             !prefix.is_empty()
@@ -209,21 +240,14 @@ impl Storage {
             .transpose()?
             .unwrap_or(25);
         ensure!((1..=50).contains(&batch), "对象存储批次须在 1–50 MiB");
-        let http = Client::builder()
-            .use_rustls_tls()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(120))
-            .build()?;
+        let http = match &provider {
+            Provider::Qiniu(qiniu) => qiniu.http.clone(),
+            Provider::Plugin(_) => storage_client()?,
+        };
         Ok(Self {
-            inner: Arc::new(Qiniu {
+            inner: Arc::new(Transport {
                 http,
-                upload_override,
-                endpoints: OnceCell::new(),
-                download,
-                access_key,
-                secret,
-                bucket,
+                provider,
                 prefix,
                 batch,
                 jobs: Semaphore::new(2),
@@ -276,8 +300,13 @@ impl Storage {
             let size = indices.iter().try_fold(0, |total, &index| {
                 Ok::<_, anyhow::Error>(total + block_length(&manifest, index)? + aead::MAX_TAG_LEN)
             })?;
-            let endpoints = self.inner.endpoints().await?;
             let object = Uuid::new_v4();
+            let key = self.inner.key(object);
+            let grant = if complete {
+                None
+            } else {
+                Some(self.inner.provider.plan(&key, size).await?)
+            };
             {
                 let store = db.lock().expect("database mutex poisoned");
                 store.db.execute(
@@ -303,10 +332,8 @@ impl Storage {
                     ],
                 )?;
             }
-            let key = self.inner.key(object);
-            if !complete {
-                let plan = self.inner.plan(&endpoints.upload, &key, size)?;
-                return Ok(json!({"objectId":object,"upload":plan}));
+            if let Some(grant) = grant {
+                return Ok(json!({"objectId":object,"upload":grant}));
             }
             let mut ciphertext = Vec::with_capacity(size);
             for &index in &indices {
@@ -326,9 +353,10 @@ impl Storage {
                 .await??;
                 ciphertext.extend(block);
             }
-            self.inner.put(&endpoints.upload, &key, ciphertext).await?;
+            self.inner.provider.put(&key, ciphertext).await?;
+            let url = self.inner.provider.download_url(&key, 900).await?;
             return Ok(
-                json!({"objectId":object,"url":self.inner.signed_url(&key, 900), "indices":indices, "size":size}),
+                json!({"objectId":object,"url":url.as_str(), "indices":indices, "size":size}),
             );
         }
 
@@ -373,13 +401,8 @@ impl Storage {
                         total + block_length(&manifest, index)? + aead::MAX_TAG_LEN,
                     )
                 })?;
-                self.inner.endpoints().await?;
-                let mut response = self
-                    .inner
-                    .http
-                    .get(self.inner.signed_url(&key, 300))
-                    .send()
-                    .await?;
+                let url = self.inner.provider.download_url(&key, 300).await?;
+                let mut response = self.inner.http.get(url).send().await?;
                 ensure!(
                     response.status().is_success()
                         && response.content_length().is_none_or(|n| n == size as u64),
@@ -416,7 +439,7 @@ impl Storage {
             _ => anyhow::bail!("对象方向无效"),
         }
         // The bucket policy expires unfinished ciphertext even if the desktop is offline.
-        if self.inner.remove(&key).await.is_ok() && native.is_some() {
+        if self.inner.provider.remove(&key).await.is_ok() && native.is_some() {
             db.lock().expect("database mutex poisoned").db.execute(
                 "DELETE FROM native_storage_objects WHERE id=?1",
                 [object.to_string()],
@@ -472,11 +495,59 @@ fn origin(raw: &str) -> Result<Url> {
     Ok(url)
 }
 
-impl Qiniu {
+fn storage_client() -> Result<Client> {
+    Ok(Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(120))
+        .build()?)
+}
+
+impl Transport {
     fn key(&self, id: Uuid) -> String {
         format!("{}/private-encrypted-v2/{id}", self.prefix)
     }
+}
 
+impl Provider {
+    async fn plan(&self, key: &str, size: usize) -> Result<Value> {
+        match self {
+            Self::Qiniu(qiniu) => qiniu.plan(&qiniu.endpoints().await?.upload, key, size),
+            Self::Plugin(plugin) => plugin.plan(key, size).await,
+        }
+    }
+
+    async fn download_url(&self, key: &str, seconds: i64) -> Result<Url> {
+        match self {
+            Self::Qiniu(qiniu) => {
+                qiniu.endpoints().await?;
+                Ok(Url::parse(&qiniu.signed_url(key, seconds))?)
+            }
+            Self::Plugin(plugin) => plugin.download_url(key, now() + seconds * 1_000).await,
+        }
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<()> {
+        match self {
+            Self::Qiniu(qiniu) => {
+                qiniu
+                    .put(&qiniu.endpoints().await?.upload, key, bytes)
+                    .await
+            }
+            Self::Plugin(plugin) => plugin.put(key, bytes).await,
+        }
+    }
+
+    async fn remove(&self, key: &str) -> Result<()> {
+        match self {
+            Self::Qiniu(qiniu) => qiniu.remove(key).await,
+            Self::Plugin(plugin) => plugin.remove(key).await,
+        }
+    }
+}
+
+impl Qiniu {
     fn sign(&self, data: &str) -> String {
         format!(
             "{}:{}",

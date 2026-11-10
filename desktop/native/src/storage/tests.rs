@@ -128,8 +128,8 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
         .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let storage = Storage {
-        inner: Arc::new(Qiniu {
+    let storage = Storage::new(
+        Provider::Qiniu(Qiniu {
             http,
             upload_override: None,
             endpoints: OnceCell::new_with(Some(Endpoints {
@@ -140,11 +140,9 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
             access_key: "fixture".into(),
             secret: hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"fixture secret"),
             bucket: "fixture".into(),
-            prefix: "codex-pocket".into(),
-            batch: 1,
-            jobs: Semaphore::new(2),
         }),
-    };
+        &|key| (key == "POCKET_NATIVE_STORAGE_BATCH_MIB").then(|| "1".into()),
+    )?;
     let request = json!({"objectId":object});
     let resume = |owner: String, scope: Scope| {
         storage.handle(
@@ -251,7 +249,10 @@ async fn discovers_provider_endpoints_and_requires_a_private_bucket() -> Result<
             .into(),
         )
     };
-    let mut storage = Storage::new(None, &get)?;
+    let mut storage = Storage::qiniu(None, &get)?;
+    let Provider::Qiniu(qiniu) = &mut Arc::get_mut(&mut storage.inner).unwrap().provider else {
+        unreachable!()
+    };
     let secret = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"fixture-secret");
     let fixture = tokio::spawn(async move {
         for private in [0, 1, 1] {
@@ -311,19 +312,17 @@ async fn discovers_provider_endpoints_and_requires_a_private_bucket() -> Result<
         }
         Ok::<_, std::io::Error>(())
     });
-    let failure = storage
-        .inner
+    let failure = qiniu
         .discover(&control)
         .await
         .err()
         .context("Public bucket was accepted")?;
     assert!(failure.to_string().contains("必须为私有"));
-    let region = storage.inner.discover(&control).await?;
+    let region = qiniu.discover(&control).await?;
     assert_eq!(region.upload.as_str(), "https://up-z0.qiniup.com/");
     assert_eq!(region.resource.as_str(), "https://rs-z0.qiniuapi.com/");
-    Arc::get_mut(&mut storage.inner).unwrap().upload_override =
-        Some(Url::parse("https://uploads.example.org/")?);
-    let overridden = storage.inner.discover(&control).await?;
+    qiniu.upload_override = Some(Url::parse("https://uploads.example.org/")?);
+    let overridden = qiniu.discover(&control).await?;
     assert_eq!(overridden.upload.as_str(), "https://uploads.example.org/");
     fixture.await??;
     Ok(())

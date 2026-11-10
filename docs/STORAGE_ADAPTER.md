@@ -2,7 +2,31 @@
 
 附件优先读取手机缓存或通过 WebRTC 直连传输，无需对象存储。无直连时，8 MiB 以内走加密 WSS，更大文件可使用密文对象存储；存储不可用时回退加密 WSS。静态资源可同源提供或使用公共 CDN。仓库不附带厂商 SDK 或部署账号。
 
-## 加载方式
+## 原生对象存储插件
+
+纯 Rust 电脑适配器可安装 `product: "object-storage"` 的原生插件。使用 `agent-space-native --adapter install` 安装含 `adapter.json` 和自包含可执行文件的包，然后在私有状态目录的 `transport.env` 选择确切版本。切换版本时更新配置并重启适配器。
+
+```dotenv
+POCKET_NATIVE_STORAGE_PLUGIN=my-media-storage@1.0.0
+POCKET_NATIVE_STORAGE_PLUGIN_CONFIG=/absolute/path/to/private-storage.json
+POCKET_MEDIA_PREFIX=codex-pocket
+```
+
+配置文件可省略。文件存在时须为私有 JSON 对象，内容只通过本机插件初始化管道传给该插件。自定义旧 JavaScript 模块需移植为原生进程。连接原来的私有桶并保留前缀，可接续仍然有效的旧密文批次。内建七牛接入可直接沿用原配置。
+
+插件复用 [原生插件帧与握手](ADAPTER_PLUGINS.md#rust-原生插件)。`adapter/initialize` 收到的 `config` 含 `purpose: "media"`、服务 `origin` 和 `settings`。由插件核实实际桶权限并约束短期授权。
+
+| 方法 | 输入和返回值 |
+| --- | --- |
+| `storage/info` | 返回 `{version:1,visibility:"private",uploadOrigins:[...],remove?:true}`。上传源是精确 HTTPS Origin。 |
+| `storage/createUpload` | 接收 `key`、密文字节数 `size` 和 Unix 毫秒 `expiresAt`。返回下方定义的 multipart POST 或原始字节 PUT 授权。 |
+| `storage/downloadUrl` | 接收 `key` 和 `expiresAt`。返回单个对象的 HTTPS 签名地址字符串。 |
+| `storage/putFile` | 接收 `key`、本机临时密文文件 `file`、`contentType`、`cacheControl`、`allowedOrigin` 和 `expiresAt`。返回 `"created"` 或 `"exists"`。返回后网关清理临时文件。 |
+| `storage/remove` | 仅在 `storage/info` 声明支持清理时调用。接收 `key`，清理成功或对象已不存在时返回 `{ok:true}`。 |
+
+保持对象存储的私有生命周期策略、浏览器 CSP 和存储 CORS。适配器沿用现有浏览器传输协议，按块认证解密并验证文件。VPS 与 Cloudflare 的公开静态资源发布仍由各自的服务部署配置负责。
+
+## Node 网关加载方式
 
 ```dotenv
 POCKET_MEDIA_ADAPTER=/absolute/path/to/media-adapter.mjs

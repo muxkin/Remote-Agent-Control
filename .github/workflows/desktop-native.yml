@@ -77,7 +77,9 @@ jobs:
           cmp /usr/bin/agent-space-native desktop/native/target/release/agent-space-native
           desktop-file-validate /usr/share/applications/org.agent-space.adapter.desktop
           test ! -e /usr/lib/agent-space-native/gateway
-          node --import tsx scripts/desktop/native-smoke.ts /usr/bin/agent-space-native
+          (cd desktop/native && cargo build --release --locked --example native-storage-fixture)
+          POCKET_NATIVE_TEST_STORAGE_PLUGIN=desktop/native/target/release/examples/native-storage-fixture \
+            node --import tsx scripts/desktop/native-smoke.ts /usr/bin/agent-space-native
           node --import tsx scripts/desktop/native-dsh-smoke.ts /usr/bin/agent-space-native
           cd desktop/native
           cargo test --release --locked

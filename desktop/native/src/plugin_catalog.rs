@@ -186,7 +186,7 @@ impl Catalog {
         Ok(key)
     }
 
-    fn package(&self, key: &str) -> Result<Option<Package>> {
+    pub(crate) fn package(&self, key: &str) -> Result<Option<Package>> {
         let record: Option<(String, String)> = self
             .db
             .query_row(
