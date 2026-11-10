@@ -32,6 +32,8 @@ agent-space-native --adapter result REQUEST_ID
 
 Codex 默认实例沿用 `codex-local`、原有会话、配对和上传索引。实例可保留旧配置的 `home`、`root`、`socket`、`executable` 和 `appTools`，也可继续用原生环境变量指定路径。DSH 沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。
 
+从 v0.3.12 起，可在同一网关配置多个官方 Codex 插件实例。用各自的 `id` 和 `config.home` 选择会话目录，分别用 `config.socket` 和 `config.appTools` 指定对应桌面的会话与工具端点。具名实例在 Windows 上需要明确的 `socket` 才能启用实时控制。每个实例单独记录订阅、操作和附件，沿用旧 Node 版 `backends/<id>/uploads` 中对应设备和会话的附件。具名实例的在线升级和回滚需要支持多实例的 Codex 插件版本。
+
 源码构建使用 `cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-codex --bin agent-space-adapter-dsh`。运行 `scripts/desktop/native-plugin-package.mjs` 生成插件目录后，可分别用 `scripts/desktop/native-smoke.ts` 和 `scripts/desktop/native-dsh-smoke.ts` 验证。两条命令均接收适配器可执行文件和插件目录作为参数。
 
 下面的安装、npm 发布和在线监督器说明适用于旧 Node 网关。
@@ -56,6 +58,17 @@ flowchart LR
 
 ```json
 [
+  {
+    "id": "codex-secondary",
+    "name": "第二个 Codex",
+    "plugin": "@agent-remote/adapter-codex",
+    "version": "0.3.12",
+    "config": {
+      "home": "/absolute/path/to/codex-home",
+      "socket": "/absolute/path/to/codex.sock",
+      "appTools": "/absolute/path/to/app-tools.sock"
+    }
+  },
   {
     "id": "dsh-one",
     "name": "我的 DSH",

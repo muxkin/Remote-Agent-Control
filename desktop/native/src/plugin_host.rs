@@ -384,6 +384,12 @@ impl Host {
                 )
                 .await?;
             ensure!(result["sdk"] == 1, "原生插件 SDK 版本不兼容");
+            ensure!(
+                self.id == crate::codex_backend::ID
+                    || package.manifest.name != crate::codex_backend::PACKAGE
+                    || result["scopedCodex"] == true,
+                "此 Codex 插件版本不支持具名实例"
+            );
             let state = process.request("adapter/status", json!({})).await?;
             ensure!(
                 state["info"].is_object() && state["status"].is_object(),

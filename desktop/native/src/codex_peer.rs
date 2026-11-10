@@ -16,10 +16,19 @@ pub struct Endpoint {
     socket: PathBuf,
     executable: Option<PathBuf>,
     app_tools: Option<PathBuf>,
+    #[cfg(unix)]
+    discover_tools: bool,
 }
 
 impl Endpoint {
-    pub fn discover(home: &Path, options: &crate::codex_service::Options) -> Option<Self> {
+    pub fn discover(
+        home: &Path,
+        options: &crate::codex_service::Options,
+        named: bool,
+    ) -> Option<Self> {
+        if cfg!(windows) && named && options.socket.is_none() {
+            return None;
+        }
         let socket = options.socket.clone().unwrap_or_else(|| {
             if cfg!(windows) {
                 PathBuf::from(r"\\.\pipe\codex-ipc")
@@ -69,6 +78,8 @@ impl Endpoint {
             socket,
             executable,
             app_tools: options.app_tools.clone(),
+            #[cfg(unix)]
+            discover_tools: !named,
         })
     }
 
@@ -84,6 +95,9 @@ impl Endpoint {
         let socket = self.app_tools.clone();
         #[cfg(unix)]
         let socket = socket.or_else(|| {
+            if !self.discover_tools {
+                return None;
+            }
             let root = if cfg!(target_os = "linux") {
                 PathBuf::from("/tmp")
             } else {
@@ -114,6 +128,8 @@ impl Endpoint {
                 .ok_or_else(|| anyhow::anyhow!("本机桌面应用工具不可用或存在多个端点"))?,
             executable: self.executable.clone(),
             app_tools: None,
+            #[cfg(unix)]
+            discover_tools: false,
         };
         tokio::time::timeout(Duration::from_secs(5), endpoint.connect(true)).await?
     }

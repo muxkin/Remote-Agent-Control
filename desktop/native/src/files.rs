@@ -19,9 +19,13 @@ pub const BLOCK: usize = 1024 * 1024;
 pub(crate) struct Scope(String);
 
 impl Scope {
-    pub(crate) fn codex(thread: Uuid) -> Self {
+    pub(crate) fn codex(backend: &str, thread: Uuid) -> Self {
         // Keep the original SQLite key so completed and resumable Codex uploads survive.
-        Self(thread.to_string())
+        if backend == crate::codex_backend::ID {
+            Self(thread.to_string())
+        } else {
+            Self::plugin(backend, &thread.to_string())
+        }
     }
 
     pub(crate) fn plugin(backend: &str, thread: &str) -> Self {

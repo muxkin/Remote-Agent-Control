@@ -10,7 +10,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
@@ -32,6 +32,64 @@ pub struct Backend {
     name: Option<Arc<str>>,
 }
 
+#[derive(Clone)]
+pub struct Group(Arc<BTreeMap<String, Backend>>);
+
+impl Default for Group {
+    fn default() -> Self {
+        Self(Arc::new(BTreeMap::from([(
+            ID.to_owned(),
+            Backend::default(),
+        )])))
+    }
+}
+
+impl Group {
+    pub(crate) fn load(
+        directory: &Path,
+        runtime: &tokio::runtime::Handle,
+        selections: BTreeMap<String, Selection>,
+    ) -> Result<Self> {
+        let backends = selections
+            .into_iter()
+            .map(|(id, selection)| {
+                let backend = Backend::load(directory, runtime, &id, selection)?;
+                Ok((id, backend))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self(Arc::new(backends)))
+    }
+
+    pub(crate) fn get(&self, id: &str) -> Option<&Backend> {
+        self.0.get(id)
+    }
+
+    pub(crate) fn main(&self) -> &Backend {
+        self.0.get(ID).expect("default Codex instance")
+    }
+
+    pub(crate) fn all(&self) -> impl Iterator<Item = (&str, &Backend)> {
+        std::iter::once((ID, self.main())).chain(
+            self.0
+                .iter()
+                .filter(|(id, _)| *id != ID)
+                .map(|(id, backend)| (id.as_str(), backend)),
+        )
+    }
+
+    pub(crate) fn has_history(&self) -> bool {
+        self.0.values().any(Backend::has_history)
+    }
+
+    pub(crate) fn configured(&self) -> bool {
+        self.0.values().any(Backend::configured)
+    }
+
+    pub(crate) async fn refresh(&self) {
+        futures::future::join_all(self.0.values().map(Backend::refresh)).await;
+    }
+}
+
 pub(crate) struct Selection {
     name: String,
     version: Option<String>,
@@ -41,6 +99,7 @@ pub(crate) struct Selection {
 
 impl Selection {
     pub(crate) fn resolve(
+        id: &str,
         name: String,
         version: Option<String>,
         config: &Map<String, Value>,
@@ -48,6 +107,9 @@ impl Selection {
         read_only: bool,
     ) -> Result<Self> {
         let variable = |key: &str| {
+            if id != ID {
+                return None;
+            }
             env::var_os(key)
                 .or_else(|| legacy.get(key).map(Into::into))
                 .filter(|value| !value.is_empty())
@@ -152,9 +214,10 @@ impl Live {
 }
 
 impl Backend {
-    pub(crate) fn load(
+    fn load(
         directory: &Path,
         runtime: &tokio::runtime::Handle,
+        id: &str,
         selection: Selection,
     ) -> Result<Self> {
         let Selection {
@@ -163,7 +226,7 @@ impl Backend {
             options,
             read_only,
         } = selection;
-        let package = Catalog::open(directory)?.bind_official(ID, PACKAGE, version.as_deref())?;
+        let package = Catalog::open(directory)?.bind_official(id, PACKAGE, version.as_deref())?;
         if let Some(package) = package {
             ensure!(
                 package.manifest.product == "codex",
@@ -175,11 +238,11 @@ impl Backend {
             };
             let version = package.manifest.version.clone();
             let host = Arc::new(Host::new(
-                ID.into(),
+                id.into(),
                 name.clone(),
                 Some(package),
                 serde_json::to_value(&options)?,
-                directory.join("native-plugins").join("instances").join(ID),
+                directory.join("native-plugins").join("instances").join(id),
                 read_only,
             ));
             runtime.spawn(host.clone().supervise(directory.to_owned()));
@@ -193,13 +256,18 @@ impl Backend {
                 name: Some(name.into()),
             });
         }
-        match Local::open(&options, read_only) {
+        match Local::open(&options, read_only, id != ID) {
             Ok(local) => Ok(Self {
                 inner: Some(Kind::Local(Arc::new(local))),
                 name: Some(name.into()),
             }),
-            Err(error) if options.explicit => Err(error).context("无法读取 Codex 会话索引"),
-            Err(_) => Ok(Self::default()),
+            Err(error) if options.explicit && id == ID => {
+                Err(error).context("无法读取 Codex 会话索引")
+            }
+            Err(_) => Ok(Self {
+                inner: None,
+                name: (id != ID).then(|| name.into()),
+            }),
         }
     }
 
@@ -253,9 +321,17 @@ impl Backend {
         status(self.available(), online)
     }
 
-    pub(crate) fn info(&self, online: bool) -> Option<Value> {
+    pub(crate) fn info(&self, id: &str, online: bool) -> Option<Value> {
         let available = self.available();
-        let mut info = info(available, online)?;
+        let mut info = match info(available, online) {
+            Some(info) => info,
+            None if id != ID => json!({
+                "product":"codex","connected":false,"version":null,
+                "profile":"rust-native","capabilities":{},
+            }),
+            None => return None,
+        };
+        info["id"] = json!(id);
         if let Some(name) = &self.name {
             info["name"] = json!(name.as_ref());
         }
@@ -363,6 +439,7 @@ impl Backend {
 
     pub(crate) async fn media(
         &self,
+        backend: &str,
         thread: Uuid,
         device: String,
         reference: String,
@@ -372,6 +449,7 @@ impl Backend {
             Kind::Local(local) => {
                 local
                     .media(
+                        backend.to_owned(),
                         thread,
                         device,
                         reference,

@@ -10,18 +10,18 @@ use uuid::Uuid;
 
 const COLUMNS: &str =
     "id,thread_id,kind,state,turn_id,error,created,updated,result_thread_id,backend_id";
-const BACKEND: &str = "codex-local";
 
 impl Store {
     pub fn begin_operation(
         &mut self,
+        backend: &str,
         id: Uuid,
         device: &str,
         thread: Uuid,
         action: &Action,
     ) -> Result<(Value, bool)> {
         self.begin(
-            BACKEND,
+            backend,
             id,
             device,
             &thread.to_string(),
@@ -32,6 +32,7 @@ impl Store {
 
     pub fn begin_management(
         &mut self,
+        backend: &str,
         id: Uuid,
         device: &str,
         thread: &str,
@@ -39,7 +40,7 @@ impl Store {
         input: &impl serde::Serialize,
     ) -> Result<(Value, bool)> {
         self.begin(
-            BACKEND,
+            backend,
             id,
             device,
             thread,
@@ -116,7 +117,7 @@ impl Store {
         Ok((result, !busy))
     }
 
-    pub fn finish_operation(&mut self, id: Uuid, outcome: Outcome) -> Result<()> {
+    pub fn finish_operation(&mut self, backend: &str, id: Uuid, outcome: Outcome) -> Result<()> {
         let (state, turn, error, result) = match outcome {
             Outcome::Completed(result) => {
                 ("completed", None, None, result.map(|id| id.to_string()))
@@ -134,7 +135,7 @@ impl Store {
         self.db.execute(
             "UPDATE operations SET state=?1,turn_id=COALESCE(?2,turn_id),error=?3,updated=?4,result_thread_id=?5
              WHERE backend_id=?6 AND id=?7 AND state='dispatching'",
-            params![state, turn, error, now(), result, BACKEND, id.to_string()],
+            params![state, turn, error, now(), result, backend, id.to_string()],
         )?;
         Ok(())
     }
@@ -218,7 +219,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn observe_operations(&mut self, thread: &str, view: &View) -> Result<()> {
+    pub fn observe_operations(&mut self, backend: &str, thread: &str, view: &View) -> Result<()> {
         let tx = self.db.transaction()?;
         let mut update = tx.prepare(
             "UPDATE operations SET state=?1,turn_id=?2,error=NULL,updated=?3
@@ -238,7 +239,7 @@ impl Store {
                 turn.state,
                 turn.id,
                 now(),
-                BACKEND,
+                backend,
                 thread,
                 turn.request
             ])?;
@@ -246,10 +247,6 @@ impl Store {
         drop(update);
         tx.commit()?;
         Ok(())
-    }
-
-    pub fn operation(&self, device: &str, id: &str) -> Result<Option<Value>> {
-        self.operation_for(BACKEND, device, id)
     }
 
     pub(crate) fn operation_for(
@@ -262,10 +259,6 @@ impl Store {
             &format!("SELECT {COLUMNS} FROM operations WHERE backend_id=?1 AND device_id=?2 AND id=?3"),
             params![backend, device, id], |row| operation(row, 0),
         ).optional()?)
-    }
-
-    pub fn recent_operations(&self, device: &str, thread: &str) -> Result<Vec<Value>> {
-        self.recent_operations_for(BACKEND, device, thread)
     }
 
     pub(crate) fn recent_operations_for(

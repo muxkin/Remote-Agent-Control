@@ -115,7 +115,7 @@ pub fn start() -> Result<()> {
         let mut config = RelayConfig::new(origin, enrollment)?;
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
         let (plugins, codex) = plugins::Registry::load(&directory, &handle)?;
-        config.codex = codex_backend::Backend::load(&directory, &handle, codex)?;
+        config.codex = codex_backend::Group::load(&directory, &handle, codex)?;
         let transports = storage::Transports::load(&directory)?;
         config.plugins = plugins;
         config.direct = transports.direct;

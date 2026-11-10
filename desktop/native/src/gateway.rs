@@ -1,5 +1,5 @@
 use crate::{
-    codex_backend::Backend,
+    codex_backend::Group,
     device::{Backends, DeviceSession},
     state::{Device, Pairing, Route, Store, hash, now},
     update::{Client, UpdateGate},
@@ -92,7 +92,7 @@ pub struct DisplayPairing {
 pub struct RelayConfig {
     pub origin: Url,
     pub enrollment: String,
-    pub codex: Backend,
+    pub codex: Group,
     pub direct: Option<crate::direct::Direct>,
     pub storage: Option<crate::storage::Storage>,
     pub plugins: crate::plugins::Registry,
@@ -116,7 +116,7 @@ impl RelayConfig {
         Ok(Self {
             origin,
             enrollment,
-            codex: Backend::default(),
+            codex: Group::default(),
             direct: None,
             storage: None,
             plugins: Default::default(),
@@ -494,7 +494,7 @@ async fn serve(
         json!({
             "type": "ready", "protocol": 2, "sessionId": session,
             "device": {"id": device.id, "name": device.name}, "ticket": device.ticket,
-            "hostName": "Agent 空间 · 原生", "status": backends.codex.status(false),
+            "hostName": "Agent 空间 · 原生", "status": backends.codex.main().status(false),
             "p2p": {"enabled": backends.direct.is_some(), "stunUrls": stun},
         }),
     )

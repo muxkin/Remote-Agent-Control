@@ -36,13 +36,19 @@ const adapter = (...args: string[]) =>
     env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
   });
 const codexHome = join(directory, 'codex');
+const secondaryId = 'codex-secondary';
+const legacyOperation = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 await mkdir(state, { mode: 0o700 });
 const host = await hostIdentity(state);
 const existingPhone = await createIdentity();
 const store = new Store(state);
 const old = store.pair(store.mintPairing().code, 'Existing phone', existingPhone.peerId);
-store.close();
 assert(old?.routeTicket);
+if (codexPackage) {
+  store.beginOperation(legacyOperation, old.deviceId, THREAD, 'rename', JSON.stringify({ title: '旧操作' }), secondaryId);
+  store.updateOperation(legacyOperation, 'completed', null, null, secondaryId);
+}
+store.close();
 const rollout = historyFixture({ codexHome } as Parameters<typeof historyFixture>[0]);
 const legacyState = join(directory, 'legacy');
 const legacyId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -209,6 +215,13 @@ const useIpc = process.env.POCKET_NATIVE_TEST_IPC === '1';
 const browserExecutable = process.env.POCKET_NATIVE_TEST_BROWSER_EXECUTABLE;
 const testStorage = process.env.POCKET_NATIVE_TEST_STORAGE === '1';
 const ipc = useIpc ? await desktopFixture() : undefined;
+const secondaryTitle = '第二个 Codex 会话';
+const secondaryRename = '第二个 Codex 已改名';
+const secondaryIpc = ipc && codexPackage ? await desktopFixture(secondaryId, secondaryTitle, secondaryRename) : undefined;
+const secondaryHome = join(directory, secondaryId);
+const secondaryUploads = join(legacyState, 'backends', secondaryId, 'uploads');
+const secondaryPath = join(secondaryUploads, legacyId, legacyName);
+const secondaryBytes = Buffer.from('第二个实例的附件');
 const portProbe = createServer().listen(0, '127.0.0.1');
 await once(portProbe, 'listening');
 const port = portProbe.address();
@@ -332,12 +345,12 @@ async function launch(useSaved = false) {
   }
 }
 
-async function desktopFixture() {
+async function desktopFixture(id = 'default', initialTitle = '测试会话', renameTitle = '已改名') {
   const path =
     process.platform === 'win32'
       ? '\\\\.\\pipe\\agent-space-native-test-' + crypto.randomUUID()
-      : join(directory, 'ipc', 'codex.sock');
-  if (process.platform !== 'win32') await mkdir(join(directory, 'ipc'), { mode: 0o700 });
+      : join(directory, 'ipc', id + '.sock');
+  if (process.platform !== 'win32') await mkdir(join(directory, 'ipc'), { mode: 0o700, recursive: true });
   const sockets = new Set<import('node:net').Socket>();
   const expected = { send: 0, steer: 0, interrupt: 0 };
   const turn = crypto.randomUUID();
@@ -354,7 +367,7 @@ async function desktopFixture() {
     'create_thread',
   ];
   const actions: string[] = [];
-  let title = '测试会话';
+  let title = initialTitle;
   let effort = 'medium';
   let mode = 'default';
   let serviceTier: string | null = null;
@@ -472,7 +485,7 @@ async function desktopFixture() {
                 };
                 break;
               case 'set_thread_title':
-                assert.deepEqual(args, { source: 'codex', threadId: THREAD, title: '已改名' });
+                assert.deepEqual(args, { source: 'codex', threadId: THREAD, title: renameTitle });
                 title = args.title;
                 break;
               case 'fork_thread':
@@ -1272,6 +1285,18 @@ async function installCodexVariants(folder: string) {
   const next = { ...manifest, version: manifest.version + '-qa.1' };
   await writeFile(join(replacement, 'adapter.json'), JSON.stringify(next));
   await adapter('install', replacement);
+  const secondaryRollout = historyFixture({ codexHome: secondaryHome } as Parameters<typeof historyFixture>[0]);
+  const secondaryDb = new DatabaseSync(join(secondaryHome, 'state_5.sqlite'));
+  secondaryDb.prepare('UPDATE threads SET title = ?, cwd = ? WHERE id = ?').run(secondaryTitle, directory, THREAD);
+  secondaryDb.close();
+  const record = JSON.parse(await readFile(secondaryRollout, 'utf8'));
+  record.payload.content[0].text =
+    '第二个实例的历史' + '\n\n手机上传的附件（保留原始文件）：\n' +
+    [secondaryPath, legacyPath].map((path) => JSON.stringify({ name: legacyName, path })).join('\n');
+  await writeFile(secondaryRollout, JSON.stringify(record) + '\n');
+  await mkdir(join(secondaryUploads, legacyId), { mode: 0o700, recursive: true });
+  await writeFile(secondaryPath, secondaryBytes, { mode: 0o600 });
+  if (process.platform === 'win32') platformRuntime().privateFile(secondaryPath);
   const configPath = join(state, 'instances.json');
   await writeFile(
     configPath,
@@ -1289,11 +1314,121 @@ async function installCodexVariants(folder: string) {
           cli: forkCli,
         },
       },
+      {
+        id: secondaryId,
+        name: 'Codex secondary',
+        plugin: manifest.name,
+        version: manifest.version,
+        config: {
+          home: secondaryHome,
+          socket: secondaryIpc?.path,
+          appTools: secondaryIpc?.path,
+          executable: secondaryIpc ? process.execPath : undefined,
+        },
+      },
     ]),
     { mode: 0o600 },
   );
   if (process.platform === 'win32') platformRuntime().privateFile(configPath);
   return { initial: manifest.version, next: next.version, name: manifest.name };
+}
+
+async function verifyCodexInstances(session: Awaited<ReturnType<typeof nodeSession>>, device: string) {
+  const call = (path: string, method?: string, body?: unknown) => ({
+    ...apiCall(path, method, body),
+    backendId: secondaryId,
+  });
+  const backends = await session.rpc<{ backends: { id: string; name: string; profile: string }[] }>(apiCall('/backends'));
+  const backend = backends.backends.find(({ id }) => id === secondaryId);
+  assert.equal(backend?.name, 'Codex secondary');
+  assert.equal(backend?.profile, 'rust-native-plugin');
+  const list = await session.rpc<{ threads: { id: string; title: string }[] }>(call('/threads'));
+  assert.deepEqual(list.threads.map(({ id, title }) => [id, title]), [[THREAD, secondaryTitle]]);
+  const history = await session.rpc<{ messages: { text: string; attachments: { path: string }[] }[] }>(
+    call(`/threads/${THREAD}/history`),
+  );
+  assert.equal(history.messages[0].text, '第二个实例的历史');
+  assert.equal(history.messages[0].attachments[0].path, secondaryPath);
+  const metadata = join(secondaryUploads, legacyId + '.json');
+  await writeFile(metadata, JSON.stringify({
+    id: legacyId, device, thread: THREAD, name: legacyName, file: secondaryPath,
+    complete: true, size: secondaryBytes.length, sha256: createHash('sha256').update(secondaryBytes).digest('hex'),
+  }), { mode: 0o600 });
+  if (process.platform === 'win32') platformRuntime().privateFile(metadata);
+  const media = `/threads/${THREAD}/media`;
+  const manifest = await session.rpc<FileManifest>(call(media, 'POST', { path: secondaryPath }));
+  await assert.rejects(session.rpc(call(media, 'POST', { path: legacyPath })));
+  await assert.rejects(session.rpc(apiCall(media, 'POST', { path: secondaryPath })));
+  const read = { threadId: THREAD, fileId: manifest.id, action: 'read', index: 0 };
+  await assert.rejects(session.request('file', { ...read, backendId: 'codex-local' }));
+  assert.deepEqual(Buffer.from((await session.request('file', { ...read, backendId: secondaryId })).bytes!), secondaryBytes);
+}
+
+async function verifyLiveCodexInstances(
+  session: Awaited<ReturnType<typeof nodeSession>>,
+  main: Awaited<ReturnType<typeof desktopFixture>>,
+  secondary: Awaited<ReturnType<typeof desktopFixture>>,
+  versions: Awaited<ReturnType<typeof installCodexVariants>>,
+) {
+  const views = new Map<string, { epoch: string; synchronized: boolean }>();
+  const remove = session.onEvent((event) => {
+    if (event.type !== 'sync' || !event.backendId) return;
+    const view = event.updates.find((update: { kind: string }) => update.kind === 'manifest');
+    if (view) views.set(event.backendId, { epoch: view.epoch, synchronized: view.thread.synchronized === true });
+  });
+  const waitFor = async (check: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 120; i++) {
+      if (await check()) return;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    assert.fail('Both Codex instances did not reach the expected state');
+  };
+  try {
+    const backends = ['codex-local', secondaryId];
+    for (const backendId of backends) await session.request('watch', { backendId, threadId: THREAD });
+    await session.rpc({ ...apiCall(`/threads/${THREAD}/open`, 'POST', { requestId: crypto.randomUUID() }), backendId: secondaryId });
+    await waitFor(() => backends.every((id) => views.get(id)?.synchronized === true));
+    const secondaryEpoch = views.get(secondaryId)?.epoch;
+    assert.notEqual(views.get('codex-local')?.epoch, secondaryEpoch);
+
+    const digest = createHash('sha256').update(secondaryBytes).digest('hex');
+    const upload = await session.rpc<FileManifest>({
+      ...apiCall(`/threads/${THREAD}/uploads`, 'POST', {
+        name: 'isolated.txt', size: secondaryBytes.length, sha256: digest, hashes: [digest],
+      }),
+      backendId: secondaryId,
+    });
+    const file = { fileId: upload.id, threadId: THREAD, backendId: secondaryId };
+    await assert.rejects(session.request('file', { ...file, backendId: 'codex-local', action: 'missing' }));
+    await session.request('file', { ...file, action: 'write', index: 0 }, secondaryBytes);
+    await session.request('file', { ...file, action: 'finish' });
+    const read = { ...file, action: 'read', index: 0 };
+    await assert.rejects(session.request('file', { ...read, backendId: 'codex-local' }));
+    assert.deepEqual(Buffer.from((await session.request('file', read)).bytes!), secondaryBytes);
+
+    const requestId = crypto.randomUUID();
+    const actions = [main, secondary].map((fixture) => fixture.actions.filter((name) => name === 'set_thread_title').length);
+    const rename = backends.map((backendId, index) => ({
+      ...apiCall(`/threads/${THREAD}/rename`, 'POST', { requestId, title: index === 0 ? '已改名' : secondaryRename }),
+      backendId,
+    }));
+    await Promise.all(rename.map((request) => session.rpc(request)));
+    await waitFor(async () => {
+      const results = await Promise.all(backends.map((backendId) =>
+        session.rpc<{ backendId: string; state: string }>({ ...apiCall(`/operations/${requestId}`), backendId }),
+      ));
+      return results.every((result, index) => result.backendId === backends[index] && result.state === 'completed');
+    });
+    await Promise.all(rename.map((request) => session.rpc(request)));
+    for (const [index, fixture] of [main, secondary].entries())
+      assert.equal(fixture.actions.filter((name) => name === 'set_thread_title').length, actions[index] + 1);
+
+    await verifyCodexSwitch(session, versions);
+    assert.equal(views.get(secondaryId)?.epoch, secondaryEpoch);
+    assert.equal(views.get(secondaryId)?.synchronized, true);
+  } finally {
+    remove();
+  }
 }
 
 async function verifyCodexSwitch(
@@ -1349,6 +1484,13 @@ try {
     }
     const existing = await reconnect(existingPhone, old.routeTicket);
     assert.equal((await existing.ready).device.id, old.deviceId);
+    if (versions) {
+      const operation = apiCall(`/operations/${legacyOperation}`);
+      await assert.rejects(existing.rpc(operation));
+      const prior = await existing.rpc<{ backendId: string; state: string }>({ ...operation, backendId: secondaryId });
+      assert.equal(prior.backendId, secondaryId);
+      assert.equal(prior.state, 'completed');
+    }
     existing.close();
 
     const phone = await createIdentity();
@@ -1472,9 +1614,10 @@ try {
     }
     await assert.rejects(describe(unrelatedFile));
     await assert.rejects(session.rpc(apiCall(`/threads/${THREAD}/messages`, 'POST', { text: 'blocked' })));
+    if (versions) await verifyCodexInstances(session, ready.device.id);
     if (ipc) {
       await testLive(session, ipc, phone);
-      if (versions) await verifyCodexSwitch(session, versions);
+      if (versions && secondaryIpc) await verifyLiveCodexInstances(session, ipc, secondaryIpc, versions);
     }
     session.close();
     await assert.rejects(pair(), 'Pairing code was not single-use');
@@ -1488,10 +1631,11 @@ try {
     await gateway.stop();
   }
   console.log(
-    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, replay rejection and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with the independently installed Codex plugin' : ''}.`,
+    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, replay rejection and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with two isolated instances of the independently installed Codex plugin' : ''}.`,
   );
 } finally {
   await relay.close();
+  await secondaryIpc?.close();
   await ipc?.close();
   await rm(directory, { recursive: true, force: true });
 }

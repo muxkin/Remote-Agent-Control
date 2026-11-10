@@ -97,6 +97,7 @@ pub struct Source {
 
 pub fn description(
     history: &History,
+    backend: &str,
     thread: Uuid,
     device: &str,
     reference: &str,
@@ -119,7 +120,7 @@ pub fn description(
         Some(local_path(reference, &cwd)?)
     };
     if let Some(path) = &requested {
-        if let Some(source) = legacy_upload(path, thread, device)? {
+        if let Some(source) = legacy_upload(path, backend, thread, device)? {
             return Ok(source);
         }
         ensure!(
@@ -332,13 +333,40 @@ pub(crate) fn legacy_root() -> Option<PathBuf> {
     }
 }
 
-fn legacy_upload(path: &Path, thread: Uuid, device: &str) -> Result<Option<Source>> {
-    let Some(root) = legacy_root()
-        .map(|root| root.join("uploads"))
-        .filter(|root| path.starts_with(root))
-    else {
+fn legacy_upload(path: &Path, backend: &str, thread: Uuid, device: &str) -> Result<Option<Source>> {
+    let Some(state) = legacy_root() else {
         return Ok(None);
     };
+    let root = if backend == crate::codex_backend::ID {
+        state.join("uploads")
+    } else {
+        state.join("backends").join(backend).join("uploads")
+    };
+    if !path.starts_with(&root) {
+        let is_upload = |path: &Path, state: &Path| {
+            let Ok(relative) = path.strip_prefix(state) else {
+                return false;
+            };
+            let mut parts = relative.components().map(|part| part.as_os_str());
+            match parts.next().and_then(|part| part.to_str()) {
+                Some("uploads") => true,
+                Some("backends") => {
+                    parts.next().is_some() && parts.next().is_some_and(|part| part == "uploads")
+                }
+                _ => false,
+            }
+        };
+        ensure!(
+            !is_upload(path, &state)
+                && !state
+                    .canonicalize()
+                    .ok()
+                    .zip(path.canonicalize().ok())
+                    .is_some_and(|(state, path)| is_upload(&path, &state)),
+            "旧附件不属于此实例"
+        );
+        return Ok(None);
+    }
     let (id, name) = path
         .strip_prefix(&root)?
         .components()
@@ -384,6 +412,12 @@ fn legacy_upload(path: &Path, thread: Uuid, device: &str) -> Result<Option<Sourc
 
 fn project_file(path: &Path, home: &Path, cwd: &Path) -> Result<Source> {
     let canonical = path.canonicalize()?;
+    ensure!(
+        !canonical
+            .components()
+            .any(|part| part.as_os_str().eq_ignore_ascii_case("native-uploads")),
+        "此附件属于其他设备或会话"
+    );
     let allowed = |root: &Path| {
         root.parent().is_some()
             && path.starts_with(root)

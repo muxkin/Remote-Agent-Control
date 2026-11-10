@@ -39,13 +39,13 @@ pub(crate) struct Local {
 }
 
 impl Local {
-    pub(crate) fn open(options: &Options, read_only: bool) -> Result<Self> {
+    pub(crate) fn open(options: &Options, read_only: bool, named: bool) -> Result<Self> {
         let home = options.home.as_deref().context("尚未配置 Codex 目录")?;
         let history = History::open(home)?;
         let desktop = if read_only {
             None
         } else {
-            Endpoint::discover(home, options)
+            Endpoint::discover(home, options, named)
                 .map(|endpoint| Desktop::new(endpoint, history.clone(), options.cli.as_deref()))
         };
         Ok(Self { history, desktop })
@@ -200,6 +200,7 @@ impl Local {
 
     pub(crate) async fn media(
         &self,
+        backend: String,
         thread: Uuid,
         device: String,
         reference: String,
@@ -208,7 +209,14 @@ impl Local {
         let history = self.history.clone();
         let view = live.and_then(|live| live.view.borrow().clone());
         tokio::task::spawn_blocking(move || {
-            history_media::description(&history, thread, &device, &reference, view.as_deref())
+            history_media::description(
+                &history,
+                &backend,
+                thread,
+                &device,
+                &reference,
+                view.as_deref(),
+            )
         })
         .await?
     }

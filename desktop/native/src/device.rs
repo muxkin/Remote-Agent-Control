@@ -1,5 +1,5 @@
 use crate::{
-    codex_backend::{Backend, ID as CODEX, Live},
+    codex_backend::{Backend, Group, ID as CODEX, Live},
     codex_live::Action,
     conversations,
     files::{Attachment, Download, Scope, VerifiedUpload},
@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Backends {
-    pub codex: Backend,
+    pub codex: Group,
     pub direct: Option<crate::direct::Direct>,
     pub storage: Option<crate::storage::Storage>,
     pub update_gate: crate::update::UpdateGate,
@@ -39,9 +39,9 @@ pub struct DeviceSession {
     peer: PeerId,
     device: Device,
     backends: Backends,
-    watches: HashMap<Uuid, Watch>,
+    watches: HashMap<(String, Uuid), Watch>,
     plugin_watches: HashMap<(String, String), PluginWatch>,
-    last_status: Value,
+    last_status: HashMap<String, Value>,
     bulk: bool,
     signaling: Option<Uuid>,
     connection: Option<Arc<dyn webrtc::peer_connection::PeerConnection>>,
@@ -78,7 +78,7 @@ impl DeviceSession {
             db,
             peer,
             device,
-            last_status: backends.codex.status(false),
+            last_status: HashMap::from([(CODEX.into(), backends.codex.main().status(false))]),
             backends,
             watches: HashMap::new(),
             plugin_watches: HashMap::new(),
@@ -152,8 +152,8 @@ impl DeviceSession {
                             Some(value)
                         }),
                         Some("watch") if !self.bulk && bytes.is_empty() => {
-                            if codex(&request) {
-                                self.watch(&request).await.map(Some)
+                            if let Some(id) = backend_id(&request).filter(|id| self.backends.codex.get(id).is_some()) {
+                                self.watch(id, &request).await.map(Some)
                             } else {
                                 self.plugin_watch(&request)
                             }
@@ -166,8 +166,8 @@ impl DeviceSession {
                             }
                         }
                         Some("unwatch") if !self.bulk && bytes.is_empty() => {
-                            if codex(&request) {
-                                self.watches.remove(&thread_id(&request["threadId"])?);
+                            if let Some(id) = backend_id(&request).filter(|id| self.backends.codex.get(id).is_some()) {
+                                self.watches.remove(&(id.to_owned(), thread_id(&request["threadId"])?));
                             } else if let (Some(backend), Some(thread)) = (request["backendId"].as_str(), request["threadId"].as_str()) {
                                 self.plugin_watches.remove(&(backend.to_owned(), thread.to_owned()));
                             }
@@ -232,15 +232,20 @@ impl DeviceSession {
         Ok(())
     }
 
-    fn online(&self) -> bool {
-        self.watches
-            .values()
-            .any(|watch| watch.live.as_ref().and_then(Live::view).is_some())
+    fn online(&self, backend: &str) -> bool {
+        self.watches.iter().any(|((id, _), watch)| {
+            id == backend && watch.live.as_ref().and_then(Live::view).is_some()
+        })
     }
 
-    async fn watch(&mut self, request: &Value) -> Result<Value> {
+    fn codex_watch(&self, backend: &str, thread: Uuid) -> Option<&Watch> {
+        self.watches.get(&(backend.to_owned(), thread))
+    }
+
+    async fn watch(&mut self, backend: &str, request: &Value) -> Result<Value> {
         let id = thread_id(&request["threadId"])?;
-        if let Some(watch) = self.watches.get_mut(&id) {
+        let key = (backend.to_owned(), id);
+        if let Some(watch) = self.watches.get_mut(&key) {
             watch.published = None;
             watch.versions.clear();
             return Ok(json!({"ok": true}));
@@ -249,25 +254,26 @@ impl DeviceSession {
             self.watches.len() + self.plugin_watches.len() < 8,
             "订阅数量过多"
         );
-        let params = json!({"id": id});
-        let summary = self
+        let connector = self
             .backends
             .codex
+            .get(backend)
+            .expect("selected Codex instance");
+        let params = json!({"id": id});
+        let summary = connector
             .read("thread.read", &params, &Value::Null, None)
             .await?
             .context("找不到此会话")?;
-        let page = self
-            .backends
-            .codex
+        let page = connector
             .read("history.read", &params, &Value::Null, None)
             .await
             .ok()
             .flatten()
             .unwrap_or_default();
         let fallback = json!({"thread": summary["thread"], "messages": page["messages"]});
-        let live = self.backends.codex.watch(id);
+        let live = connector.watch(id);
         self.watches.insert(
-            id,
+            key,
             Watch {
                 live,
                 fallback,
@@ -282,18 +288,20 @@ impl DeviceSession {
     }
 
     async fn publish(&mut self, io: &mut (impl AsyncWrite + Unpin)) -> Result<()> {
-        let status = self.backends.codex.status(self.online());
-        if status != self.last_status {
-            self.last_status = status.clone();
-            reply(
-                io,
-                json!({"type":"event","backendId":CODEX,"event":{
-                    "type":"status","status":status,
-                }}),
-            )
-            .await?;
+        for (backend, connector) in self.backends.codex.all() {
+            let status = connector.status(self.online(backend));
+            if self.last_status.get(backend) != Some(&status) {
+                reply(
+                    io,
+                    json!({"type":"event","backendId":backend,"event":{
+                        "type":"status","status":status,
+                    }}),
+                )
+                .await?;
+                self.last_status.insert(backend.to_owned(), status);
+            }
         }
-        for (id, watch) in &mut self.watches {
+        for ((backend, id), watch) in &mut self.watches {
             let live = watch.live.as_ref().and_then(Live::view);
             let changed = if let Some(view) = live {
                 let mark = view.mark();
@@ -303,7 +311,7 @@ impl DeviceSession {
                     self.db
                         .lock()
                         .expect("database mutex poisoned")
-                        .observe_operations(&id.to_string(), &view)?;
+                        .observe_operations(backend, &id.to_string(), &view)?;
                     let mut thread = view.thread.clone();
                     for field in ["projectId", "projectName"] {
                         thread[field] = watch.fallback["thread"][field].clone();
@@ -321,7 +329,11 @@ impl DeviceSession {
                     None
                 } else {
                     let mut summary = watch.fallback["thread"].clone();
-                    let reason = if self.last_status["capabilities"]["openThread"] == true {
+                    let reason = if self
+                        .last_status
+                        .get(backend)
+                        .is_some_and(|status| status["capabilities"]["openThread"] == true)
+                    {
                         "已加载历史。选择「继续此会话」连接桌面。"
                     } else {
                         "已加载历史。请在电脑上打开此会话后开始控制。"
@@ -346,7 +358,7 @@ impl DeviceSession {
             };
             if let Some((mark, thread, messages)) = changed {
                 let (order, changed) = diff_messages(messages.iter(), &mut watch.versions)?;
-                reply(io, json!({"type":"sync","backendId":CODEX,"threadId":id,"updates":[{
+                reply(io, json!({"type":"sync","backendId":backend,"threadId":id,"updates":[{
                     "kind":"manifest","epoch":mark.0,"thread":thread,"order":order,"changed":changed,
                 }]})).await?;
                 watch.published = Some(mark);
@@ -355,14 +367,14 @@ impl DeviceSession {
                 .db
                 .lock()
                 .expect("database mutex poisoned")
-                .recent_operations(&self.device.id, &id.to_string())?;
+                .recent_operations_for(backend, &self.device.id, &id.to_string())?;
             let mut current = HashMap::new();
             for operation in operations {
                 let request = operation["id"].as_str().unwrap_or_default().to_owned();
                 if watch.operations.get(&request) != Some(&operation) {
                     reply(
                         io,
-                        json!({"type":"event","backendId":CODEX,"threadId":id,
+                        json!({"type":"event","backendId":backend,"threadId":id,
                         "event":{"type":"operation","operation":operation}}),
                     )
                     .await?;
@@ -375,8 +387,8 @@ impl DeviceSession {
     }
 
     fn file_scope(&self, request: &Value) -> Result<Scope> {
-        if codex(request) {
-            return Ok(Scope::codex(thread_id(&request["threadId"])?));
+        if let Some(id) = backend_id(request).filter(|id| self.backends.codex.get(id).is_some()) {
+            return Ok(Scope::codex(id, thread_id(&request["threadId"])?));
         }
         let plugin = request["backendId"]
             .as_str()
@@ -626,13 +638,27 @@ impl DeviceSession {
 
     async fn rpc(&mut self, call: Value) -> Result<Option<Value>> {
         let method = call["method"].as_str().unwrap_or_default();
-        let online = self.online();
         if method == "backends.list" {
-            let mut backends: Vec<_> = self.backends.codex.info(online).into_iter().collect();
+            let mut backends: Vec<_> = self
+                .backends
+                .codex
+                .all()
+                .filter_map(|(id, backend)| backend.info(id, self.online(id)))
+                .collect();
             backends.extend(self.backends.plugins.infos().await);
             return Ok(Some(json!({"backends":backends})));
         }
-        if method != "device.revoke" && !codex(&call) {
+        if method == "device.revoke" {
+            self.db
+                .lock()
+                .expect("database mutex poisoned")
+                .revoke_device(&self.device.id)?;
+            return Ok(Some(json!({"ok":true})));
+        }
+        let Some(backend) = backend_id(&call) else {
+            return Ok(None);
+        };
+        let Some(connector) = self.backends.codex.get(backend) else {
             let Some(plugin) = call["backendId"]
                 .as_str()
                 .and_then(|id| self.backends.plugins.get(id))
@@ -736,20 +762,14 @@ impl DeviceSession {
                 }
                 _ => plugin.read(method, &call["params"], &call["query"]).await,
             };
-        }
+        };
+        let online = self.online(backend);
         match method {
-            "status.read" => Ok(Some(self.backends.codex.status(online))),
+            "status.read" => Ok(Some(connector.status(online))),
             "session.read" => Ok(Some(json!({
-                "device": {"id": self.device.id,"name":self.device.name},
-                "status":self.backends.codex.status(online),"backend":self.backends.codex.info(online),
+                "device":{"id":self.device.id,"name":self.device.name},
+                "status":connector.status(online),"backend":connector.info(backend, online),
             }))),
-            "device.revoke" => {
-                self.db
-                    .lock()
-                    .expect("database mutex poisoned")
-                    .revoke_device(&self.device.id)?;
-                Ok(Some(json!({"ok":true})))
-            }
             "media.describe" => {
                 let thread = thread_id(&call["params"]["id"])?;
                 let path = call["body"]["path"]
@@ -764,7 +784,7 @@ impl DeviceSession {
                     .storage
                     .as_ref()
                     .map(crate::storage::Storage::batch);
-                let scope = Scope::codex(thread);
+                let scope = Scope::codex(backend, thread);
                 let native = tokio::task::spawn_blocking({
                     let (db, device, scope, path) =
                         (db.clone(), device.clone(), scope.clone(), path.clone());
@@ -785,13 +805,10 @@ impl DeviceSession {
                     return Ok(Some(manifest));
                 }
                 let live = self
-                    .watches
-                    .get(&thread)
+                    .codex_watch(backend, thread)
                     .and_then(|watch| watch.live.as_ref());
-                let source = self
-                    .backends
-                    .codex
-                    .media(thread, device.clone(), path, live)
+                let source = connector
+                    .media(backend, thread, device.clone(), path, live)
                     .await?;
                 tokio::task::spawn_blocking(move || {
                     let download = Download::prepare(source, device, scope, batch)?;
@@ -802,10 +819,10 @@ impl DeviceSession {
                 })
                 .await?
             }
-            "upload.begin" if self.backends.codex.has_desktop() => {
+            "upload.begin" if connector.has_desktop() => {
                 let thread = thread_id(&call["params"]["id"])?;
-                ensure!(self.watches.contains_key(&thread), "请先打开会话");
-                self.begin_upload(Scope::codex(thread), call["body"].clone())
+                ensure!(self.codex_watch(backend, thread).is_some(), "请先打开会话");
+                self.begin_upload(Scope::codex(backend, thread), call["body"].clone())
                     .await
             }
             "operation.read" => {
@@ -814,7 +831,7 @@ impl DeviceSession {
                     .db
                     .lock()
                     .expect("database mutex poisoned")
-                    .operation(&self.device.id, &id.to_string())?)
+                    .operation_for(backend, &self.device.id, &id.to_string())?)
             }
             "operations.list" => {
                 let id = if call["params"]["id"] == "new" {
@@ -826,27 +843,38 @@ impl DeviceSession {
                     .db
                     .lock()
                     .expect("database mutex poisoned")
-                    .recent_operations(&self.device.id, &id)?;
+                    .recent_operations_for(backend, &self.device.id, &id)?;
                 Ok(Some(json!(values)))
             }
-            "message.send" | "turn.steer" | "turn.interrupt"
-                if self.backends.codex.has_desktop() =>
-            {
-                self.execute(method, &call).await.map(Some)
-            }
+            "message.send" | "turn.steer" | "turn.interrupt" if connector.has_desktop() => self
+                .execute(backend, connector, method, &call)
+                .await
+                .map(Some),
             "queue.add" | "queue.remove" => {
                 let thread = thread_id(&call["params"]["id"])?;
                 let mut change: queue::Change = serde_json::from_value(call["body"].clone())?;
                 change.validate(method == "queue.add")?;
-                self.dispatch(thread, change.request_id, Action::Queue { change })
-                    .map(Some)
+                self.dispatch(
+                    backend,
+                    connector,
+                    thread,
+                    change.request_id,
+                    Action::Queue { change },
+                )
+                .map(Some)
             }
             "request.respond" => {
                 let thread = thread_id(&call["params"]["id"])?;
                 let response: requests::Response = serde_json::from_value(call["body"].clone())?;
                 response.validate()?;
-                self.dispatch(thread, response.request_id, Action::Respond { response })
-                    .map(Some)
+                self.dispatch(
+                    backend,
+                    connector,
+                    thread,
+                    response.request_id,
+                    Action::Respond { response },
+                )
+                .map(Some)
             }
             "settings.update" | "control.execute" => {
                 let thread = thread_id(&call["params"]["id"])?;
@@ -859,9 +887,7 @@ impl DeviceSession {
                         .context("设置参数无效")?,
                 )?;
                 let action = if method == "settings.update" {
-                    let models = self
-                        .backends
-                        .codex
+                    let models = connector
                         .read("models.list", &Value::Null, &Value::Null, None)
                         .await?
                         .context("尚未配置 Codex")?;
@@ -877,33 +903,42 @@ impl DeviceSession {
                         input: settings::permission_change(&body["control"])?,
                     }
                 };
-                self.dispatch(thread, request, action).map(Some)
+                self.dispatch(backend, connector, thread, request, action)
+                    .map(Some)
             }
             "thread.open" | "thread.create" | "thread.rename" | "thread.fork" => {
-                self.manage(method, &call).map(Some)
+                self.manage(backend, connector, method, &call).map(Some)
             }
             "usage.read" => {
-                let params = json!({"id":self.watches.keys().next()});
-                self.backends
-                    .codex
-                    .read(method, &params, &call["query"], None)
+                let watched = self
+                    .watches
+                    .keys()
+                    .find(|(id, _)| id == backend)
+                    .map(|(_, thread)| thread);
+                connector
+                    .read(method, &json!({"id":watched}), &call["query"], None)
                     .await
             }
             _ => {
                 let live = thread_id(&call["params"]["id"])
                     .ok()
-                    .and_then(|id| self.watches.get(&id))
+                    .and_then(|id| self.codex_watch(backend, id))
                     .and_then(|watch| watch.live.as_ref());
-                self.backends
-                    .codex
+                connector
                     .read(method, &call["params"], &call["query"], live)
                     .await
             }
         }
     }
 
-    fn manage(&self, method: &str, call: &Value) -> Result<Value> {
-        ensure!(self.backends.codex.has_desktop(), "尚未连接 Codex");
+    fn manage(
+        &self,
+        backend: &str,
+        connector: &Backend,
+        method: &str,
+        call: &Value,
+    ) -> Result<Value> {
+        ensure!(connector.has_desktop(), "尚未连接 Codex");
         let (request, change) =
             serde_json::from_value::<conversations::Request>(call["body"].clone())?
                 .parse(method)?;
@@ -913,36 +948,53 @@ impl DeviceSession {
             let id = thread_id(&call["params"]["id"])?;
             (
                 id.to_string(),
-                self.watches.get(&id).and_then(|watch| watch.live.clone()),
+                self.codex_watch(backend, id)
+                    .and_then(|watch| watch.live.clone()),
             )
         };
-        let admission = self.backends.codex.admit_write()?;
+        let admission = connector.admit_write()?;
         let (operation, fresh) = self
             .db
             .lock()
             .expect("database mutex poisoned")
-            .begin_management(request, &self.device.id, &thread, change.name(), &change)
+            .begin_management(
+                backend,
+                request,
+                &self.device.id,
+                &thread,
+                change.name(),
+                &change,
+            )
             .map_err(|_| Conflict)?;
         if fresh {
             let db = self.db.clone();
-            let backend = self.backends.codex.clone();
+            let connector = connector.clone();
+            let backend = backend.to_owned();
             tokio::spawn(async move {
                 let _admission = admission;
-                let outcome = backend.manage(thread, live.as_ref(), request, change).await;
+                let outcome = connector
+                    .manage(thread, live.as_ref(), request, change)
+                    .await;
                 let _ = db
                     .lock()
                     .expect("database mutex poisoned")
-                    .finish_operation(request, outcome);
+                    .finish_operation(&backend, request, outcome);
             });
         }
         Ok(operation)
     }
 
-    async fn execute(&self, method: &str, call: &Value) -> Result<Value> {
+    async fn execute(
+        &self,
+        backend: &str,
+        connector: &Backend,
+        method: &str,
+        call: &Value,
+    ) -> Result<Value> {
         let thread_id = thread_id(&call["params"]["id"])?;
         let (request, mut action, skills, plugins) = action(method, &call["body"], |ids| {
             let store = self.db.lock().expect("database mutex poisoned");
-            let scope = Scope::codex(thread_id);
+            let scope = Scope::codex(backend, thread_id);
             ids.iter()
                 .map(|id| store.attachment(&self.device.id, &scope, *id))
                 .collect()
@@ -951,41 +1003,45 @@ impl DeviceSession {
             && (!skills.is_empty() || !plugins.is_empty())
         {
             let live = self
-                .watches
-                .get(&thread_id)
+                .codex_watch(backend, thread_id)
                 .and_then(|watch| watch.live.as_ref());
-            *tools = self
-                .backends
-                .codex
+            *tools = connector
                 .select_tools(thread_id, live, &skills, &plugins)
                 .await?;
         }
-        self.dispatch(thread_id, request, action)
+        self.dispatch(backend, connector, thread_id, request, action)
     }
 
-    fn dispatch(&self, thread_id: Uuid, request: Uuid, action: Action) -> Result<Value> {
+    fn dispatch(
+        &self,
+        backend: &str,
+        connector: &Backend,
+        thread_id: Uuid,
+        request: Uuid,
+        action: Action,
+    ) -> Result<Value> {
         let thread = self
-            .watches
-            .get(&thread_id)
+            .codex_watch(backend, thread_id)
             .and_then(|watch| watch.live.clone())
             .context("请先打开会话")?;
-        let admission = self.backends.codex.admit_write()?;
+        let admission = connector.admit_write()?;
         let (operation, fresh) = self
             .db
             .lock()
             .expect("database mutex poisoned")
-            .begin_operation(request, &self.device.id, thread_id, &action)
+            .begin_operation(backend, request, &self.device.id, thread_id, &action)
             .map_err(|_| Conflict)?;
         if fresh {
             let db = self.db.clone();
-            let backend = self.backends.codex.clone();
+            let connector = connector.clone();
+            let backend = backend.to_owned();
             tokio::spawn(async move {
                 let _admission = admission;
-                let outcome = backend.execute(thread_id, &thread, request, action).await;
+                let outcome = connector.execute(thread_id, &thread, request, action).await;
                 let _ = db
                     .lock()
                     .expect("database mutex poisoned")
-                    .finish_operation(request, outcome);
+                    .finish_operation(&backend, request, outcome);
             });
         }
         Ok(operation)
@@ -1226,8 +1282,8 @@ impl std::fmt::Display for Conflict {
 }
 impl std::error::Error for Conflict {}
 
-fn codex(value: &Value) -> bool {
-    matches!(value.get("backendId"), None) || value["backendId"] == CODEX
+fn backend_id(value: &Value) -> Option<&str> {
+    value.get("backendId").map_or(Some(CODEX), Value::as_str)
 }
 
 fn thread_id(value: &Value) -> Result<Uuid> {

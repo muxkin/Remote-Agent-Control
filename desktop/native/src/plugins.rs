@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     io::Read,
     path::{Path, PathBuf},
@@ -307,7 +307,7 @@ impl Registry {
     pub(crate) fn load(
         directory: &Path,
         runtime: &tokio::runtime::Handle,
-    ) -> Result<(Self, Selection)> {
+    ) -> Result<(Self, BTreeMap<String, Selection>)> {
         let legacy = env::var_os("POCKET_NATIVE_LEGACY_STATE")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && path != directory);
@@ -361,17 +361,24 @@ impl Registry {
             });
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
         let mut hosts = Vec::new();
-        let mut codex = None;
+        let mut codex = BTreeMap::new();
+        let mut seen = HashSet::new();
         for row in rows.into_iter().filter_map(ConfigRow::into_instance) {
             ensure!(
-                (1..=80).contains(&row.id.len())
-                    && row
-                        .id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-                    && (1..=160).contains(&row.name.len()),
+                valid_instance_id(&row.id) && (1..=160).contains(&row.name.len()),
                 "插件实例标识无效"
             );
+            let directory_key = if cfg!(any(windows, target_os = "macos")) {
+                row.id.to_ascii_lowercase()
+            } else {
+                row.id.clone()
+            };
+            ensure!(
+                directory_key != codex_backend::ID
+                    || (row.id == codex_backend::ID && row.plugin == codex_backend::PACKAGE),
+                "默认 Codex 实例只能使用官方 Codex 插件"
+            );
+            ensure!(seen.insert(directory_key), "插件实例标识重复");
             let mut config = row.config.as_object().cloned().unwrap_or_default();
             for (key, variable) in row.secrets {
                 ensure!(
@@ -388,19 +395,16 @@ impl Registry {
                 config.insert(key, json!(value));
             }
             let instance_read_only = read_only || config.get("readOnly") == Some(&json!(true));
-            if row.id == codex_backend::ID {
-                ensure!(
-                    row.plugin == codex_backend::PACKAGE,
-                    "默认 Codex 实例只能使用官方 Codex 插件"
-                );
-                ensure!(codex.is_none(), "默认 Codex 实例标识重复");
-                codex = Some(Selection::resolve(
+            if row.plugin == codex_backend::PACKAGE {
+                let selection = Selection::resolve(
+                    &row.id,
                     row.name,
                     row.version,
                     &config,
                     &secrets,
                     instance_read_only,
-                )?);
+                )?;
+                codex.insert(row.id, selection);
                 continue;
             }
             let is_dsh = row.plugin == "@agent-remote/adapter-dsh";
@@ -470,16 +474,17 @@ impl Registry {
         for host in hosts {
             runtime.spawn(host.supervise(directory.to_owned()));
         }
-        let codex = match codex {
-            Some(selection) => selection,
-            None => Selection::resolve(
+        if !codex.contains_key(codex_backend::ID) {
+            let selection = Selection::resolve(
+                codex_backend::ID,
                 "Codex".into(),
                 None,
                 &Default::default(),
                 &secrets,
                 read_only,
-            )?,
-        };
+            )?;
+            codex.insert(codex_backend::ID.into(), selection);
+        }
         Ok((Self(Arc::new(plugins)), codex))
     }
 
@@ -492,4 +497,11 @@ impl Registry {
         plugins.sort_unstable_by_key(|plugin| plugin.id());
         futures::future::join_all(plugins.into_iter().map(|plugin| plugin.info())).await
     }
+}
+
+pub(crate) fn valid_instance_id(id: &str) -> bool {
+    (1..=80).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }

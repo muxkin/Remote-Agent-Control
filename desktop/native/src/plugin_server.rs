@@ -25,6 +25,8 @@ use uuid::Uuid;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 trait Instance: Sized {
+    const SCOPED_CODEX: bool = false;
+
     fn initialize(params: &Value) -> Result<Self>;
     async fn request(&mut self, method: &str, params: &Value, id: &Value) -> Result<Value>;
 }
@@ -53,7 +55,7 @@ async fn run<T: Instance>() -> Result<()> {
             "adapter/check" if params["sdk"] == 1 => Ok(json!({"sdk":1})),
             "adapter/initialize" if server.is_none() => T::initialize(params).map(|ready| {
                 server = Some(ready);
-                json!({"sdk":1,"watchLifecycle":true})
+                json!({"sdk":1,"watchLifecycle":true,"scopedCodex":T::SCOPED_CODEX})
             }),
             _ => match &mut server {
                 Some(server) => server.request(method, params, &request["id"]).await,
@@ -241,6 +243,7 @@ impl Server {
 }
 
 struct CodexServer {
+    id: String,
     local: Option<Arc<Local>>,
     directory: PathBuf,
     watches: HashMap<Uuid, (Uuid, Arc<Thread>)>,
@@ -248,6 +251,8 @@ struct CodexServer {
 }
 
 impl Instance for CodexServer {
+    const SCOPED_CODEX: bool = true;
+
     fn initialize(params: &Value) -> Result<Self> {
         Self::new(params)
     }
@@ -262,13 +267,20 @@ impl CodexServer {
         let directory = PathBuf::from(field(params, "stateDirectory")?);
         ensure!(directory.is_absolute(), "原生插件状态目录无效");
         private_directory(&directory)?;
+        let id = field(params, "id")?;
+        ensure!(crate::plugins::valid_instance_id(id), "插件实例标识无效");
         let options: Options = serde_json::from_value(params["config"].clone())?;
-        let local = match Local::open(&options, params["readOnly"] == true) {
+        let local = match Local::open(
+            &options,
+            params["readOnly"] == true,
+            id != codex_backend::ID,
+        ) {
             Ok(local) => Some(Arc::new(local)),
             Err(error) if options.explicit => return Err(error),
             _ => None,
         };
         Ok(Self {
+            id: id.to_owned(),
             local,
             directory,
             watches: HashMap::new(),
@@ -412,6 +424,7 @@ impl CodexServer {
                 let thread = thread_id(&params["thread"])?;
                 let source = local
                     .media(
+                        self.id.clone(),
                         thread,
                         field(params, "device")?.to_owned(),
                         field(params, "reference")?.to_owned(),
