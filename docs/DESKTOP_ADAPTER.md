@@ -154,6 +154,8 @@ POCKET_QA_DISPOSABLE_INSTALL=1 node --import tsx scripts/desktop/native-hybrid-b
 
 从仓库根目录执行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts <适配器路径>` 可复跑网关验收。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
 
+要验证网页中的历史 PDF、PNG 和工具活动，先执行 `npm run check:deployments` 生成 Node 侧测试前端，再用 `POCKET_NATIVE_TEST_BROWSER_EXECUTABLE` 指定带内置 PDF 阅读器的完整 Chromium 可执行文件，运行上述网关验收。用 `POCKET_NATIVE_TEST_BROWSER_MEDIA_DIR` 指定已有目录即可保存预览截图。
+
 只运行网关时，可以在 Alpine 等原生 musl 构建环境中使用 `cargo build --release --locked --no-default-features --target x86_64-unknown-linux-musl` 生成静态可执行文件。跨目标构建还需要 musl C 编译器来构建 SQLite 等依赖。Ely 图形版需要动态加载系统的 Vulkan 等图形库。Alpine 上已用 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=-crt-static'` 构建并启动窗口，需要该系统的 musl 图形运行库。
 
 ## 原有 Electron 安装版
