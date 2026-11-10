@@ -686,6 +686,7 @@ impl DeviceSession {
         ) {
             ensure!(live.is_some(), "请先打开 DSH 会话");
         }
+        let admission = plugin.admit_write()?;
         let (operation, fresh) = self
             .db
             .lock()
@@ -696,6 +697,7 @@ impl DeviceSession {
             let db = self.db.clone();
             let thread = thread.to_owned();
             tokio::spawn(async move {
+                let _admission = admission;
                 let created = |id: &str| {
                     db.lock()
                         .expect("database mutex poisoned")

@@ -16,6 +16,9 @@ use uuid::Uuid;
 #[async_trait]
 pub(crate) trait Adapter: Send + Sync {
     fn id(&self) -> &str;
+    fn admit_write(&self) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>> {
+        Ok(None)
+    }
     fn validate_selection(&self, _skills: &[String], _plugins: &[String]) -> Result<()> {
         Ok(())
     }
@@ -59,6 +62,7 @@ pub(crate) struct View {
     pub observations: Arc<[Observation]>,
     pub image_limits: Value,
     pub continued_questions: Value,
+    pub plugin_epoch: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -294,7 +298,7 @@ impl ConfigRow {
 }
 
 impl Registry {
-    pub(crate) fn load(directory: &Path) -> Result<Self> {
+    pub(crate) fn load(directory: &Path, runtime: &tokio::runtime::Handle) -> Result<Self> {
         let legacy = env::var_os("POCKET_NATIVE_LEGACY_STATE")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && path != directory);
@@ -346,6 +350,7 @@ impl Registry {
                     || secrets.get(*key).is_some_and(|value| value == "1")
             });
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
+        let mut hosts = Vec::new();
         for row in rows.into_iter().filter_map(ConfigRow::into_instance) {
             if row.id == "codex-local" && row.plugin == "@agent-remote/adapter-codex" {
                 continue;
@@ -386,18 +391,19 @@ impl Registry {
                     .join(&row.id);
                 let instance_read_only = read_only || config.get("readOnly") == Some(&json!(true));
                 let id = row.id;
-                let host = crate::plugin_host::Host::new(
+                let host = Arc::new(crate::plugin_host::Host::new(
                     id.clone(),
                     row.name,
                     package,
                     Value::Object(config),
                     private,
                     instance_read_only,
-                );
+                ));
                 ensure!(
-                    plugins.insert(id, Arc::new(host)).is_none(),
+                    plugins.insert(id, host.clone()).is_none(),
                     "插件实例标识重复"
                 );
+                hosts.push(host);
                 continue;
             }
             let token = if let Some(variable) = row.secrets.get("token") {
@@ -431,6 +437,9 @@ impl Registry {
                 plugins.insert(id, Arc::new(dsh)).is_none(),
                 "DSH 实例标识重复"
             );
+        }
+        for host in hosts {
+            runtime.spawn(host.supervise(directory.to_owned()));
         }
         Ok(Self(Arc::new(plugins)))
     }

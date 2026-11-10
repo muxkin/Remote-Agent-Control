@@ -376,6 +376,7 @@ impl Timeline {
             observations: self.durable.observations.clone(),
             image_limits: self.projections["imageLimits"].clone(),
             continued_questions: self.projections["userQuestions"]["active"].clone(),
+            plugin_epoch: None,
         }
     }
 }

@@ -136,7 +136,7 @@ fn start() -> Result<()> {
         }
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
         let transports = storage::Transports::load(&directory)?;
-        config.plugins = plugins::Registry::load(&directory)?;
+        config.plugins = plugins::Registry::load(&directory, &handle)?;
         config.direct = transports.direct;
         config.storage = transports.storage;
         let origin = config.origin.origin().ascii_serialization();

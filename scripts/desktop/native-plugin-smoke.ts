@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import { nodeSession } from '../../src/client/node-session.js';
 import { buildRelay } from '../../src/server/relay.js';
 import { platformRuntime } from '../../src/server/platform.js';
@@ -38,6 +39,9 @@ const cli = (...args: string[]) =>
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+const runCli = promisify(execFile);
+const cliAsync = async (...args: string[]) =>
+  (await runCli(executable, ['--adapter', ...args], { env, encoding: 'utf8', timeout: 42_000 })).stdout;
 const binary = basename(fixture);
 const digest = createHash('sha256')
   .update(await readFile(fixture))
@@ -99,6 +103,7 @@ try {
   for (const [version, stateVersion, sha256] of [
     ['1.0.0', 1, digest],
     ['1.1.0', 1, digest],
+    ['1.2.0', 1, digest],
     ['2.0.0', 2, digest],
     ['3.0.0', 1, '0'.repeat(64)],
   ] as const) {
@@ -121,7 +126,7 @@ try {
     else assert.equal(cli('install', root).trim(), name + '@' + version);
   }
   assert.throws(() => cli('install', join(packages, '1.0.0')));
-  assert.equal(JSON.parse(cli('list')).packages.length, 3);
+  assert.equal(JSON.parse(cli('list')).packages.length, 4);
   const config = async (version: string) => {
     const path = join(state, 'instances.json');
     await writeFile(
@@ -224,21 +229,67 @@ try {
   await config('1.1.0');
   await reconnect();
   await version('1.0.0');
-  assert.match(cli('upgrade', backendId, name + '@1.1.0'), /1\.1\.0/);
-  await version('1.0.0');
-  await reconnect();
+  await watch();
+  let stale = false;
+  let restored = false;
+  const remove = session!.onEvent((packet) => {
+    if (packet.type !== 'sync' || packet.backendId !== backendId) return;
+    for (const { thread } of packet.updates) {
+      if (thread.synchronized === false) stale = true;
+      if (stale && thread.synchronized === true) restored = true;
+    }
+  });
+  const slow = { requestId: randomUUID(), text: 'slow-write' };
+  await rpc(`/threads/${thread}/messages`, 'POST', slow);
+  const marker = join(state, 'native-plugins', 'instances', backendId, 'write-in-flight');
+  await until(() =>
+    access(marker).then(
+      () => true,
+      () => false,
+    ),
+  );
+  const upgrade = cliAsync('upgrade', backendId, name + '@1.1.0');
+  try {
+    await delay(1100);
+    assert.equal(
+      JSON.parse(cli('list')).instances.find((row: { instance: string }) => row.instance === backendId)
+        .current,
+      name + '@1.0.0',
+    );
+    await assert.rejects(
+      rpc(`/threads/${thread}/messages`, 'POST', { requestId: randomUUID(), text: 'during-upgrade' }),
+    );
+  } finally {
+    assert.match(await upgrade, /1\.1\.0/);
+  }
+  await until(() => restored);
+  remove();
   await version('1.1.0');
-  assert.equal((await history()).messages.length, 2);
-  assert.match(cli('rollback', backendId), /1\.0\.0/);
-  await reconnect();
+  assert.equal((await rpc<{ state: string }>('/operations/' + slow.requestId)).state, 'completed');
+  const texts = async () => (await history()).messages.map((message) => message.text);
+  const expected = ['first message', 'crash-after-write', 'slow-write'];
+  assert.deepEqual(await texts(), expected);
+  await assert.rejects(cliAsync('upgrade', backendId, name + '@1.2.0'), /已保留旧版本/);
+  await version('1.1.0');
+  assert.deepEqual(await texts(), expected);
+  assert.match(await cliAsync('rollback', backendId), /1\.0\.0/);
   await version('1.0.0');
-  assert.equal((await history()).messages.length, 2);
+  assert.deepEqual(await texts(), expected);
+  await stop();
+  const queued = cli('upgrade', backendId, name + '@1.1.0');
+  const request = queued.match(/已排队，请求 ([\da-f-]+)）/)?.[1];
+  assert(request);
+  assert.equal(JSON.parse(cli('result', request)).outcome, null);
+  await reconnect();
+  await until(() => JSON.parse(cli('result', request)).outcome === 'applied');
+  await version('1.1.0');
+  assert.deepEqual(await texts(), expected);
   console.log(
-    'Native plugin: immutable install, private config, encrypted session, crash recovery without resend, pinned upgrade and rollback passed.',
+    'Native plugin: pinned installs, isolated state, crash recovery, online drain and cutover, failed upgrade recovery, rollback and offline queue passed.',
   );
 } finally {
   await stop();
   await relay.app.close();
-  await rm(state, { recursive: true, force: true });
+  await rm(state, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   await rm(packages, { recursive: true, force: true });
 }

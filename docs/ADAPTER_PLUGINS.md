@@ -13,11 +13,14 @@ agent-space-native --adapter install /absolute/path/plugin-directory
 agent-space-native --adapter list
 agent-space-native --adapter upgrade another-agent my-agent-adapter@1.1.0
 agent-space-native --adapter rollback another-agent
+agent-space-native --adapter result REQUEST_ID
 ```
 
-实例沿用下方 `instances.json` 的 `id`、`name`、`plugin`、`version`、`config` 和 `secrets` 格式。首次启动绑定已安装的确切版本。之后以私有 registry 为准，升级和回滚在重启时应用，要求插件名称、产品及 `stateVersion` 一致。每个实例保留同一个私有状态目录。插件是本机受信任代码，进程隔离不等于安全沙箱。
+实例沿用下方 `instances.json` 的 `id`、`name`、`plugin`、`version`、`config` 和 `secrets` 格式。首次启动绑定已安装的确切版本，此后以私有 registry 为准。升级和回滚要求插件名称、产品及 `stateVersion` 一致。每个实例保留同一个私有状态目录。
 
-原生 SDK 使用标准 `Content-Length` 帧传递 JSON-RPC 2.0。请求在 `params.generation` 中带进程代次，响应在顶层回显代次与请求 ID。`adapter/check` 和 `adapter/initialize` 返回 `{ "sdk": 1 }`。初始化包含 `id`、`name`、`config`、`stateDirectory`、`readOnly`，只有该实例的凭据进入其 `config`。`adapter/status` 返回 `{info,status}`。`adapter/read` 接收共享只读方法和参数。`adapter/view` 返回 `{thread,messages,observations}`，网关在已订阅时读取快照。`adapter/write` 接收会话、请求 ID 和操作，返回 `{state,turnId?,resultThreadId?}`。`adapter/media` 与 `adapter/export` 可返回实例目录内的 `{path,name}`，文件由网关加密传输。进程退出后重建连接与快照，已发出的写操作保留原请求 ID。完整示例见 `desktop/native/examples/native-plugin-fixture.rs`。
+网关在线时，切换会暂缓实例的新写入，等已接收的操作写回数据库，再停止旧进程并启动目标版本。目标版本完成初始化和状态握手后，网关才更新版本绑定并恢复订阅。启动失败时保留旧绑定并尝试恢复旧进程。网关离线时，请求留在本机队列，启动后处理。命令输出排队请求的 ID，可用 `result` 查询。
+
+原生 SDK 使用标准 `Content-Length` 帧传递 JSON-RPC 2.0。请求在 `params.generation` 中带进程代次，响应在顶层回显代次与请求 ID。`adapter/check` 和 `adapter/initialize` 返回 `{ "sdk": 1 }`。初始化包含 `id`、`name`、`config`、`stateDirectory`、`readOnly`、`packageVersion`，只有该实例的凭据进入其 `config`。`adapter/status` 返回 `{info,status}`。`adapter/read` 接收共享只读方法和参数。`adapter/view` 返回 `{thread,messages,observations}`，网关在已订阅时读取快照。`adapter/write` 接收会话、请求 ID 和操作，返回 `{state,turnId?,resultThreadId?}`。`adapter/media` 与 `adapter/export` 可返回实例目录内的 `{path,name}`，文件由网关加密传输。进程退出后重建连接与快照，已发出的写操作保留原请求 ID。插件以本机受信任代码运行。完整示例见 `desktop/native/examples/native-plugin-fixture.rs`。
 
 下面的安装、npm 发布和在线监督器说明适用于旧 Node 网关。
 

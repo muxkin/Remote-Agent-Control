@@ -3,6 +3,8 @@ use std::{
     env, fs,
     io::{self, BufRead, Read, Write},
     path::PathBuf,
+    thread::sleep,
+    time::Duration,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -39,6 +41,11 @@ fn main() -> anyhow::Result<()> {
                 json!({"sdk":1})
             }
             "adapter/initialize" => {
+                match params["packageVersion"].as_str() {
+                    Some("1.2.0") => std::process::exit(4),
+                    Some("1.1.0") => sleep(Duration::from_millis(500)),
+                    _ => {}
+                }
                 let expected = if params["id"] == "second-fixture" {
                     "second-token"
                 } else {
@@ -88,6 +95,12 @@ fn main() -> anyhow::Result<()> {
                 fs::rename(temp, state.join("messages.json"))?;
                 if text == "crash-after-write" {
                     std::process::exit(3);
+                }
+                if text == "slow-write" {
+                    let marker = state.join("write-in-flight");
+                    fs::write(&marker, b"")?;
+                    sleep(Duration::from_millis(3500));
+                    fs::remove_file(marker)?;
                 }
                 json!({"state":"completed"})
             }

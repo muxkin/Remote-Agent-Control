@@ -90,7 +90,7 @@ impl Manifest {
         Ok(())
     }
 
-    fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         format!("{}@{}", self.name, self.version)
     }
 }
@@ -98,6 +98,13 @@ impl Manifest {
 pub(crate) struct Catalog {
     root: PathBuf,
     db: Connection,
+}
+
+#[derive(Clone)]
+pub(crate) struct Switch {
+    pub id: String,
+    pub expected: String,
+    pub target: Package,
 }
 
 impl Catalog {
@@ -115,7 +122,12 @@ impl Catalog {
         );
         CREATE TABLE IF NOT EXISTS bindings (
             instance TEXT PRIMARY KEY, current TEXT NOT NULL, previous TEXT
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS switches (
+            id TEXT PRIMARY KEY, instance TEXT NOT NULL, expected TEXT NOT NULL,
+            target TEXT NOT NULL, outcome TEXT, submitted INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS one_pending_switch ON switches(instance) WHERE outcome IS NULL;",
         )?;
         Ok(Self { root, db })
     }
@@ -231,7 +243,7 @@ impl Catalog {
         Ok(package)
     }
 
-    fn switch(&mut self, id: &str, target: Option<&str>) -> Result<String> {
+    fn queue(&mut self, id: &str, target: Option<&str>) -> Result<(String, String)> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -265,14 +277,81 @@ impl Catalog {
                 && old.state_version == new.state_version,
             "原生插件产品或私有状态版本不兼容"
         );
-        if current != target {
-            tx.execute(
-                "UPDATE bindings SET current=?1,previous=?2 WHERE instance=?3",
-                params![target, current, id],
-            )?;
-        }
+        let request = Uuid::new_v4().to_string();
+        let result = (current == target).then_some("applied");
+        tx.execute(
+            "INSERT INTO switches VALUES (?1,?2,?3,?4,?5,?6)",
+            params![request, id, current, target, result, crate::state::now()],
+        )
+        .context("此实例已有待处理的插件切换")?;
         tx.commit()?;
-        Ok(target.to_owned())
+        Ok((request, target.to_owned()))
+    }
+
+    pub(crate) fn next(&self, instance: &str) -> Result<Option<Switch>> {
+        let row: Option<(String, String, String)> = self
+            .db
+            .query_row(
+                "SELECT id,expected,target FROM switches WHERE instance=?1 AND outcome IS NULL",
+                [instance],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((id, expected, target)) = row else {
+            return Ok(None);
+        };
+        let Some(target) = self.package(&target)? else {
+            self.db.execute(
+                "UPDATE switches SET outcome='package_missing' WHERE id=?1 AND outcome IS NULL",
+                [&id],
+            )?;
+            return Ok(None);
+        };
+        Ok(Some(Switch {
+            id,
+            expected,
+            target,
+        }))
+    }
+
+    pub(crate) fn finish(&mut self, request: &Switch, instance: &str, outcome: &str) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if outcome == "applied" {
+            let changed = tx.execute(
+                "UPDATE bindings SET current=?1,previous=current WHERE instance=?2 AND current=?3",
+                params![request.target.manifest.key(), instance, request.expected],
+            )?;
+            ensure!(changed == 1, "插件当前绑定已更换");
+        }
+        let changed = tx.execute(
+            "UPDATE switches SET outcome=?1 WHERE id=?2 AND instance=?3 AND outcome IS NULL",
+            params![outcome, request.id, instance],
+        )?;
+        ensure!(changed == 1, "插件切换请求已更换");
+        tx.execute(
+            "DELETE FROM switches WHERE outcome IS NOT NULL AND submitted<?1",
+            [crate::state::now() - 7 * 86_400_000],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn result(&self, request: &str) -> Result<Value> {
+        self.db
+            .query_row(
+                "SELECT instance,target,outcome FROM switches WHERE id=?1",
+                [request],
+                |row| {
+                    Ok(json!({
+                        "requestId":request,"instance":row.get::<_,String>(0)?,
+                        "target":row.get::<_,String>(1)?,"outcome":row.get::<_,Option<String>>(2)?,
+                    }))
+                },
+            )
+            .optional()?
+            .context("找不到插件切换请求")
     }
 
     fn list(&self) -> Result<Value> {
@@ -301,22 +380,49 @@ pub(crate) fn cli(directory: &Path, args: &[String]) -> Result<()> {
             println!("{}", runtime.block_on(catalog.install(Path::new(folder)))?);
         }
         [command, instance, target] if command == "upgrade" => {
-            println!(
-                "{instance}: {}（下次启动时应用）",
-                catalog.switch(instance, Some(target))?
-            );
+            enqueue(&mut catalog, directory, instance, Some(target))?;
         }
         [command, instance] if command == "rollback" => {
-            println!(
-                "{instance}: {}（下次启动时应用）",
-                catalog.switch(instance, None)?
-            );
+            enqueue(&mut catalog, directory, instance, None)?;
         }
+        [command, request] if command == "result" => println!("{}", catalog.result(request)?),
         _ => anyhow::bail!(
-            "用法: --adapter list | install <目录> | upgrade <实例> <插件@版本> | rollback <实例>"
+            "用法: --adapter list | install <目录> | upgrade <实例> <插件@版本> | rollback <实例> | result <请求 ID>"
         ),
     }
     Ok(())
+}
+
+fn enqueue(
+    catalog: &mut Catalog,
+    directory: &Path,
+    instance: &str,
+    target: Option<&str>,
+) -> Result<()> {
+    let (request, target) = catalog.queue(instance, target)?;
+    let online = directory.join("native.lock").exists()
+        && private_file(&directory.join("native.lock"), true)
+            .is_ok_and(|lock| lock.try_lock().is_err());
+    let until = std::time::Instant::now() + Duration::from_secs(if online { 35 } else { 0 });
+    loop {
+        let result = catalog.result(&request)?;
+        match result["outcome"].as_str() {
+            Some("applied") => {
+                println!("{instance}: {target}");
+                return Ok(());
+            }
+            Some("startup_failed") => {
+                anyhow::bail!("新版插件未启动，已保留旧版本（请求 {request}）")
+            }
+            Some("busy") => anyhow::bail!("实例仍在处理写入，版本保持不变（请求 {request}）"),
+            Some(_) => anyhow::bail!("插件切换未应用（请求 {request}）"),
+            None if std::time::Instant::now() >= until => {
+                println!("{instance}: {target}（已排队，请求 {request}）");
+                return Ok(());
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
 }
 
 fn verify_binary(path: &Path, expected: &str) -> Result<()> {
