@@ -98,8 +98,10 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
                     break;
                 }
             }
-            if first.starts_with("CONNECT rs.qiniuapi.com:443 ") {
-                socket.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            if first.starts_with("POST /delete/") {
+                socket
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .await?;
                 continue;
             }
             assert!(first.starts_with(&format!("GET /{key}?e=")));
@@ -123,13 +125,17 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
     });
     let endpoint = format!("http://{address}");
     let http = Client::builder()
-        .proxy(reqwest::Proxy::https(&endpoint)?)
+        .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()?;
     let storage = Storage {
         inner: Arc::new(Qiniu {
             http,
-            upload: Url::parse(&endpoint)?,
+            upload_override: None,
+            endpoints: OnceCell::new_with(Some(Endpoints {
+                upload: Url::parse(&endpoint)?,
+                resource: Url::parse(&endpoint)?,
+            })),
             download: Url::parse(&endpoint)?,
             access_key: "fixture".into(),
             secret: hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"fixture secret"),
@@ -194,5 +200,131 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
     assert_eq!(std::fs::read(path["path"].as_str().unwrap())?, bytes);
     assert_eq!(std::fs::read(record_path)?, serde_json::to_vec(&record)?);
     fixture.abort();
+    Ok(())
+}
+
+#[test]
+fn inherits_only_enabled_legacy_media_and_transport_settings() -> Result<()> {
+    let temp = TempState(std::env::temp_dir().join(format!("native-transport-{}", Uuid::new_v4())));
+    let source = temp.0.join("node");
+    let target = temp.0.join("rust");
+    private_directory(&temp.0)?;
+    private_directory(&source)?;
+    private_directory(&target)?;
+    let old = source.join("gateway.env");
+    let mut file = private_file(&old, true)?;
+    file.write_all(b"POCKET_MEDIA_BUCKET=legacy-bucket\nPOCKET_P2P=0\nUNRELATED=ignored\n")?;
+    drop(file);
+    let disabled = migrated_transport_settings(&target, Some(&source))?;
+    assert_eq!(disabled, HashMap::from([("POCKET_P2P".into(), "0".into())]));
+    let explicit = transport_settings(private_file(&old, false)?, true)?;
+    assert_eq!(explicit["POCKET_MEDIA_BUCKET"], "legacy-bucket");
+
+    let mut file = private_file(&target.join("gateway.env"), true)?;
+    file.write_all(b"POCKET_MEDIA_ADAPTER=/old/adapter.mjs\nPOCKET_MEDIA_BUCKET=migrated-bucket\nPOCKET_STUN_URLS=stun:stun.example.org\n")?;
+    drop(file);
+    let migrated = migrated_transport_settings(&target, Some(&source))?;
+    assert_eq!(
+        migrated,
+        HashMap::from([
+            ("POCKET_MEDIA_BUCKET".into(), "migrated-bucket".into()),
+            ("POCKET_STUN_URLS".into(), "stun:stun.example.org".into()),
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovers_provider_endpoints_and_requires_a_private_bucket() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let control = Url::parse(&format!("http://{address}/"))?;
+    let get = |name: &str| {
+        Some(
+            match name {
+                "POCKET_MEDIA_ORIGIN" => "https://private.example.org",
+                "POCKET_MEDIA_BUCKET" => "fixture-bucket",
+                "POCKET_QINIU_ACCESS_KEY" => "fixture-key",
+                "POCKET_QINIU_SECRET_KEY" => "fixture-secret",
+                _ => return None,
+            }
+            .into(),
+        )
+    };
+    let mut storage = Storage::new(None, &get)?;
+    let secret = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"fixture-secret");
+    let fixture = tokio::spawn(async move {
+        for private in [0, 1, 1] {
+            for management in [false, true] {
+                let (socket, _) = listener.accept().await?;
+                let mut socket = BufReader::new(socket);
+                let mut start = String::new();
+                socket.read_line(&mut start).await?;
+                let mut authorization = String::new();
+                let mut date = String::new();
+                let mut content_type = String::new();
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if socket.read_line(&mut line).await? == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.trim().split_once(": ") {
+                        match name.to_ascii_lowercase().as_str() {
+                            "authorization" => authorization = value.to_owned(),
+                            "x-qiniu-date" => date = value.to_owned(),
+                            "content-type" => content_type = value.to_owned(),
+                            _ => {}
+                        }
+                    }
+                }
+                let data = if management {
+                    assert!(start.starts_with("POST /v2/bucketInfo?bucket=fixture-bucket "));
+                    assert_eq!(content_type, "application/x-www-form-urlencoded");
+                    assert!(
+                        regex::Regex::new(r"^\d{8}T\d{6}Z$")
+                            .unwrap()
+                            .is_match(&date)
+                    );
+                    let signed = format!(
+                        "POST /v2/bucketInfo?bucket=fixture-bucket\nHost: {address}\nContent-Type: {content_type}\nX-Qiniu-Date: {date}\n\n"
+                    );
+                    let signature = URL_SAFE.encode(hmac::sign(&secret, signed.as_bytes()));
+                    assert_eq!(authorization, format!("Qiniu fixture-key:{signature}"));
+                    json!({"private":private})
+                } else {
+                    assert!(
+                        start.starts_with("GET /v4/query?ak=fixture-key&bucket=fixture-bucket ")
+                    );
+                    assert!(authorization.is_empty());
+                    json!({"hosts":[{
+                        "up":{"domains":["upload.qiniup.com.invalid", "up-z0.qiniup.com"]},
+                        "rs":{"domains":["rs-z0.qiniuapi.com"]},
+                    }]})
+                };
+                let body = data.to_string();
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await?;
+            }
+        }
+        Ok::<_, std::io::Error>(())
+    });
+    let failure = storage
+        .inner
+        .discover(&control)
+        .await
+        .err()
+        .context("Public bucket was accepted")?;
+    assert!(failure.to_string().contains("必须为私有"));
+    let region = storage.inner.discover(&control).await?;
+    assert_eq!(region.upload.as_str(), "https://up-z0.qiniup.com/");
+    assert_eq!(region.resource.as_str(), "https://rs-z0.qiniuapi.com/");
+    Arc::get_mut(&mut storage.inner).unwrap().upload_override =
+        Some(Url::parse("https://uploads.example.org/")?);
+    let overridden = storage.inner.discover(&control).await?;
+    assert_eq!(overridden.upload.as_str(), "https://uploads.example.org/");
+    fixture.await??;
     Ok(())
 }

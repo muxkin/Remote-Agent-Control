@@ -2,7 +2,7 @@ use crate::{
     files::BLOCK,
     gateway::Database,
     history_media::legacy_upload_receipt,
-    state::{now, private_file},
+    state::{legacy_private_file, now, private_file},
 };
 use anyhow::{Context, Result, ensure};
 use base64::{
@@ -22,9 +22,12 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 use url::Url;
 use uuid::Uuid;
+
+mod discovery;
+use discovery::Endpoints;
 
 #[derive(Clone)]
 pub struct Storage {
@@ -33,7 +36,8 @@ pub struct Storage {
 
 struct Qiniu {
     http: Client,
-    upload: Url,
+    upload_override: Option<Url>,
+    endpoints: OnceCell<Endpoints>,
     download: Url,
     access_key: String,
     secret: hmac::Key,
@@ -63,27 +67,14 @@ impl Transports {
                 .ok()
                 .or_else(|| profile.get(name).cloned())
         };
-        let mut legacy = HashMap::new();
-        if let Some(path) = explicit("POCKET_NATIVE_STORAGE_ENV_FILE") {
-            let path = PathBuf::from(path);
-            ensure!(path.is_absolute(), "对象存储配置文件必须是绝对路径");
-            let file = private_file(&path, false)?;
-            for entry in dotenvy::Iter::new(file) {
-                let (key, value) = entry.map_err(|_| anyhow::anyhow!("既有传输配置格式无效"))?;
-                if matches!(
-                    key.as_str(),
-                    "POCKET_MEDIA_ORIGIN"
-                        | "POCKET_MEDIA_BUCKET"
-                        | "POCKET_MEDIA_PREFIX"
-                        | "POCKET_QINIU_ACCESS_KEY"
-                        | "POCKET_QINIU_SECRET_KEY"
-                        | "POCKET_P2P"
-                        | "POCKET_STUN_URLS"
-                ) {
-                    legacy.insert(key, value);
-                }
+        let legacy = match explicit("POCKET_NATIVE_STORAGE_ENV_FILE") {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                ensure!(path.is_absolute(), "对象存储配置文件必须是绝对路径");
+                transport_settings(legacy_private_file(&path)?, true)?
             }
-        }
+            None => migrated_transport_settings(directory, crate::migration::source())?,
+        };
         let get = |name: &str| explicit(name).or_else(|| legacy.get(name).cloned());
         let direct = if get("POCKET_NATIVE_P2P")
             .or_else(|| get("POCKET_P2P"))
@@ -108,21 +99,94 @@ impl Transports {
             );
             Some(crate::direct::Direct::new(urls))
         };
-        let storage = explicit("POCKET_NATIVE_QINIU_UPLOAD_URL")
-            .map(|upload| Storage::new(upload, &get))
-            .transpose()?;
+        let upload = get("POCKET_NATIVE_QINIU_UPLOAD_URL").filter(|value| !value.is_empty());
+        let storage = if upload.is_some()
+            || [
+                "POCKET_MEDIA_ORIGIN",
+                "POCKET_MEDIA_BUCKET",
+                "POCKET_QINIU_ACCESS_KEY",
+                "POCKET_QINIU_SECRET_KEY",
+            ]
+            .iter()
+            .all(|key| get(key).is_some_and(|value| !value.is_empty()))
+        {
+            Some(Storage::new(upload, &get)?)
+        } else {
+            None
+        };
         Ok(Self { direct, storage })
     }
 }
 
+fn migrated_transport_settings(
+    directory: &Path,
+    source: Option<&Path>,
+) -> Result<HashMap<String, String>> {
+    let Some(source) = source else {
+        return Ok(HashMap::new());
+    };
+    let config = directory.join("gateway.env");
+    let config = if config.try_exists()? {
+        config
+    } else {
+        source.join("gateway.env")
+    };
+    match legacy_private_file(&config) {
+        Ok(file) => transport_settings(file, false),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(HashMap::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn transport_settings(file: std::fs::File, explicit: bool) -> Result<HashMap<String, String>> {
+    let mut settings = HashMap::new();
+    for entry in dotenvy::Iter::new(file) {
+        let (key, value) = entry.map_err(|_| anyhow::anyhow!("既有传输配置格式无效"))?;
+        if matches!(
+            key.as_str(),
+            "POCKET_MEDIA_ADAPTER"
+                | "POCKET_MEDIA_ORIGIN"
+                | "POCKET_MEDIA_BUCKET"
+                | "POCKET_MEDIA_PREFIX"
+                | "POCKET_QINIU_ACCESS_KEY"
+                | "POCKET_QINIU_SECRET_KEY"
+                | "POCKET_NATIVE_QINIU_UPLOAD_URL"
+                | "POCKET_NATIVE_STORAGE_BATCH_MIB"
+                | "POCKET_NATIVE_P2P"
+                | "POCKET_P2P"
+                | "POCKET_STUN_URLS"
+        ) {
+            settings.insert(key, value);
+        }
+    }
+    let used_media = settings
+        .remove("POCKET_MEDIA_ADAPTER")
+        .is_some_and(|value| !value.is_empty());
+    if !explicit && !used_media {
+        settings.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "POCKET_NATIVE_P2P" | "POCKET_P2P" | "POCKET_STUN_URLS"
+            )
+        });
+    }
+    Ok(settings)
+}
+
 impl Storage {
-    fn new(upload: String, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
+    fn new(upload: Option<String>, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
         let required = |name| {
             get(name)
                 .filter(|value| !value.is_empty())
                 .with_context(|| format!("缺少对象存储配置 {name}"))
         };
-        let upload = origin(&upload)?;
+        let upload_override = upload.as_deref().map(origin).transpose()?;
         let download = origin(&required("POCKET_MEDIA_ORIGIN")?)?;
         let access_key = required("POCKET_QINIU_ACCESS_KEY")?;
         let secret = hmac::Key::new(
@@ -154,7 +218,8 @@ impl Storage {
         Ok(Self {
             inner: Arc::new(Qiniu {
                 http,
-                upload,
+                upload_override,
+                endpoints: OnceCell::new(),
                 download,
                 access_key,
                 secret,
@@ -211,6 +276,7 @@ impl Storage {
             let size = indices.iter().try_fold(0, |total, &index| {
                 Ok::<_, anyhow::Error>(total + block_length(&manifest, index)? + aead::MAX_TAG_LEN)
             })?;
+            let endpoints = self.inner.endpoints().await?;
             let object = Uuid::new_v4();
             {
                 let store = db.lock().expect("database mutex poisoned");
@@ -238,8 +304,8 @@ impl Storage {
                 )?;
             }
             let key = self.inner.key(object);
-            let plan = self.inner.plan(&key, size)?;
             if !complete {
+                let plan = self.inner.plan(&endpoints.upload, &key, size)?;
                 return Ok(json!({"objectId":object,"upload":plan}));
             }
             let mut ciphertext = Vec::with_capacity(size);
@@ -260,7 +326,7 @@ impl Storage {
                 .await??;
                 ciphertext.extend(block);
             }
-            self.inner.put(&key, ciphertext).await?;
+            self.inner.put(&endpoints.upload, &key, ciphertext).await?;
             return Ok(
                 json!({"objectId":object,"url":self.inner.signed_url(&key, 900), "indices":indices, "size":size}),
             );
@@ -307,6 +373,7 @@ impl Storage {
                         total + block_length(&manifest, index)? + aead::MAX_TAG_LEN,
                     )
                 })?;
+                self.inner.endpoints().await?;
                 let mut response = self
                     .inner
                     .http
@@ -425,9 +492,9 @@ impl Qiniu {
         Ok(format!("{}:{policy}", self.sign(&policy)))
     }
 
-    fn plan(&self, key: &str, size: usize) -> Result<Value> {
+    fn plan(&self, upload: &Url, key: &str, size: usize) -> Result<Value> {
         Ok(
-            json!({"url":self.upload.as_str(),"method":"POST","encoding":"multipart",
+            json!({"url":upload.as_str(),"method":"POST","encoding":"multipart",
             "fields":{"token":self.token(key,size)?,"key":key},"fileField":"file"}),
         )
     }
@@ -437,7 +504,7 @@ impl Qiniu {
         format!("{url}&token={}", self.sign(&url))
     }
 
-    async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<()> {
+    async fn put(&self, upload: &Url, key: &str, bytes: Vec<u8>) -> Result<()> {
         let form = Form::new()
             .text("key", key.to_owned())
             .text("token", self.token(key, bytes.len())?)
@@ -449,7 +516,7 @@ impl Qiniu {
             );
         ensure!(
             self.http
-                .post(self.upload.clone())
+                .post(upload.clone())
                 .multipart(form)
                 .send()
                 .await?
@@ -465,14 +532,8 @@ impl Qiniu {
             "/delete/{}",
             URL_SAFE.encode(format!("{}:{key}", self.bucket))
         );
-        let token = self.sign(&format!("{path}\n"));
-        let response = self
-            .http
-            .post(format!("https://rs.qiniuapi.com{path}"))
-            .header("Authorization", format!("QBox {token}"))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .send()
-            .await?;
+        let url = self.endpoints().await?.resource.join(&path)?;
+        let response = self.management_request(url).send().await?;
         ensure!(
             response.status().is_success() || response.status().as_u16() == 612,
             "对象清理失败"

@@ -74,18 +74,22 @@ impl ReplyFork {
                 .await
                 .ok()
                 .and_then(Result::ok)
-                .is_some_and(|output| {
-                    output.status.success()
-                        && String::from_utf8_lossy(&output.stdout).trim()
-                            == format!("codex-cli {VERSION}")
+                .filter(|output| output.status.success())
+                .map(|output| {
+                    String::from_utf8_lossy(&output.stdout).trim() == format!("codex-cli {VERSION}")
                 }),
-            None => false,
+            None => Some(false),
         };
-        self.supported.store(supported, Ordering::Relaxed);
-        *checked = Some(Instant::now());
+        // A failed or timed-out process gives no evidence about the installed version.
+        self.supported
+            .store(supported.unwrap_or(false), Ordering::Relaxed);
+        *checked = supported.map(|_| Instant::now());
     }
 
     pub async fn fork(&self, home: &Path, thread: &str, turn: &str) -> Outcome {
+        if !self.supported() {
+            self.probe().await;
+        }
         if !self.supported() {
             return Outcome::Rejected("此桌面版本尚未验证指定回复分支接口".into());
         }
@@ -185,5 +189,30 @@ async fn read(input: &mut (impl AsyncBufReadExt + Unpin), id: u64) -> Result<Val
         if value["id"] == id {
             return Ok(value);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[tokio::test]
+    async fn retries_a_transient_cli_probe_failure() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let cli = directory.path().join("codex");
+        fs::write(&cli, "#!/bin/sh\nexit 1\n")?;
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700))?;
+        let service = ReplyFork::new(None, Some(&cli));
+        service.probe().await;
+        assert!(!service.supported());
+
+        fs::write(
+            &cli,
+            format!("#!/bin/sh\nprintf 'codex-cli {VERSION}\\n'\n"),
+        )?;
+        service.probe().await;
+        assert!(service.supported());
+        Ok(())
     }
 }
