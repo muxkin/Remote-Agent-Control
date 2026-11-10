@@ -1,6 +1,6 @@
 [package]
 name = "agent-space-native"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -25,6 +25,7 @@ libp2p-noise = "0.47"
 percent-encoding = "2"
 pulldown-cmark = { version = "0.13", default-features = false }
 rand = "0.9"
+regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.39", features = ["bundled"] }

@@ -5,6 +5,7 @@ import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { updateFilename } from './native-update.mjs';
+import { verifyPlatformSignature } from './native-signing.mjs';
 const args = process.argv.slice(2),
   get = (key) => args[args.indexOf(key) + 1];
 const output = args.includes('--output') ? resolve(get('--output'), 'desktop-releases') : null;
@@ -131,6 +132,7 @@ if (nativeVersion) {
   if (privateKey.asymmetricKeyType !== 'ed25519') throw Error('Expected an Ed25519 signing key');
   const file = updateFilename(nativeVersion, platform, arch);
   const source = join(directory, file);
+  verifyPlatformSignature(platform, source);
   const bytes = await readFile(source);
   if (!bytes.length || bytes.length > 512 * 1024 * 1024) throw Error('Installer size out of range');
   const path = `native/${platform}/${arch}`;

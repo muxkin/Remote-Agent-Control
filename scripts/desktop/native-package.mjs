@@ -6,10 +6,12 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { zipSync } from 'fflate';
 import { buildInstaller, stageGateway } from './native-installer.mjs';
+import { windowsSign } from './native-signing.mjs';
 
 const args = process.argv.slice(2);
 const installer = args.includes('--installer');
-const [platform, binary, triple] = args.filter((arg) => arg !== '--installer');
+const signed = args.includes('--signed');
+const [platform, binary, triple] = args.filter((arg) => !['--installer', '--signed'].includes(arg));
 const targets = {
   win32: ['x86_64-pc-windows-msvc', 'x86_64-pc-windows-gnullvm', 'x86_64-pc-windows-gnu'],
   linux: ['x86_64-unknown-linux-gnu'],
@@ -19,6 +21,14 @@ assert(
   Object.hasOwn(targets, platform) && binary && (platform !== 'darwin' || installer),
   'Usage: native-package.mjs <linux|win32|darwin> <binary> [rust-target] [--installer]',
 );
+if (signed)
+  assert(
+    installer &&
+      process.platform === platform &&
+      process.env.POCKET_NATIVE_GATEWAY_PAYLOAD &&
+      process.env.POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE,
+    'Signed releases require a native installer and the bundled update trust key',
+  );
 const native = resolve('desktop/native');
 const name = platform === 'win32' ? 'agent-space-native.exe' : 'agent-space-native';
 const target = triple ?? targets[platform][0];
@@ -79,6 +89,7 @@ ${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境
   }
   await writeFile(join(dir, 'THIRD-PARTY-NOTICES.txt'), thirdParty);
   const hasGateway = await stageGateway(dir);
+  if (signed && platform === 'win32') windowsSign(join(dir, name));
   if (platform !== 'darwin') {
     const path = join(output, `${folder}.${platform === 'win32' ? 'zip' : 'tar.xz'}`);
     if (platform === 'win32' && hasGateway) {
@@ -100,7 +111,7 @@ ${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境
     const path = join(output, folder + suffix);
     await rm(path, { force: true });
     await rm(path + '.sha256', { force: true });
-    await buildInstaller(platform, dir, version, path);
+    await buildInstaller(platform, dir, version, path, signed);
     await checksum(path);
   }
 } finally {

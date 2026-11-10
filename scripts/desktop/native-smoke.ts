@@ -58,7 +58,10 @@ if (process.platform === 'win32') platformRuntime().privateFile(legacyPath);
 const legacyRecord = JSON.parse(await readFile(rollout, 'utf8'));
 legacyRecord.payload.content[0].text +=
   '\n\n手机上传的附件（保留原始文件）：\n' + JSON.stringify({ name: legacyName, path: legacyPath });
-const historicalReply = '[附件](report.txt)\n' + 'Earlier history. '.repeat(800);
+const historicalReply =
+  ':codex-file-citation{path="./report.txt" purpose="open"}\n' +
+  '`:codex-file-citation{path="./unrelated.txt"}`\n' +
+  'Earlier history. '.repeat(800);
 const assistantRecord = {
   type: 'response_item',
   payload: {

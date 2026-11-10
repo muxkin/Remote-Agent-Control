@@ -3,7 +3,7 @@ import { computed, ref, shallowRef, watch } from 'vue';
 import SvgIcon from '../SvgIcon.vue';
 import './donation.css';
 
-const version = __POCKET_NATIVE_VERSION__;
+const version = '0.2.7'; // Last GitHub release with both portable packages.
 const nativeRelease = 'https://github.com/muxkin/Remote-Agent-Control/releases/download/native-v' + version;
 const nativeDownloads = [
   { name: 'Windows x64', suffix: 'windows-x64.zip' },
@@ -24,6 +24,39 @@ interface Download {
 const files = shallowRef<Download[]>([]);
 const previewBase = '/downloads/desktop/native/preview/linux/x64/';
 const preview = shallowRef<{ version: string; files: { name: string; size: number }[] }>();
+const signedBase = '/downloads/desktop/native/linux/x64/';
+const signedLinux = shallowRef<{ version: string; file: string; size: number }>();
+const releaseKey = 'MCowBQYDK2VwAyEA8sqXWWd6moWnpeBJiNk9yHRDApRW/+Qbm6yUwCSA/F8=';
+const bytes = (base64: string) => Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+
+async function loadSignedLinux(signal: AbortSignal) {
+  const response = await fetch(signedBase + 'latest.json', { signal, cache: 'no-cache' });
+  if (!response.ok) return;
+  const envelope = await response.json();
+  if (
+    typeof envelope.payload !== 'string' ||
+    envelope.payload.length > 16384 ||
+    typeof envelope.signature !== 'string' ||
+    envelope.signature.length !== 88
+  )
+    return;
+  const payload = bytes(envelope.payload);
+  const key = await crypto.subtle.importKey('spki', bytes(releaseKey), 'Ed25519', false, ['verify']);
+  if (!(await crypto.subtle.verify('Ed25519', key, bytes(envelope.signature), payload)) || signal.aborted)
+    return;
+  const release = JSON.parse(new TextDecoder().decode(payload));
+  if (
+    release.format === 1 &&
+    release.platform === 'linux' &&
+    release.arch === 'x64' &&
+    typeof release.version === 'string' &&
+    /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(release.version) &&
+    release.file === `AgentSpace-Native-${release.version}-linux-x64.deb` &&
+    Number.isSafeInteger(release.size) &&
+    release.size > 0
+  )
+    signedLinux.value = { version: release.version, file: release.file, size: release.size };
+}
 const sections = computed(() =>
   platforms.map((platform) => ({
     ...platform,
@@ -39,6 +72,7 @@ watch(
     const controller = new AbortController();
     onCleanup(() => controller.abort());
     state.value = 'loading';
+    void loadSignedLinux(controller.signal).catch(() => {});
     void fetch(previewBase + 'preview.json', { signal: controller.signal, cache: 'no-cache' })
       .then(async (response) => (response.ok ? response.json() : undefined))
       .then((manifest) => {
@@ -92,6 +126,15 @@ watch(
       </span>
       <h2>连接你的电脑</h2>
       <p>安装适配器，打开已有的 Codex / Agent，<br />再用手机扫码配对。</p>
+    </section>
+    <section v-if="signedLinux" class="donation-card">
+      <h3>Linux x64 签名安装版 v{{ signedLinux.version }}</h3>
+      <p>内置 Agent 插件和独立 Agent 的消息与通话接入。更新下载后由系统授权安装。</p>
+      <p>
+        <a :href="signedBase + signedLinux.file" download>下载签名 DEB</a>
+        <small> · {{ Math.ceil(signedLinux.size / 1024 / 1024) }} MB</small>
+      </p>
+      <p><a :href="signedBase + 'latest.json'">签名更新清单</a></p>
     </section>
     <section v-if="preview" class="donation-card">
       <h3>Linux x64 插件版预览 v{{ preview.version }}</h3>

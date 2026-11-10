@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { macSignApp, macSignDmg, windowsSign } from './native-signing.mjs';
 
 const appId = 'org.agent-space.adapter';
 const appName = 'Agent Space Adapter';
@@ -30,7 +31,7 @@ export async function stageGateway(source) {
   return true;
 }
 
-export async function buildInstaller(platform, source, version, output) {
+export async function buildInstaller(platform, source, version, output, signed = false) {
   const stage = await mkdtemp(join(tmpdir(), 'agent-space-native-installer-'));
   try {
     if (platform === 'linux') {
@@ -51,8 +52,9 @@ export async function buildInstaller(platform, source, version, output) {
         ...(existsSync(join(source, 'gateway')) ? [`${define}BUNDLE_GATEWAY=1`] : []),
         resolve('desktop/native/installer.nsi'),
       ]);
+      if (signed) windowsSign(output);
     } else {
-      await buildDmg(stage, source, version, output);
+      await buildDmg(stage, source, version, output, signed);
     }
   } finally {
     await rm(stage, { recursive: true, force: true });
@@ -111,7 +113,7 @@ Categories=Utility;
   run('dpkg-deb', ['--root-owner-group', '--build', stage, output]);
 }
 
-async function buildDmg(stage, source, version, output) {
+async function buildDmg(stage, source, version, output, signed) {
   const volume = join(stage, 'volume');
   const app = join(volume, appName + '.app');
   const contents = join(app, 'Contents');
@@ -162,10 +164,12 @@ async function buildDmg(stage, source, version, output) {
 `,
   );
   run('plutil', ['-lint', join(contents, 'Info.plist')]);
-  run('codesign', ['--force', '--deep', '--sign', '-', app]);
+  if (signed) await macSignApp(app, stage);
+  else run('codesign', ['--force', '--deep', '--sign', '-', app]);
   run('codesign', ['--verify', '--deep', '--strict', app]);
   await symlink('/Applications', join(volume, 'Applications'));
   run('hdiutil', ['create', '-volname', appName, '-srcfolder', volume, '-format', 'UDZO', output]);
+  if (signed) macSignDmg(output);
 }
 
 function run(command, args) {

@@ -23,7 +23,14 @@ execFileSync(executable, [
 ]);
 // The gateway does not serve HTTP or web pages. Only package its entry and the adapter
 // host it launches, plus the one branded asset used by the desktop manager.
-const entries = ['dist/server/main.js', 'dist/server/adapters/host.js', 'dist/server/adapters/cli.js'];
+const entries = [
+  'dist/server/main.js',
+  'dist/server/adapters/host.js',
+  'dist/server/adapters/cli.js',
+  'dist/server/desktop-im-agent.js',
+  'dist/server/desktop-im-cli.js',
+  'dist/server/desktop-call-cli.js',
+];
 const resources = [...entries, 'dist/web/app-icon-192.png'];
 for (const file of [...resources, 'dist/server/build-meta.json', 'dist/adapters/SHA256SUMS'])
   if (!existsSync(file)) throw Error(`Build the application first: missing ${file}`);
@@ -71,7 +78,13 @@ for (const path of resources) {
 }
 await cp(join(source, 'dist/adapters'), join(target, 'dist/adapters'), { recursive: true });
 await mkdir(join(target, 'scripts'), { recursive: true });
-for (const file of ['env.mjs', 'native-manager.mjs', 'native-update.mjs', 'native-update-apply.mjs']) {
+for (const file of [
+  'env.mjs',
+  'native-manager.mjs',
+  'native-im.mjs',
+  'native-update.mjs',
+  'native-update-apply.mjs',
+]) {
   await cp(join('scripts', file === 'env.mjs' ? '' : 'desktop', file), join(target, 'scripts', file));
 }
 for (const name of ['sdk', 'codex', 'dsh']) {
@@ -82,10 +95,7 @@ for (const name of ['sdk', 'codex', 'dsh']) {
 }
 await mkdir(join(target, 'runtime'), { recursive: true });
 const node = await realpath(process.execPath);
-await cp(
-  node,
-  join(target, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node'),
-);
+await cp(node, join(target, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node'));
 for (const license of [join(dirname(node), 'LICENSE'), join(dirname(node), '../LICENSE')]) {
   if (!existsSync(license)) continue;
   await cp(license, join(target, 'runtime/LICENSE'));

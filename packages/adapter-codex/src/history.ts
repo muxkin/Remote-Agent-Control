@@ -383,29 +383,27 @@ export class HistoryIndex {
       );
       if (file) return file;
     }
-    if (missing) {
-      // A missing authorized link may still have its exact viewed bytes in the rollout.
-      // Never overwrite the former path or guess a replacement from another conversation.
-      if (this.recoveredImages) {
-        const source = await viewedImage(this.records(id), id, reference, thread.cwd);
-        if (source) {
-          await mkdir(this.recoveredImages, { recursive: true, mode: 0o700 });
-          const file = join(this.recoveredImages, mediaReference(source).slice('pocket-inline:'.length));
-          const temporary = join(this.recoveredImages, randomUUID() + '.tmp');
-          try {
-            await writeFile(temporary, Buffer.from(source.slice(source.indexOf(',') + 1), 'base64'), {
-              mode: 0o600,
-              flag: 'wx',
-            });
-            await rename(temporary, file);
-          } finally {
-            await rm(temporary, { force: true });
-          }
-          return file;
+    // An explicit same-thread ImageView and its matching tool result authorize only
+    // the recorded bytes. This also handles cached ImageView cards without a live subscription.
+    if (this.recoveredImages) {
+      const source = await viewedImage(this.records(id), id, reference, thread.cwd);
+      if (source) {
+        await mkdir(this.recoveredImages, { recursive: true, mode: 0o700 });
+        const file = join(this.recoveredImages, mediaReference(source).slice('pocket-inline:'.length));
+        const temporary = join(this.recoveredImages, randomUUID() + '.tmp');
+        try {
+          await writeFile(temporary, Buffer.from(source.slice(source.indexOf(',') + 1), 'base64'), {
+            mode: 0o600,
+            flag: 'wx',
+          });
+          await rename(temporary, file);
+        } finally {
+          await rm(temporary, { force: true });
         }
+        return file;
       }
-      throw missing;
     }
+    if (missing) throw missing;
     throw Error('附件未在此会话中找到，或原文件已移除');
   }
 }

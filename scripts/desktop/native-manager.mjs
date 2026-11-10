@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { runUpdates } from './native-update.mjs';
+import { superviseIndependentAgents } from './native-im.mjs';
 
 const executable = process.argv[2];
 const root = process.cwd();
@@ -20,9 +21,19 @@ let restart;
 let status;
 let ready = false;
 const pending = new Map();
-const publish = () => emit({ type: 'status', ...status, update, manualUpdate });
+const publish = () => {
+  if (!closing)
+    emit({
+      type: 'status',
+      ...status,
+      agents: [...(status?.agents ?? []), ...independent.status()],
+      update,
+      manualUpdate,
+    });
+};
 let update = '';
 let manualUpdate = false;
+const independent = superviseIndependentAgents(root, directory, publish);
 
 function start() {
   if (closing) return;
@@ -79,19 +90,28 @@ const updates = runUpdates({
   root,
   directory,
   executable,
-  idle: () => !closing && status?.safeToRestart === true,
+  idle: () => !closing && status?.safeToRestart === true && independent.idle(),
   notify: (message, manual = false) => {
     update = message;
     manualUpdate = manual;
     publish();
   },
-  prepare: async () => request('desktop-prepare-update'),
+  prepare: async () => {
+    await independent.prepare();
+    try {
+      return await request('desktop-prepare-update');
+    } catch (error) {
+      independent.resume();
+      throw error;
+    }
+  },
   handoff: () => {
     installing = true;
     emit({ type: 'exit-for-update' });
     stop();
   },
   recover: () => {
+    independent.resume();
     if (gateway?.connected) gateway.send({ type: 'desktop-stop' }, () => {});
   },
 });
@@ -113,6 +133,7 @@ input.on('line', (line) => {
 function stop() {
   if (closing) return;
   closing = true;
+  independent.stop();
   updates.stop();
   clearTimeout(restart);
   input.close();

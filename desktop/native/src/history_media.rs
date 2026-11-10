@@ -1,14 +1,15 @@
 use crate::{codex::History, files, state::private_file};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use pulldown_cmark::{Event, Parser, Tag};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use regex::Regex;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
 use url::Url;
@@ -472,13 +473,57 @@ fn local_path(reference: &str, cwd: &Path) -> Result<PathBuf> {
     Ok(path.components().collect())
 }
 
-fn links(text: &str) -> impl Iterator<Item = String> + '_ {
-    Parser::new(text).filter_map(|event| match event {
-        Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
-            Some(dest_url.to_string())
+fn links(text: &str) -> impl Iterator<Item = String> {
+    static CITATION: OnceLock<Regex> = OnceLock::new();
+    static ATTRIBUTE: OnceLock<Regex> = OnceLock::new();
+    let citation =
+        CITATION.get_or_init(|| Regex::new(r":{1,2}codex-file-citation\{([^\n}]*?)\}").unwrap());
+    let attribute = ATTRIBUTE.get_or_init(|| {
+        Regex::new(r#"([\w-]+)\s*=\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"#).unwrap()
+    });
+    let mut links = Vec::new();
+    let mut prose = String::new();
+    let mut excluded = 0usize;
+    let citations = |prose: &str, links: &mut Vec<String>| {
+        for directive in citation.captures_iter(prose) {
+            let mut paths = attribute
+                .captures_iter(&directive[1])
+                .filter(|attr| &attr[1] == "path");
+            if let Some(path) = paths.next().filter(|_| paths.next().is_none()) {
+                let value = &path[2][1..path[2].len() - 1];
+                let value = value.replace("\\\"", "\"").replace("\\'", "'");
+                if !value.chars().any(char::is_control)
+                    && (Path::new(&value).is_absolute()
+                        || ["file:", "sandbox:", "./"]
+                            .iter()
+                            .any(|prefix| value.starts_with(prefix)))
+                {
+                    links.push(value);
+                }
+            }
         }
-        _ => None,
-    })
+    };
+    for event in Parser::new(text) {
+        match event {
+            Event::Text(text) if excluded == 0 => {
+                prose.push_str(&text);
+                continue;
+            }
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                links.push(dest_url.to_string());
+                excluded += 1;
+            }
+            Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock) => excluded += 1,
+            Event::End(TagEnd::Link | TagEnd::Image | TagEnd::CodeBlock | TagEnd::HtmlBlock) => {
+                excluded = excluded.saturating_sub(1);
+            }
+            _ => {}
+        }
+        citations(&prose, &mut links);
+        prose.clear();
+    }
+    citations(&prose, &mut links);
+    links.into_iter()
 }
 
 pub fn media(item: &Value) -> Vec<String> {

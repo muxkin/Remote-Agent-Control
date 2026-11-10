@@ -129,6 +129,9 @@ jobs:
           POCKET_NATIVE_TEST_IPC: '1'
         shell: bash
         run: env -u POCKET_NATIVE_GATEWAY_PAYLOAD node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }}
+      - name: Verify encrypted Agent messages and WebRTC in the prepared payload
+        if: runner.os == 'Linux'
+        run: node --import tsx scripts/desktop/native-im-smoke.mjs
       - name: Verify the managed gateway on Windows
         if: runner.os == 'Windows'
         run: node --import tsx scripts/desktop/native-managed-smoke.ts desktop/native/target/release/${{ matrix.binary }}
@@ -171,7 +174,8 @@ jobs:
             # Retry a release after verification-only fixes, keeping its source tag immutable.
             git diff --exit-code "$release_tag" HEAD -- desktop/native scripts/desktop/native-package.mjs \
               scripts/desktop/native-installer.mjs scripts/desktop/native-manager.mjs scripts/desktop/native-update*.mjs \
-              scripts/desktop/prepare.mjs src/server src/shared packages package.json package-lock.json assets/branding/agent-space.ico \
+              scripts/desktop/native-im.mjs scripts/desktop/native-signing.mjs scripts/desktop/prepare.mjs scripts/build-server.mjs \
+              scripts/im-agent.ts scripts/im-call-agent.ts src/client src/server src/shared packages package.json package-lock.json assets/branding/agent-space.ico \
               src/web/public/app-icon-32.png src/web/public/app-icon-192.png src/web/public/app-icon-512.png
           else
             test "$GITHUB_REF_NAME" = "$release_tag"

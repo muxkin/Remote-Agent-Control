@@ -96,6 +96,26 @@ pub fn adapter_cli(root: &Path, directory: &Path, origin: &str, args: &[String])
     Ok(())
 }
 
+pub fn im_cli(
+    root: &Path,
+    directory: &Path,
+    origin: &str,
+    calls: bool,
+    args: &[String],
+) -> Result<()> {
+    let entry = if calls {
+        "desktop-call-cli.js"
+    } else {
+        "desktop-im-cli.js"
+    };
+    let status = command(root, directory, origin)
+        .arg(root.join("dist/server").join(entry))
+        .args(args)
+        .status()?;
+    ensure!(status.success(), "独立 Agent 命令执行失败");
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(
     tag = "type",

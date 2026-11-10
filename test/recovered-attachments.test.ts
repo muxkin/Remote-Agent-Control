@@ -103,11 +103,12 @@ it.each([
 it('does not expose tool paths that were never shared as attachment links', async () => {
   const f = fixture();
   f.records.pop();
+  f.records.splice(1, 1);
   f.save();
   await expect(f.history.attachment(THREAD, f.image)).rejects.toThrow('附件未在此会话中找到');
 });
 
-it('recovers both missing images from one live tool call in event order', async () => {
+it('recovers both missing images from one tool call in history and live views', async () => {
   const f = fixture();
   f.records.pop();
   const other = f.image + '.second.png';
@@ -125,6 +126,8 @@ it('recovers both missing images from one live tool call in event order', async 
     },
   });
   f.save();
+  expect(readFileSync(await f.history.attachment(THREAD, f.image))).toEqual(f.bytes);
+  expect(readFileSync(await f.history.attachment(THREAD, other))).toEqual(otherBytes);
   const desktop = new DesktopAdapter(f.config);
   const snapshot = state();
   snapshot.turnHistory.history.entitiesByKey.one.items = [

@@ -61,11 +61,22 @@ fn start() -> Result<()> {
         .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")))
         .context("无法定位状态目录")?;
     let directory = std::path::absolute(directory)?;
-    if arguments.first().is_some_and(|value| value == "--adapter") {
+    if let Some(flag @ ("--adapter" | "--im" | "--im-call")) = arguments.first().map(String::as_str)
+    {
         let root = payload.context("此构建没有附带插件网关")?;
         let origin =
             state::saved_origin(&directory)?.unwrap_or_else(|| "http://127.0.0.1:4317".into());
-        return managed::adapter_cli(&root, &directory, &origin, &arguments[1..]);
+        return if flag == "--adapter" {
+            managed::adapter_cli(&root, &directory, &origin, &arguments[1..])
+        } else {
+            managed::im_cli(
+                &root,
+                &directory,
+                &origin,
+                flag == "--im-call",
+                &arguments[1..],
+            )
+        };
     }
     let headless = arguments.iter().any(|value| value == "--headless");
     let configure = arguments.iter().any(|value| value == "--configure");
