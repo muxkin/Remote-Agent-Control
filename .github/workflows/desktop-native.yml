@@ -2,7 +2,7 @@ name: Native desktop releases
 on:
   workflow_dispatch:
   push:
-    tags: [native-v*, native-publish-v*]
+    tags: [native-v*, native-publish-v*, native-preview-installers-v*]
   pull_request:
     paths:
       - 'desktop/native/**'
@@ -59,8 +59,6 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Prepare the shared plugin gateway
         shell: bash
-        env:
-          POCKET_NATIVE_UPDATE_PUBLIC_KEY: ${{ vars.POCKET_NATIVE_UPDATE_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           uv python install 3.12
@@ -70,11 +68,6 @@ jobs:
           npm run desktop:prepare
           node --import tsx scripts/desktop/payload-smoke.ts
           node -e 'console.log("POCKET_NATIVE_GATEWAY_PAYLOAD=" + require("node:path").resolve("dist/desktop-payload"))' >> "$GITHUB_ENV"
-          if [ -n "$POCKET_NATIVE_UPDATE_PUBLIC_KEY" ]; then
-            key="$(node -p 'require("node:path").join(process.env.RUNNER_TEMP, "native-update-key.pem")')"
-            printf '%s\n' "$POCKET_NATIVE_UPDATE_PUBLIC_KEY" > "$key"
-            echo "POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE=$key" >> "$GITHUB_ENV"
-          fi
       - name: Build the Ely desktop app
         working-directory: desktop/native
         env:
@@ -148,7 +141,10 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/native-v') || startsWith(github.ref, 'refs/tags/native-publish-v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/native-v') ||
+      startsWith(github.ref, 'refs/tags/native-publish-v') ||
+      startsWith(github.ref, 'refs/tags/native-preview-installers-v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -170,7 +166,11 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' desktop/native/Cargo.toml)
           release_tag="native-v$version"
-          if [ "$GITHUB_REF_NAME" = "native-publish-v$version" ]; then
+          suffixes=(linux-x64.tar.xz linux-x64.deb windows-x64.zip windows-x64-setup.exe macos-arm64.dmg macos-x64.dmg)
+          if [ "$GITHUB_REF_NAME" = "native-preview-installers-v$version" ]; then
+            release_tag="$GITHUB_REF_NAME"
+            suffixes=(windows-x64-setup.exe macos-arm64.dmg macos-x64.dmg)
+          elif [ "$GITHUB_REF_NAME" = "native-publish-v$version" ]; then
             # Retry a release after verification-only fixes, keeping its source tag immutable.
             git diff --exit-code "$release_tag" HEAD -- desktop/native scripts/desktop/native-package.mjs \
               scripts/desktop/native-installer.mjs scripts/desktop/native-manager.mjs scripts/desktop/native-update*.mjs \
@@ -183,11 +183,11 @@ jobs:
           cd native-release
           prefix="AgentSpace-Native-$version"
           files=()
-          for suffix in linux-x64.tar.xz linux-x64.deb windows-x64.zip windows-x64-setup.exe macos-arm64.dmg macos-x64.dmg; do
+          for suffix in "${suffixes[@]}"; do
             file="$prefix-$suffix"
             sha256sum --check "$file.sha256"
             files+=("$file" "$file.sha256")
           done
           gh release create "$release_tag" "${files[@]}" \
-            --verify-tag --prerelease --title "Agent Space Native $version" \
-            --notes "Ely preview with the shared Codex, DSH, and third-party plugin gateway. Windows x64 setup, Linux x64 DEB (Ubuntu 24.04 baseline), and macOS DMG (Apple Silicon and Intel). Windows/Linux portable packages are also available. Preview installers lack a Windows publisher signature and Apple notarization."
+            --verify-tag --prerelease --title "Agent Space Native $version Preview" \
+            --notes "Ely preview with the shared Codex, DSH, and third-party plugin gateway. The Windows installer has no publisher signature. The macOS app uses an ad-hoc signature and has no notarization. Preview installers are updated manually."
