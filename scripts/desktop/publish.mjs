@@ -32,6 +32,9 @@ if (
 const origin = url?.origin;
 const directory = resolve(args.includes('--directory') ? get('--directory') : 'dist/desktop');
 const nativeVersion = args.includes('--native-version') ? get('--native-version') : null;
+const releaseKeyOnly = args.includes('--release-key-only');
+if (releaseKeyOnly && (!nativeVersion || platform === 'linux'))
+  throw Error('--release-key-only requires a Windows or macOS native release');
 if (args.includes('--native-version') && !/^\d+\.\d+\.\d+$/.test(nativeVersion ?? ''))
   throw Error('Set --native-version to an explicit version');
 const metadata =
@@ -132,13 +135,21 @@ if (nativeVersion) {
   if (privateKey.asymmetricKeyType !== 'ed25519') throw Error('Expected an Ed25519 signing key');
   const file = updateFilename(nativeVersion, platform, arch);
   const source = join(directory, file);
-  verifyPlatformSignature(platform, source);
+  if (!releaseKeyOnly) verifyPlatformSignature(platform, source);
   const bytes = await readFile(source);
+  if (releaseKeyOnly) {
+    const validInstaller =
+      platform === 'win32'
+        ? bytes.subarray(0, 2).toString() === 'MZ'
+        : bytes.subarray(-512, -508).toString() === 'koly';
+    if (!validInstaller) throw Error('Invalid native installer format');
+  }
   if (!bytes.length || bytes.length > 512 * 1024 * 1024) throw Error('Installer size out of range');
   const path = `native/${platform}/${arch}`;
   const payload = Buffer.from(
     JSON.stringify({
       format: 1,
+      ...(releaseKeyOnly ? { publisher: 'release-key' } : {}),
       platform,
       arch,
       version: nativeVersion,

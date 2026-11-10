@@ -14,7 +14,7 @@
 | macOS Apple Silicon / Intel | `*-macos-arm64.dmg` / `*-macos-x64.dmg` | 将应用拖入 Applications，再打开。以 macOS 14 为构建目标。 |
 | Linux x64 | `*-linux-x64.deb` | Ubuntu 24.04 或满足依赖的系统运行 `sudo apt install ./AgentSpace-Native-<版本>-linux-x64.deb`，再从应用菜单打开。 |
 
-安装版与便携版使用同一原生状态目录。切换前先从托盘退出原进程。如果便携版已开启自启动，先关闭，再在安装版启用，使自启动指向安装位置。卸载保留身份、配对和附件数据。Windows 预览安装包没有发布者签名。macOS 预览应用使用本地临时签名（ad-hoc），未经过 Apple 公证。预览安装器通过 GitHub Releases 提供 SHA-256 校验，更新时手动安装新版。
+安装版与便携版使用同一原生状态目录。切换前先从托盘退出原进程。如果便携版已开启自启动，先关闭，再在安装版启用，使自启动指向安装位置。卸载保留身份、配对和附件数据。Windows 预览安装包没有发布者签名。macOS 预览应用使用本地临时签名（ad-hoc），未经过 Apple 公证。预览安装器通过 GitHub Releases 提供 SHA-256 校验。启用发布密钥的安装版可自动获取更新。
 
 ### Agent 插件
 
@@ -45,11 +45,11 @@
 
 附带 Ed25519 公钥的安装包默认启用更新。后台首次启动后检查，之后每四小时检查一次。默认跟随当前服务地址，使用 `/downloads/desktop/native/<平台>/<架构>/latest.json`。可在私有 `gateway.env` 用 `POCKET_NATIVE_UPDATE_BASE_URL` 指定 HTTPS 更新根目录，或用 `POCKET_NATIVE_UPDATES=0` 关闭，修改后重启。
 
-更新先验证签名、平台、架构和版本，再从同源下载并验证长度与 SHA-512。安装前向网关确认手机连接、恢复宽限期和在途写操作均已结束。网关停止接入并退出后，独立更新进程才安装并重新启动适配器。Windows 校验安装器的 Authenticode 签名，macOS 校验签名和 Gatekeeper 后替换应用包，Linux DEB 在设置页点「安装已下载更新」，由 apt 和 PolicyKit 授权安装。无签名配置的预览包和便携包不启用整包自动更新。
+更新先验证签名、平台、架构和版本，再从同源下载并验证长度与 SHA-512。安装前向网关确认手机连接、恢复宽限期和在途写操作均已结束。网关停止接入并退出后，独立更新进程才安装并重新启动适配器。使用平台证书的 Windows 安装版还验证 Authenticode。使用 Developer ID 的 macOS 安装版还验证 Gatekeeper。使用发布密钥的 Windows 和 macOS 安装版通过 Ed25519 清单及安装包 SHA-512 验证更新，macOS 另外验证应用内的临时签名。系统正常执行自己的启动策略。Linux DEB 在设置页点「安装已下载更新」，由 apt 和 PolicyKit 授权安装。便携包和缺少发布公钥的构建通过手动更新。
 
 打包时用 `POCKET_NATIVE_GATEWAY_PAYLOAD` 指向已准备的共享网关，`POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE` 指向 Ed25519 公钥 PEM。CI 可用仓库变量 `POCKET_NATIVE_UPDATE_PUBLIC_KEY` 提供公钥。签名私钥只由发布者在本地持有。发布使用同一 Node/R2 工具，向原有命令增加 `--native-version <版本>`，并以 `POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE` 指定私钥文件。先发布不可覆盖的安装包，再发布签名清单。原有 Electron 清单和下载索引继续独立维护。正式发布前需提升原生版本号并完成各平台安装验收。
 
-仅发布 Windows 和 macOS 的预览安装器时，推送与 Cargo 版本一致的 `native-preview-installers-v<版本>` 标签。CI 验证安装器后，发布 Windows x64 EXE、macOS Apple Silicon 和 Intel DMG 及对应的 SHA-256 文件。
+仅发布 Windows 和 macOS 的预览安装器时，推送与 Cargo 版本一致的 `native-preview-installers-v<版本>` 标签。CI 以 `--installer --release-key-only` 打包内置发布公钥的 Windows x64 EXE、macOS Apple Silicon 和 Intel DMG，并发布安装器和 SHA-256 文件。验收后使用 `publish.mjs --native-version <版本> --release-key-only` 在可信机器上签署更新清单。更新私钥仅保存在发布机器上。
 
 正式包使用 `native-package.mjs … --installer --signed`。Linux 以 Ed25519 签名清单验证 DEB。Windows 在签名机的证书存储配置 `POCKET_NATIVE_WINDOWS_SIGN_CERT_SHA1`、`POCKET_NATIVE_WINDOWS_TIMESTAMP_URL`，必要时指定 `POCKET_NATIVE_SIGNTOOL`。macOS 在签名机配置 `POCKET_NATIVE_MAC_SIGN_IDENTITY` 和 `POCKET_NATIVE_MAC_NOTARY_PROFILE`，先签名并公证应用，再制作并公证 DMG。发布前在目标系统复核签名。
 

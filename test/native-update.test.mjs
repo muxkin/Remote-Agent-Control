@@ -39,6 +39,25 @@ describe('signed native updates', () => {
     expect(() => check({ ...envelope, payload: signed({ size: 100 }).payload })).toThrow('更新签名无效');
   });
   it.each([
+    ['win32', 'x64'],
+    ['darwin', 'arm64'],
+    ['darwin', 'x64'],
+  ])('accepts a release-key update only in opted-in %s/%s builds', (platform, arch) => {
+    const fields = { platform, arch, file: updateFilename(release.version, platform, arch) };
+    const envelope = signed({ ...fields, publisher: 'release-key' });
+    const verify = (document, optIn = false) =>
+      verifyManifest(JSON.stringify(document), publicKey, '0.2.9', platform, arch, optIn);
+    expect(() => verify(envelope)).toThrow('更新清单无效');
+    expect(verify(envelope, true).publisher).toBe('release-key');
+    expect(verify(signed(fields), true).publisher).toBeUndefined();
+    expect(() => verify(signed({ ...fields, publisher: 'unknown' }), true)).toThrow('更新清单无效');
+    expect(() => verify({ ...envelope, payload: signed(fields).payload }, true)).toThrow('更新签名无效');
+  });
+  it('requires the existing Linux manifest policy even when release-key opt-in is set', () => {
+    const document = JSON.stringify(signed({ publisher: 'release-key' }));
+    expect(() => verifyManifest(document, publicKey, '0.2.9', 'linux', 'x64', true)).toThrow('更新清单无效');
+  });
+  it.each([
     { file: 'https://example.org/installer' },
     { arch: 'arm64' },
     { platform: 'win32' },

@@ -5,13 +5,16 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [artifact, executable, parent, manager, version, digest, size] = process.argv.slice(2);
+const [artifact, executable, parent, manager, version, digest, size, publisher = 'platform'] =
+  process.argv.slice(2);
+const releaseKeyOnly = publisher === 'release-key';
 const stage = dirname(artifact);
 const directory = dirname(stage);
 if (
   !/^\.native-update-[a-zA-Z0-9]+$/.test(basename(stage)) ||
   !/^\d+\.\d+\.\d+$/.test(version) ||
   !/^[a-f0-9]{128}$/.test(digest) ||
+  (publisher !== 'platform' && !(releaseKeyOnly && ['win32', 'darwin'].includes(process.platform))) ||
   ![parent, manager, size].every((value) => /^[1-9]\d*$/.test(value))
 )
   throw Error('Invalid native update handoff');
@@ -41,11 +44,17 @@ function command(path, args, options = {}) {
 }
 
 async function restart() {
-  const child = spawn(executable, ['--background'], {
-    detached: true,
-    windowsHide: true,
-    stdio: 'ignore',
-  });
+  const launchApp = releaseKeyOnly && process.platform === 'darwin';
+  const app = dirname(dirname(dirname(executable)));
+  const child = spawn(
+    launchApp ? '/usr/bin/open' : executable,
+    launchApp ? ['-a', app, '--args', '--background'] : ['--background'],
+    {
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+    },
+  );
   await new Promise((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
@@ -53,7 +62,7 @@ async function restart() {
   child.unref();
 }
 
-async function replaceWindows() {
+async function verifyAuthenticode() {
   const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   command(
     powershell,
@@ -65,6 +74,10 @@ async function replaceWindows() {
     ],
     { env: { ...process.env, POCKET_NATIVE_UPDATE_ARTIFACT: artifact } },
   );
+}
+
+async function replaceWindows() {
+  if (!releaseKeyOnly) await verifyAuthenticode();
   const install = dirname(executable);
   const backup = await mkdtemp(join(install, '.previous-'));
   const moved = [];
@@ -101,7 +114,7 @@ async function replaceMacApp() {
   try {
     const next = join(mount, basename(app));
     command('/usr/bin/codesign', ['--verify', '--deep', '--strict', next]);
-    command('/usr/sbin/spctl', ['--assess', '--type', 'execute', next]);
+    if (!releaseKeyOnly) command('/usr/sbin/spctl', ['--assess', '--type', 'execute', next]);
     transaction = await mkdtemp(join(folder, '.agent-space-update-'));
     const incoming = join(transaction, basename(app));
     const backup = join(transaction, 'previous.app');

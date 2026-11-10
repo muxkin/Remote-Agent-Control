@@ -74,7 +74,15 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: cargo build --release --locked
       - name: Package the native adapter
-        run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }} ${{ matrix.target }} --installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=(--installer)
+          if [[ "$GITHUB_REF_NAME" == native-preview-installers-v* && "${{ matrix.platform }}" != linux ]]; then
+            export POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE="$(node -p 'require("node:path").resolve("desktop/native/update-release.pub")')"
+            flags+=(--release-key-only)
+          fi
+          node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }} ${{ matrix.target }} "${flags[@]}"
       - name: Install and verify the Debian package
         if: runner.os == 'Linux'
         env:
@@ -95,7 +103,11 @@ jobs:
           trap 'hdiutil detach "$mount"; rmdir "$mount"' EXIT
           app="$mount/Agent Space Adapter.app"
           test -L "$mount/Applications"
-          codesign --verify --strict "$app"
+          codesign --verify --deep --strict "$app"
+          if [[ "$GITHUB_REF_NAME" == native-preview-installers-v* ]]; then
+            cmp desktop/native/update-release.pub "$app/Contents/Resources/gateway/native-update-key.pem"
+            test -f "$app/Contents/Resources/gateway/native-update-release-key-only"
+          fi
           env -u POCKET_NATIVE_GATEWAY_PAYLOAD node --import tsx scripts/desktop/native-managed-smoke.ts "$app/Contents/MacOS/agent-space-native"
       - name: Verify Windows install, reinstall and uninstall
         if: runner.os == 'Windows'
@@ -109,6 +121,12 @@ jobs:
             if ($process.ExitCode -ne 0 -or (Get-FileHash $exe).Hash -ne $expected) { throw 'Installation failed' }
           }
           if (!(Test-Path (Join-Path $dir 'gateway\scripts\native-manager.mjs'))) { throw 'Plugin gateway not installed' }
+          if ($env:GITHUB_REF_NAME -like 'native-preview-installers-v*') {
+            $key = Join-Path $dir 'gateway\native-update-key.pem'
+            $policy = Join-Path $dir 'gateway\native-update-release-key-only'
+            if (!(Test-Path $policy) -or (Get-FileHash $key).Hash -ne (Get-FileHash desktop/native/update-release.pub).Hash) { throw 'Update trust policy not installed' }
+            if ((Get-AuthenticodeSignature -LiteralPath $setup).Status -ne 'NotSigned') { throw 'Unexpected publisher signature' }
+          }
           # Uninstall only the packaged files, even when an unrelated file exists alongside them.
           New-Item -Path (Join-Path $dir 'keep.txt') -ItemType File | Out-Null
           $process = Start-Process -FilePath (Join-Path $dir 'Uninstall.exe') -ArgumentList '/S' -Wait -PassThru
@@ -167,9 +185,11 @@ jobs:
           version=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' desktop/native/Cargo.toml)
           release_tag="native-v$version"
           suffixes=(linux-x64.tar.xz linux-x64.deb windows-x64.zip windows-x64-setup.exe macos-arm64.dmg macos-x64.dmg)
+          update_notes='Preview installers are updated manually.'
           if [ "$GITHUB_REF_NAME" = "native-preview-installers-v$version" ]; then
             release_tag="$GITHUB_REF_NAME"
             suffixes=(windows-x64-setup.exe macos-arm64.dmg macos-x64.dmg)
+            update_notes='Installed copies verify the Ed25519 release manifest and SHA-512 before applying updates.'
           elif [ "$GITHUB_REF_NAME" = "native-publish-v$version" ]; then
             # Retry a release after verification-only fixes, keeping its source tag immutable.
             git diff --exit-code "$release_tag" HEAD -- desktop/native scripts/desktop/native-package.mjs \
@@ -190,4 +210,4 @@ jobs:
           done
           gh release create "$release_tag" "${files[@]}" \
             --verify-tag --prerelease --title "Agent Space Native $version Preview" \
-            --notes "Ely preview with the shared Codex, DSH, and third-party plugin gateway. The Windows installer has no publisher signature. The macOS app uses an ad-hoc signature and has no notarization. Preview installers are updated manually."
+            --notes "Ely preview with the shared Codex, DSH, and third-party plugin gateway. The Windows installer has no publisher signature. The macOS app uses an ad-hoc signature and has no notarization. $update_notes"

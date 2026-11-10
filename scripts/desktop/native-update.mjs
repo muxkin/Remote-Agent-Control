@@ -23,7 +23,7 @@ export function updateFilename(version, platform, arch) {
   return `AgentSpace-Native-${version}-${suffix}`;
 }
 
-export function verifyManifest(document, key, current, platform, arch) {
+export function verifyManifest(document, key, current, platform, arch, allowReleaseKeyOnly = false) {
   const envelope = JSON.parse(document);
   const bytes = Buffer.from(envelope.payload, 'base64');
   const signature = Buffer.from(envelope.signature, 'base64');
@@ -32,6 +32,8 @@ export function verifyManifest(document, key, current, platform, arch) {
   const release = JSON.parse(bytes);
   if (
     release.format !== 1 ||
+    (release.publisher !== undefined &&
+      (release.publisher !== 'release-key' || !allowReleaseKeyOnly || platform === 'linux')) ||
     release.platform !== platform ||
     release.arch !== arch ||
     release.file !== updateFilename(release.version, platform, arch) ||
@@ -101,6 +103,7 @@ async function download(feed, release, stage, signal) {
 export function runUpdates({ root, directory, executable, idle, notify, prepare, handoff, recover }) {
   const disabled = { stop() {}, install() {} };
   const keyFile = join(root, 'native-update-key.pem');
+  const allowReleaseKeyOnly = existsSync(join(root, 'native-update-release-key-only'));
   if (process.env.POCKET_NATIVE_UPDATES === '0' || !existsSync(keyFile)) {
     notify(process.env.POCKET_NATIVE_UPDATES === '0' ? '自动更新已关闭' : '此构建未配置签名更新源');
     return disabled;
@@ -161,6 +164,7 @@ export function runUpdates({ root, directory, executable, idle, notify, prepare,
         process.env.POCKET_NATIVE_VERSION,
         platform,
         arch,
+        allowReleaseKeyOnly,
       );
       if (!release) {
         notify('已是最新版本');
@@ -220,6 +224,7 @@ export function runUpdates({ root, directory, executable, idle, notify, prepare,
           pending.release.version,
           pending.release.sha512,
           String(pending.release.size),
+          pending.release.publisher ?? 'platform',
         ],
         { cwd: stage, detached: true, windowsHide: true, stdio: 'ignore', env },
       );

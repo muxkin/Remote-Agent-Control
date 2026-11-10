@@ -11,7 +11,10 @@ import { windowsSign } from './native-signing.mjs';
 const args = process.argv.slice(2);
 const installer = args.includes('--installer');
 const signed = args.includes('--signed');
-const [platform, binary, triple] = args.filter((arg) => !['--installer', '--signed'].includes(arg));
+const releaseKeyOnly = args.includes('--release-key-only');
+const [platform, binary, triple] = args.filter(
+  (arg) => !['--installer', '--signed', '--release-key-only'].includes(arg),
+);
 const targets = {
   win32: ['x86_64-pc-windows-msvc', 'x86_64-pc-windows-gnullvm', 'x86_64-pc-windows-gnu'],
   linux: ['x86_64-unknown-linux-gnu'],
@@ -19,9 +22,13 @@ const targets = {
 };
 assert(
   Object.hasOwn(targets, platform) && binary && (platform !== 'darwin' || installer),
-  'Usage: native-package.mjs <linux|win32|darwin> <binary> [rust-target] [--installer]',
+  'Usage: native-package.mjs <linux|win32|darwin> <binary> [rust-target] [--installer] [--signed|--release-key-only]',
 );
-if (signed)
+assert(
+  !releaseKeyOnly || (!signed && platform !== 'linux'),
+  'Release-key-only installers are for Windows and macOS',
+);
+if (signed || releaseKeyOnly)
   assert(
     installer &&
       process.platform === platform &&
@@ -107,6 +114,7 @@ ${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境
     await checksum(path);
   }
   if (installer) {
+    if (releaseKeyOnly) await writeFile(join(dir, 'gateway/native-update-release-key-only'), '');
     const suffix = { win32: '-setup.exe', linux: '.deb', darwin: '.dmg' }[platform];
     const path = join(output, folder + suffix);
     await rm(path, { force: true });
