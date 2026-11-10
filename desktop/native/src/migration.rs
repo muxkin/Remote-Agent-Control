@@ -85,7 +85,13 @@ impl GatewayEnvironment {
             let file = PathBuf::from(file);
             let working_directory = match &external {
                 Some(old) => old.working_directory.clone(),
-                None => env::current_dir()?,
+                None => env::current_dir().or_else(|error| {
+                    // A hybrid package can restart us from its just-removed runtime directory.
+                    file.parent()
+                        .filter(|parent| parent.is_absolute())
+                        .map(Path::to_path_buf)
+                        .ok_or(error)
+                })?,
             };
             external = Some(GatewaySource {
                 environment_file: working_directory.join(file),

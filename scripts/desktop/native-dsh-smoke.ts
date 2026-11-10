@@ -629,7 +629,16 @@ const phone = await createIdentity();
 let child: ReturnType<typeof spawn> | undefined;
 
 async function launch() {
-  child = spawn(executable, ['--headless', '--print-pair'], {
+  const args = ['--headless', '--print-pair'];
+  const removedWork = process.platform === 'linux' && configSource === 'initial-env'
+    ? join(legacy, 'removed-runtime')
+    : undefined;
+  if (removedWork) await mkdir(removedWork, { mode: 0o700 });
+  // The old Linux installer removes its runtime directory before restarting the adapter.
+  const launchArgs = removedWork
+    ? ['-c', 'cd "$1" && rmdir "$1" && shift && exec "$@"', 'fixture', removedWork, executable, ...args]
+    : args;
+  child = spawn(removedWork ? '/bin/sh' : executable, launchArgs, {
     env: {
       ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(POCKET_|CODEX_)/i.test(key))),
       CODEX_HOME: join(state, 'no-codex'),

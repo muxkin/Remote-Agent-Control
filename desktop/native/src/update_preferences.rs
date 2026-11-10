@@ -1,4 +1,4 @@
-use crate::state::private_file;
+use crate::{migration::GatewayEnvironment, state::private_file};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -58,11 +58,15 @@ impl Preferences {
         Ok(Self { auto_update, base })
     }
 
-    pub(crate) fn load(directory: &Path, origin: &Url) -> Result<Self> {
+    pub(crate) fn load(
+        directory: &Path,
+        origin: &Url,
+        environment: &GatewayEnvironment,
+    ) -> Result<Self> {
         let legacy = legacy_settings();
         let hybrid = crate::migration::source()
             .filter(|source| source.join("adapters/registry.json").is_file())
-            .map(|source| (source, env::var_os("POCKET_NATIVE_VERSION").is_some()));
+            .map(|_| (environment, env::var_os("POCKET_NATIVE_VERSION").is_some()));
         Self::load_from(
             directory,
             origin,
@@ -77,7 +81,7 @@ impl Preferences {
         origin: &Url,
         legacy: Option<&Path>,
         environment_base: Option<&str>,
-        hybrid: Option<(&Path, bool)>,
+        hybrid: Option<(&GatewayEnvironment, bool)>,
     ) -> Result<Self> {
         let path = directory.join(FILE);
         match private_file(&path, false) {
@@ -113,9 +117,9 @@ impl Preferences {
             }
         }
         let mut handed_off = false;
-        if let Some((source, inherited)) = hybrid {
+        if let Some((environment, inherited)) = hybrid {
             handed_off = inherited;
-            if let Some((base, disabled)) = hybrid_preferences(directory, source)? {
+            if let Some((base, disabled)) = hybrid_preferences(environment) {
                 migrated = true;
                 if disabled {
                     preferences.auto_update = false;
@@ -161,14 +165,13 @@ fn channel(url: Url, suffix: &[&str]) -> Result<String> {
     Ok(url.to_string())
 }
 
-fn hybrid_preferences(directory: &Path, source: &Path) -> Result<Option<(Option<String>, bool)>> {
-    let environment = crate::migration::GatewayEnvironment::load(directory, Some(source))?;
+fn hybrid_preferences(environment: &GatewayEnvironment) -> Option<(Option<String>, bool)> {
     let base = environment
         .get("POCKET_NATIVE_UPDATE_BASE_URL")
         .filter(|base| !base.trim().is_empty())
         .map(str::to_owned);
     let disabled = environment.get("POCKET_NATIVE_UPDATES") == Some("0");
-    Ok((base.is_some() || disabled).then_some((base, disabled)))
+    (base.is_some() || disabled).then_some((base, disabled))
 }
 
 fn legacy_settings() -> Option<PathBuf> {
@@ -298,8 +301,9 @@ mod tests {
         )?;
         drop(gateway);
         let origin = Url::parse("https://agent.example.org/")?;
+        let environment = GatewayEnvironment::load(&directory, Some(&source))?;
         let preferences =
-            Preferences::load_from(&directory, &origin, None, None, Some((&source, false)))?;
+            Preferences::load_from(&directory, &origin, None, None, Some((&environment, false)))?;
         assert_eq!(
             preferences,
             Preferences::new(false, "https://agent.example.org/legacy/channel/rust/")?
@@ -312,7 +316,7 @@ mod tests {
             &origin,
             None,
             Some("https://updates.example.org/native/"),
-            Some((&source, true)),
+            Some((&environment, true)),
         )?;
         assert_eq!(
             inherited,
@@ -321,7 +325,7 @@ mod tests {
         let reset = Preferences::new(true, "https://updates.example.org/explicit/")?;
         reset.save(&fresh)?;
         assert_eq!(
-            Preferences::load_from(&fresh, &origin, None, None, Some((&source, false)))?,
+            Preferences::load_from(&fresh, &origin, None, None, Some((&environment, false)))?,
             reset
         );
         Ok(())

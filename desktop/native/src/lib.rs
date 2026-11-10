@@ -196,6 +196,7 @@ pub fn start() -> Result<()> {
                 gate.clone(),
                 update_requests.take().context("连接已初始化")?,
                 state.clone(),
+                &environment,
             ));
         }
         handle.spawn(gateway::run(config, db, receiver, state.clone(), gate));

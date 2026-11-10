@@ -1,5 +1,6 @@
 use crate::{
     gateway::{Database, Snapshot},
+    migration::GatewayEnvironment,
     state::{lock_directory, now, private_directory, private_file},
     update_preferences::{Preferences, https_base},
 };
@@ -362,7 +363,7 @@ fn handoff(staged: &Staged, executable: &Path, directory: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn run(
+pub(crate) fn run(
     origin: Url,
     executable: PathBuf,
     directory: PathBuf,
@@ -370,38 +371,45 @@ pub(crate) async fn run(
     gate: UpdateGate,
     commands: mpsc::Receiver<UpdateCommand>,
     status: watch::Sender<Snapshot>,
-) {
-    let unavailable = |message: &str| {
-        status.send_modify(|snapshot| snapshot.update = message.to_owned());
-    };
-    let Some(target) = target().filter(|_| crate::update_install::installed(&executable)) else {
-        unavailable("此版本需要手动更新");
-        return;
-    };
-    remove_expired_staging(&directory);
-    if env::var("POCKET_NATIVE_UPDATES").as_deref() == Ok("0") {
-        unavailable("自动更新已通过环境变量关闭");
-        return;
+    environment: &GatewayEnvironment,
+) -> impl Future<Output = ()> + use<> {
+    // Migrate the signed feed before the gateway can advertise that it is online.
+    let prepared = (|| {
+        let target = target()
+            .filter(|_| crate::update_install::installed(&executable))
+            .ok_or("此版本需要手动更新")?;
+        remove_expired_staging(&directory);
+        if env::var("POCKET_NATIVE_UPDATES").as_deref() == Ok("0") {
+            return Err("自动更新已通过环境变量关闭");
+        }
+        let preferences = Preferences::load(&directory, &origin, environment)
+            .map_err(|_| "无法读取更新设置，请检查状态目录及旧版配置")?;
+        Ok((target, preferences))
+    })();
+    async move {
+        let (target, preferences) = match prepared {
+            Ok(values) => values,
+            Err(message) => {
+                status.send_modify(|snapshot| snapshot.update = message.to_owned());
+                return;
+            }
+        };
+        let Ok(client) = client_builder().build() else {
+            status.send_modify(|snapshot| snapshot.update = "无法初始化更新连接".into());
+            return;
+        };
+        Updater {
+            origin,
+            client,
+            target,
+            executable,
+            directory,
+            db,
+            gate,
+        }
+        .run(preferences, commands, status)
+        .await;
     }
-    let Ok(preferences) = Preferences::load(&directory, &origin) else {
-        unavailable("无法读取更新设置，请检查状态目录及旧版配置");
-        return;
-    };
-    let Ok(client) = client_builder().build() else {
-        unavailable("无法初始化更新连接");
-        return;
-    };
-    Updater {
-        origin,
-        client,
-        target,
-        executable,
-        directory,
-        db,
-        gate,
-    }
-    .run(preferences, commands, status)
-    .await;
 }
 
 struct Updater {
