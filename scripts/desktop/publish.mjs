@@ -1,7 +1,7 @@
 import { readFile, readdir, writeFile, mkdtemp, rm, mkdir, rename, stat, copyFile } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHash, createPrivateKey, sign } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { updateFilename } from './native-update.mjs';
@@ -135,6 +135,14 @@ if (nativeVersion) {
   if (!key) throw Error('Set POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE to the private signing key path');
   const privateKey = createPrivateKey(await readFile(key));
   if (privateKey.asymmetricKeyType !== 'ed25519') throw Error('Expected an Ed25519 signing key');
+  if (rustNative) {
+    const pinnedKey = createPublicKey(
+      await readFile(new URL('../../desktop/native/update-release.pub', import.meta.url)),
+    );
+    const encoding = { type: 'spki', format: 'der' };
+    if (!createPublicKey(privateKey).export(encoding).equals(pinnedKey.export(encoding)))
+      throw Error('The release signing key does not match the Rust updater public key');
+  }
   const file = updateFilename(nativeVersion, platform, arch);
   const source = join(directory, file);
   if (!releaseKeyOnly) verifyPlatformSignature(platform, source);

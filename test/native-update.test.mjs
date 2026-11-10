@@ -1,4 +1,9 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { updateFilename, verifyManifest } from '../scripts/desktop/native-update.mjs';
 import { releaseKey } from '../src/shared/desktop-releases.js';
@@ -24,6 +29,36 @@ const check = (envelope = signed(), current = '0.2.9') =>
   verifyManifest(JSON.stringify(envelope), publicKey, current, 'linux', 'x64');
 
 describe('signed native updates', () => {
+  it('rejects a Rust publisher key that cannot be trusted by installed clients', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'native-publish-test-'));
+    try {
+      const keyPath = join(directory, 'test-key.pem');
+      await writeFile(keyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('../scripts/desktop/publish.mjs', import.meta.url)),
+          '--output',
+          directory,
+          '--directory',
+          directory,
+          '--platform',
+          'linux',
+          '--arch',
+          'x64',
+          '--native-version',
+          release.version,
+          '--rust-native',
+        ],
+        { encoding: 'utf8', env: { ...process.env, POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE: keyPath } },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('The release signing key does not match the Rust updater public key');
+      expect(await readdir(directory)).toEqual(['test-key.pem']);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('keeps unsigned preview artifacts separate from the signed update channel', () => {
     const path = '/downloads/desktop/native/preview/linux/x64/';
     expect(releaseKey(path + 'preview.json')).toBe('desktop-releases/native/preview/linux/x64/preview.json');
