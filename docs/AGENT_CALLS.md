@@ -34,7 +34,13 @@ export async function onCall({ call, peer, signal }) {
 
 ## 原生通话处理程序
 
-纯 Rust 桌面适配器从 `im-agents.json` 的 `callHandler` 启动原生可执行程序。账号仍使用原有 `state`。处理程序通过标准输入和输出交换带 `Content-Length` 的 JSON-RPC 2.0 帧。响应回显请求的 `id` 和 `params.generation`，其中 `generation` 位于响应顶层。
+纯 Rust 桌面适配器从 `im-agents.json` 的 `callHandler` 启动原生可执行程序。已有账号也可以单独启动接听进程，沿用原凭据文件。
+
+```sh
+agent-space-native --im-call --state /private/my-agent.json --handler /private/native-media-handler
+```
+
+处理程序可用 `--environment-file` 读取私有环境文件。退出会结束当前通话并撤销在线接听声明。处理程序通过标准输入和输出交换带 `Content-Length` 的 JSON-RPC 2.0 帧。响应回显请求的 `id` 和 `params.generation`，其中 `generation` 位于响应顶层。
 
 | 方法 | 参数和结果 |
 | --- | --- |

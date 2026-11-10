@@ -94,6 +94,9 @@ pub fn start() -> Result<()> {
         migration::initialize(&directory)?;
         return appearance_cli::run(&directory, &arguments[1..]);
     }
+    if arguments.first().is_some_and(|flag| flag == "--im-call") {
+        return im_calls::cli(&arguments[1..]);
+    }
     if arguments
         .first()
         .is_some_and(|flag| flag == update::APPLY_FLAG)

@@ -320,6 +320,10 @@ async fn discovers_provider_endpoints_and_requires_a_private_bucket() -> Result<
     let Provider::Qiniu(qiniu) = &mut Arc::get_mut(&mut storage.inner).unwrap().provider else {
         unreachable!()
     };
+    qiniu.http = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()?;
     let secret = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"fixture-secret");
     let fixture = tokio::spawn(async move {
         for private in [0, 1, 1] {
@@ -384,7 +388,7 @@ async fn discovers_provider_endpoints_and_requires_a_private_bucket() -> Result<
         .await
         .err()
         .context("Public bucket was accepted")?;
-    assert!(failure.to_string().contains("必须为私有"));
+    assert!(failure.to_string().contains("必须为私有"), "{failure:#}");
     let region = qiniu.discover(&control).await?;
     assert_eq!(region.upload.as_str(), "https://up-z0.qiniup.com/");
     assert_eq!(region.resource.as_str(), "https://rs-z0.qiniuapi.com/");

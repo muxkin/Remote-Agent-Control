@@ -43,6 +43,7 @@ await new Promise<void>((done) => portProbe.close(() => done()));
 const origin = 'http://127.0.0.1:' + address.port;
 const enrollmentSecret = randomBytes(32).toString('hex');
 const cloudflare = process.env.POCKET_NATIVE_TEST_RELAY === 'cloudflare';
+const standaloneCalls = process.env.POCKET_NATIVE_TEST_STANDALONE_CALL === '1';
 const relay = cloudflare
   ? await cloudflareRelay(address.port)
   : await buildRelay({
@@ -74,7 +75,7 @@ const start = () => {
 const stop = async () => {
   if (child && child.exitCode === null && child.signalCode === null) {
     const exit = once(child, 'close');
-    child.kill('SIGINT');
+    child.kill(process.platform !== 'win32' && child.spawnargs[1] === '--im-call' ? 'SIGTERM' : 'SIGINT');
     await exit;
   }
 };
@@ -390,7 +391,7 @@ try {
   assert.equal(rawSearch.messages.length, 0, 'Encrypted search fixture leaked plaintext to the service');
   const { cursor: directoryCursor } = await legacy.raw<{ cursor: number }>('/bootstrap');
   await privateJson(progress, { ...original, cursor: directoryCursor });
-  await privateJson(manifest, [{ ...rpcProfile, callHandler: handler }]);
+  await privateJson(manifest, [standaloneCalls ? rpcProfile : { ...rpcProfile, callHandler: handler }]);
   const directoryCheck = await prompt(
     '验证会话目录 ' + JSON.stringify({ peer: secondary.user.id, search: searchRoom.id, cursor: directoryCursor }),
     'rust-directory',
@@ -454,6 +455,12 @@ try {
   assert(storedSticker.message.text.startsWith('pocket-e2ee:1:'));
 
   const calls = new AgentCallsClient(human);
+  if (standaloneCalls) {
+    await stop();
+    child = spawn(binary, ['--im-call', '--state', credentials, '--handler', handler], {
+      env, stdio: ['ignore', 'ignore', 'inherit'],
+    });
+  }
   await until(async () => (await calls.capabilities(conversation.id)).video);
   for (const mode of ['audio', 'video'] as const) {
     const { call } = await calls.create(conversation.id, mode);
@@ -531,7 +538,7 @@ try {
     await until(async () => !(await calls.capabilities(conversation.id)).audio);
   }
   console.log(
-    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messaging, streaming, attachments, stickers, interactions, contacts, groups, local search, read receipts, replay, and bidirectional audio/video RTP passed.`,
+    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messaging, streaming, attachments, stickers, interactions, contacts, groups, local search, read receipts, replay, and bidirectional audio/video RTP passed${standaloneCalls ? ' through --im-call without a running adapter' : ''}.`,
   );
 } finally {
   await stop();

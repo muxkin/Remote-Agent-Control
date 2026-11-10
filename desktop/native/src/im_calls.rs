@@ -19,6 +19,76 @@ use uuid::Uuid;
 const PRESENCE: Duration = Duration::from_secs(30);
 const HEARTBEAT: Duration = Duration::from_secs(20);
 
+pub(crate) fn cli(args: &[String]) -> Result<()> {
+    const USAGE: &str = "用法: agent-space-native --im-call --state 凭据文件 --handler 原生处理程序 [--environment-file 环境文件]";
+    let mut state = None;
+    let mut handler = None;
+    let mut environment = None;
+    let mut args = args.iter();
+    while let Some(option) = args.next() {
+        let (name, value) = match option.split_once('=') {
+            Some((name, value)) => (name, value),
+            None => (
+                option.as_str(),
+                args.next().map(String::as_str).context(USAGE)?,
+            ),
+        };
+        let slot = match name {
+            "--state" => &mut state,
+            "--handler" => &mut handler,
+            "--environment-file" => &mut environment,
+            _ => anyhow::bail!(USAGE),
+        };
+        ensure!(slot.is_none() && !value.is_empty(), USAGE);
+        *slot = Some(std::path::absolute(value)?);
+    }
+    let state = state.context(USAGE)?;
+    let handler = handler.context(USAGE)?;
+    let environment = environment.as_deref();
+    Client::load(&state)?;
+    Handler::load(&handler, environment)?;
+
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let stop = CancellationToken::new();
+        let last = std::cell::Cell::new(None);
+        let listener = supervise(
+            &handler,
+            &state,
+            environment,
+            UpdateGate::default(),
+            stop.clone(),
+            |online| {
+                if last.replace(Some(online)) != Some(online) {
+                    eprintln!("Agent calls: {}", if online { "ready" } else { "offline" });
+                }
+            },
+        );
+        tokio::pin!(listener);
+        tokio::select! {
+            _ = &mut listener => Ok(()),
+            signal = termination() => {
+                stop.cancel();
+                let _ = timeout(Duration::from_secs(12), listener).await;
+                signal
+            }
+        }
+    })
+}
+
+async fn termination() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+
 pub(crate) async fn supervise(
     handler: &Path,
     state: &Path,

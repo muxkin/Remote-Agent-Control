@@ -135,6 +135,8 @@ jobs:
         working-directory: desktop/native
         run: cargo build --release --locked --no-default-features --example native-im-fixture
       - name: Verify existing Agent identity, encrypted messaging and WebRTC calls
+        env:
+          POCKET_NATIVE_TEST_STANDALONE_CALL: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: node --import tsx scripts/desktop/native-rust-im-smoke.ts desktop/native/target/release/${{ matrix.binary }} desktop/native/target/release/examples/native-im-fixture${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Build the official Codex and DSH plugins
         working-directory: desktop/native

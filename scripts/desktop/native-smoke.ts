@@ -1265,7 +1265,15 @@ async function browserDirect(
       hasTouch: true,
     });
     await context.addInitScript(() => {
-      const qa = ((window as any).__nativeQa = { direct: 0, relay: 0, peers: [] as RTCPeerConnection[] });
+      const qa = ((window as any).__nativeQa = {
+        direct: 0, relay: 0, peers: [] as RTCPeerConnection[], pdfs: new Map<string, Blob>(),
+      });
+      const createObjectURL = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = (object) => {
+        const url = createObjectURL(object);
+        if (object instanceof Blob && object.type === 'application/pdf') qa.pdfs.set(url, object);
+        return url;
+      };
       const Peer = window.RTCPeerConnection;
       window.RTCPeerConnection = class extends Peer {
         constructor(config?: RTCConfiguration) {
@@ -1300,12 +1308,68 @@ async function browserDirect(
     });
     const page = await context.newPage();
     const errors: string[] = [];
+    const consoleErrors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text());
+    });
     await page.goto(origin + '/#pair=' + code + '&host=' + host.peerId);
     await expect(page).toHaveTitle('Agent 空间');
     await page.getByRole('button', { name: '连接电脑', exact: true }).click();
     await page.getByRole('tab', { name: '最近', exact: true }).click();
     await page.getByRole('button', { name: /测试会话/ }).click();
+    assert.equal(new URL(page.url()).origin, origin);
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+    const evidence = process.env.POCKET_NATIVE_TEST_BROWSER_MEDIA_DIR;
+    const pdfTrigger = page.getByRole('button', { name: projectPdf, exact: true });
+    await pdfTrigger.click({ timeout: 15000 });
+    const pdf = page.getByRole('dialog', { name: projectPdf, exact: true });
+    const openPdf = pdf.getByRole('link', { name: '打开 PDF', exact: true });
+    await expect(openPdf).toHaveAttribute('href', /^blob:/);
+    const pdfUrl = await openPdf.getAttribute('href');
+    assert.deepEqual(await openPdf.evaluate(async (link: HTMLAnchorElement) => {
+      const resource: Blob | undefined = (window as any).__nativeQa.pdfs.get(link.href);
+      if (!resource) throw Error('PDF viewer did not receive an object URL');
+      const bytes = await resource.arrayBuffer();
+      const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+      return {
+        mime: resource.type,
+        size: bytes.byteLength,
+        sha256: Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join(''),
+      };
+    }), { mime: 'application/pdf', size: pdfBytes.length, sha256: digest(pdfBytes) });
+    if (evidence) await page.screenshot({ path: join(evidence, 'pdf-mobile.png') });
+    const opened = page.waitForEvent('popup');
+    await openPdf.click();
+    const pdfTab = await opened;
+    await pdfTab.waitForURL((url) => url.href === pdfUrl);
+    await pdfTab.close();
+    await page.keyboard.press('Escape');
+    await expect(pdf).toBeHidden();
+    await expect(pdfTrigger).toBeFocused();
+
+    const thumbnail = page.getByRole('button', { name: `放大预览：${projectPng}`, exact: true });
+    await thumbnail.click({ timeout: 15000 });
+    const image = page.getByRole('dialog', { name: projectPng, exact: true });
+    const preview = image.getByRole('img');
+    await expect(preview).toBeVisible();
+    assert.equal(await preview.evaluate(async (element: HTMLImageElement) => {
+      await element.decode();
+      return element.naturalWidth;
+    }), 32);
+    if (evidence) await page.screenshot({ path: join(evidence, 'png-mobile.png') });
+    await image.getByRole('button', { name: '关闭图片预览', exact: true }).click();
+    await expect(image).toBeHidden();
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await pdfTrigger.click();
+    await expect(openPdf).toBeVisible();
+    if (evidence) await page.screenshot({ path: join(evidence, 'pdf-desktop.png') });
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.deepEqual(consoleErrors, []);
+    console.log('Chromium opened the historical PDF and decoded the PNG through the Rust adapter.');
+
     await page.getByRole('button', { name: '继续此会话', exact: true }).click();
     await expect(page.getByLabel('消息', { exact: true })).toBeEnabled({ timeout: 15000 });
     const activities = page.locator('.activity-group').filter({ hasText: '查看 3 项工具活动' });
