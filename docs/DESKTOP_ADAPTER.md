@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.19 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.20 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
@@ -17,6 +17,18 @@ v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构
 | Linux x64 | `*-linux-x64.deb` | Ubuntu 24.04 或满足依赖的系统运行 `sudo apt install ./AgentSpace-Native-<版本>-linux-x64.deb`，再从应用菜单打开。 |
 
 安装版与便携版使用同一原生状态目录。切换前先从托盘退出原进程。如果便携版已开启自启动，先关闭，再在安装版启用，使自启动指向安装位置。卸载保留身份、配对和附件数据。Windows 预览安装包没有发布者签名。macOS 预览应用使用本地临时签名（ad-hoc），未经过 Apple 公证。预览安装器通过 GitHub Releases 提供 SHA-256 校验。启用发布密钥的安装版可自动获取更新。
+
+### 接管旧状态
+
+使用默认状态目录的 v0.2.8 混合版可在正常退出并关闭旧版自启动后直接启动 Rust 安装版。若旧 Node 或混合版使用其他目录，先退出旧版，再从新安装的适配器执行：
+
+```sh
+agent-space-native --import-node-state /absolute/path/to/old-state --origin https://agent.example.com
+```
+
+导入要求新状态目录尚不存在，父目录已存在。也可通过 `POCKET_NATIVE_STATE_DIR` 指定新的私有目录。适配器在验证原主机身份和 SQLite 快照后启用新目录，保留手机配对、操作记录、实例配置、原生上传和独立 Agent 游标。原 Node 历史附件与回执按原路径读取，保留旧目录以继续访问这些文件。旧版与新适配器应分时运行，避免同一主机身份同时接入中继。
+
+省略 `--origin` 时，依次读取旧状态的已保存地址、`gateway.env` 或 Electron 设置。若来源均为空，首次启动时填写服务地址。已在原服务登记的主机使用原身份重连。
 
 ### Agent 支持范围
 

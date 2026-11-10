@@ -31,6 +31,7 @@ const directory = await mkdtemp(
   join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'native-adapter-smoke-'),
 );
 const state = join(directory, 'state');
+const legacyState = join(directory, 'legacy');
 const adapter = (...args: string[]) =>
   promisify(execFile)(executable, ['--adapter', ...args], {
     env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
@@ -38,10 +39,10 @@ const adapter = (...args: string[]) =>
 const codexHome = join(directory, 'codex');
 const secondaryId = 'codex-secondary';
 const legacyOperation = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-await mkdir(state, { mode: 0o700 });
-const host = await hostIdentity(state);
+await mkdir(legacyState, { mode: 0o700 });
+const host = await hostIdentity(legacyState);
 const existingPhone = await createIdentity();
-const store = new Store(state);
+const store = new Store(legacyState);
 const old = store.pair(store.mintPairing().code, 'Existing phone', existingPhone.peerId);
 assert(old?.routeTicket);
 if (codexPackage) {
@@ -50,7 +51,6 @@ if (codexPackage) {
 }
 store.close();
 const rollout = historyFixture({ codexHome } as Parameters<typeof historyFixture>[0]);
-const legacyState = join(directory, 'legacy');
 const legacyId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const legacyName = '旧附件.txt';
 const legacyPath = join(legacyState, 'uploads', legacyId, legacyName);
@@ -289,9 +289,13 @@ async function launch(useSaved = false) {
       if (existsSync(file)) runtime.privateFile(file);
     }
   }
-  const inherited = codexPackage
-    ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^POCKET_NATIVE_CODEX_/i.test(key)))
-    : process.env;
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) =>
+        key.toUpperCase() !== 'POCKET_NATIVE_LEGACY_STATE' &&
+        (!codexPackage || !/^POCKET_NATIVE_CODEX_/i.test(key)),
+    ),
+  );
   const child = spawn(executable, ['--headless', '--print-pair'], {
     env: {
       ...inherited,
@@ -299,7 +303,6 @@ async function launch(useSaved = false) {
       POCKET_NATIVE_ENROLLMENT: useSaved ? '' : enrollment,
       POCKET_NATIVE_STATE_DIR: state,
       ...(!codexPackage ? { POCKET_NATIVE_CODEX_HOME: codexHome } : {}),
-      POCKET_NATIVE_LEGACY_STATE: legacyState,
       POCKET_NATIVE_READ_ONLY: ipc ? '0' : '1',
       ...(ipc && !codexPackage
         ? {
@@ -1480,6 +1483,23 @@ async function verifyCodexSwitch(
 }
 
 try {
+  const importer = () =>
+    promisify(execFile)(executable, ['--import-node-state', legacyState, '--origin', origin], {
+      env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
+    });
+  const supervisor = join(legacyState, 'adapters', 'supervisor.json');
+  await mkdir(join(legacyState, 'adapters'), { mode: 0o700 });
+  await writeFile(supervisor, JSON.stringify({ pid: process.pid }), { mode: 0o600 });
+  await assert.rejects(importer(), /监督器记录/);
+  assert(!existsSync(state), 'An active legacy gateway created a partial destination');
+  await rm(supervisor);
+  const identityBefore = await readFile(join(legacyState, 'device-identity-v2.json'));
+  const databaseBefore = await readFile(join(legacyState, 'state.sqlite'));
+  await importer();
+  assert.equal(await readFile(join(state, 'service-origin'), 'utf8'), origin);
+  assert.deepEqual(await readFile(join(state, 'device-identity-v2.json')), identityBefore);
+  assert.deepEqual(await readFile(join(legacyState, 'state.sqlite')), databaseBefore);
+  await assert.rejects(importer(), /目标状态目录已存在/);
   const versions = codexPackage ? await installCodexVariants(codexPackage) : undefined;
   await verifyTlsClient();
   await relay.listen();

@@ -308,9 +308,9 @@ impl Registry {
         directory: &Path,
         runtime: &tokio::runtime::Handle,
     ) -> Result<(Self, BTreeMap<String, Selection>)> {
-        let legacy = env::var_os("POCKET_NATIVE_LEGACY_STATE")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute() && path != directory);
+        let legacy = crate::migration::source()
+            .filter(|path| *path != directory)
+            .map(Path::to_path_buf);
         let mut secrets = HashMap::new();
         for root in legacy
             .iter()

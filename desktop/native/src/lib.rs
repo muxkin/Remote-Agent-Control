@@ -22,6 +22,7 @@ mod im_calls;
 mod im_client;
 mod im_crypto;
 mod im_interactions;
+mod migration;
 mod operations;
 mod plugin_catalog;
 mod plugin_host;
@@ -69,6 +70,21 @@ pub fn start() -> Result<()> {
         .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")))
         .context("无法定位状态目录")?;
     let directory = std::path::absolute(directory)?;
+    if arguments
+        .first()
+        .is_some_and(|flag| flag == "--import-node-state")
+    {
+        let (source, origin) = match &arguments[1..] {
+            [source] => (source, None),
+            [source, flag, origin] if flag == "--origin" => (source, Some(origin.as_str())),
+            _ => {
+                bail!("用法: agent-space-native --import-node-state 旧状态目录 [--origin 服务地址]")
+            }
+        };
+        migration::import(std::path::Path::new(source), &directory, origin)?;
+        println!("已导入旧版配对和适配器状态");
+        return Ok(());
+    }
     if arguments.first().is_some_and(|flag| flag == "--adapter") {
         return plugin_catalog::cli(&directory, &arguments[1..]);
     }
@@ -97,6 +113,7 @@ pub fn start() -> Result<()> {
             && (!background || (!headless && !configure)),
         "用法: agent-space-native [--configure | --background | --headless [--print-pair]]"
     );
+    migration::initialize(&directory)?;
     let configured_origin = if configure {
         None
     } else {
@@ -104,6 +121,13 @@ pub fn start() -> Result<()> {
             .ok()
             .filter(|value| !value.is_empty())
             .or(state::saved_origin(&directory)?)
+            .or_else(|| {
+                migration::source()
+                    .filter(|source| {
+                        *source == directory && directory.join("adapters/registry.json").is_file()
+                    })
+                    .and_then(|_| update_preferences::legacy_origin().ok().flatten())
+            })
     };
     let runtime = Runtime::new()?;
     let (state, updates) = watch::channel(Snapshot::default());

@@ -322,8 +322,11 @@ fn viewed_images(output: &Value) -> Option<Vec<&str>> {
 }
 
 pub(crate) fn legacy_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("POCKET_NATIVE_LEGACY_STATE") {
-        let root = PathBuf::from(root);
+    if let Some(root) = crate::migration::source() {
+        return Some(root.to_owned());
+    }
+    // Official plugin processes receive the selected legacy directory from the gateway.
+    if let Some(root) = std::env::var_os("POCKET_NATIVE_LEGACY_STATE").map(PathBuf::from) {
         return root.is_absolute().then_some(root);
     }
     if cfg!(target_os = "linux") {

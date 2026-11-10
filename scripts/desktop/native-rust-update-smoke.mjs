@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
@@ -25,8 +26,8 @@ const manifest = lf(await readFile('desktop/native/Cargo.toml', 'utf8'));
 const release = manifest.match(/^version = "(\d+\.\d+\.\d+)"$/m)?.[1];
 assert(release && release !== '0.0.0');
 const filename = updateFilename(release, platform, arch);
-const payload = await readFile(join(distribution, filename));
-const expected = createHash('sha512').update(await readFile(newBinary)).digest('hex');
+const installer = join(distribution, filename);
+const payload = await readFile(installer);
 const directory = await mkdtemp(join(tmpdir(), 'native-rust-update-smoke-'));
 const binDir = dirname(newBinary);
 const targetDir = dirname(binDir);
@@ -40,6 +41,22 @@ const foreignKey = generateKeyPairSync('ed25519');
 const cargoOptions = { maxBuffer: 20 * 1024 * 1024, timeout: 15 * 60_000 };
 let server;
 let installed;
+
+async function digest(path) {
+  const hash = createHash('sha512');
+  for await (const bytes of createReadStream(path)) hash.update(bytes);
+  return hash.digest('hex');
+}
+
+async function mountedMacApp(image, mount, action) {
+  await mkdir(mount);
+  await run('hdiutil', ['attach', image, '-readonly', '-nobrowse', '-mountpoint', mount]);
+  try {
+    return await action(join(mount, 'Agent Space Adapter.app'));
+  } finally {
+    await run('hdiutil', ['detach', mount]);
+  }
+}
 
 async function buildOldAdapter() {
   await mkdir(crate, { recursive: true });
@@ -83,15 +100,10 @@ async function installOldAdapter() {
     await run(oldInstaller, ['/S'], { timeout: 60_000 });
     return join(process.env.LOCALAPPDATA, 'Programs', 'Agent Space Adapter', program);
   }
-  const mount = join(directory, 'mount');
   const app = 'Agent Space Adapter.app';
-  await mkdir(mount);
-  await run('hdiutil', ['attach', oldInstaller, '-readonly', '-nobrowse', '-mountpoint', mount]);
-  try {
-    await run('ditto', [join(mount, app), join(directory, app)]);
-  } finally {
-    await run('hdiutil', ['detach', mount]);
-  }
+  await mountedMacApp(oldInstaller, join(directory, 'old-mount'), (source) =>
+    run('ditto', [source, join(directory, app)]),
+  );
   return join(directory, app, 'Contents', 'MacOS', program);
 }
 
@@ -155,8 +167,14 @@ async function serveRelease() {
 
 try {
   const test = await buildOldAdapter();
+  // codesign embeds the signature in the Mach-O binary inside the packaged application.
+  const packagedDigest = (image, name) =>
+    mountedMacApp(image, join(directory, name), (app) => digest(join(app, 'Contents', 'MacOS', program)));
+  const expected = platform === 'darwin' ? await packagedDigest(installer, 'new-hash') : await digest(newBinary);
+  const previous = platform === 'darwin' ? await packagedDigest(oldInstaller, 'old-hash') : await digest(oldBinary);
   installed = await installOldAdapter();
-  assert.deepEqual(await readFile(installed), await readFile(oldBinary));
+  assert.equal(await digest(installed), previous, 'The old installer did not install the expected executable');
+  assert.notEqual(previous, expected, 'The update fixture needs distinct old and new executables');
   const { origin, ca, requests, root, good } = await serveRelease();
   const env = {
     POCKET_QA_UPDATE_ORIGIN: origin,
@@ -174,7 +192,12 @@ try {
   };
   const result = platform === 'linux' && process.getuid?.() !== 0
     ? await run('sudo', ['-n', 'env', ...Object.entries(env).map(([key, value]) => `${key}=${value}`), test, ...args], { timeout })
-    : await run(test, args, { env: runEnv, timeout });
+      .catch(reportRequests)
+    : await run(test, args, { env: runEnv, timeout }).catch(reportRequests);
+  function reportRequests(error) {
+    console.error('Isolated fixture requests:', requests.join(', ') || '(none)');
+    throw error;
+  }
   process.stdout.write(result.stdout);
   assert.equal(requests.filter((path) => path === good + 'latest.json').length, 1);
   assert(requests.includes(good + filename));
@@ -182,7 +205,7 @@ try {
   assert(requests.includes('/partial' + root + filename));
   assert(requests.includes('/abandoned' + root + filename));
   assert(!requests.includes('/foreign' + root + filename));
-  assert.equal(createHash('sha512').update(await readFile(installed)).digest('hex'), expected);
+  assert.equal(await digest(installed), expected);
 } finally {
   server?.closeAllConnections();
   if (server) await new Promise((done) => server.close(() => done()));

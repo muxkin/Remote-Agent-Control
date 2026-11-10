@@ -98,7 +98,7 @@ impl Process {
                 command.env(key, value);
             }
         }
-        if official_codex && let Some(path) = env::var_os("POCKET_NATIVE_LEGACY_STATE") {
+        if official_codex && let Some(path) = crate::migration::source() {
             command.env("POCKET_NATIVE_LEGACY_STATE", path);
         }
         #[cfg(windows)]

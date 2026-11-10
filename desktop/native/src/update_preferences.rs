@@ -140,11 +140,32 @@ fn legacy_settings() -> Option<PathBuf> {
         .find(|file| file.is_file())
 }
 
+pub(crate) fn legacy_origin() -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct DesktopSettings {
+        origin: Option<String>,
+    }
+    let Some(path) = legacy_settings() else {
+        return Ok(None);
+    };
+    ensure!(
+        fs::symlink_metadata(&path)?.is_file(),
+        "旧版桌面设置路径无效"
+    );
+    let settings: DesktopSettings = serde_json::from_slice(&settings_bytes(fs::File::open(path)?)?)
+        .context("旧版桌面设置文件无法读取")?;
+    Ok(settings.origin.filter(|origin| !origin.is_empty()))
+}
+
 fn read_preferences(file: fs::File) -> Result<Preferences> {
+    serde_json::from_slice(&settings_bytes(file)?).context("更新配置文件无法读取")
+}
+
+fn settings_bytes(file: fs::File) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(MAX_SETTINGS + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() as u64 <= MAX_SETTINGS, "更新配置文件过大");
-    serde_json::from_slice(&bytes).context("更新配置文件无法读取")
+    Ok(bytes)
 }
 
 #[cfg(test)]

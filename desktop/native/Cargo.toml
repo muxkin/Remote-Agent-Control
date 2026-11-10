@@ -1,6 +1,6 @@
 [package]
 name = "agent-space-native"
-version = "0.3.19"
+version = "0.3.20"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -41,7 +41,7 @@ rand = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "stream"] }
 ring = "0.17"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["backup", "bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

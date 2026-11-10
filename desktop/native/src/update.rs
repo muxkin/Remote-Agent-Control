@@ -498,7 +498,11 @@ impl Updater {
                             message
                         }
                         Ok(None) => "已是最新版本".into(),
-                        Err(_) => "检查或下载更新失败，将在后台重试".into(),
+                        Err(_error) => {
+                            #[cfg(test)]
+                            eprintln!("Signed-update fixture download failed: {_error:#}");
+                            "检查或下载更新失败，将在后台重试".into()
+                        }
                     };
                     status.send_modify(|snapshot| {
                         snapshot.update = message;
@@ -789,7 +793,8 @@ mod tests {
                 sleep(Duration::from_millis(40)).await;
             }
         })
-        .await??;
+        .await
+        .with_context(|| format!("旧源未开始下载，状态为 {}", updates.borrow().update))??;
         configure(settings(true, "abandoned/")?).await?;
         tokio::time::timeout(
             Duration::from_secs(35),
