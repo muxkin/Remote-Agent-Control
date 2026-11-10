@@ -216,7 +216,7 @@ pub(crate) fn canonical(value: &Value) -> String {
     }
 }
 
-fn random<const N: usize>() -> Result<[u8; N]> {
+pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0; N];
     SystemRandom::new()
         .fill(&mut bytes)
@@ -224,7 +224,7 @@ fn random<const N: usize>() -> Result<[u8; N]> {
     Ok(bytes)
 }
 
-fn decode_fixed<const N: usize>(engine: &impl Engine, value: &Value) -> Result<[u8; N]> {
+pub(crate) fn decode_fixed<const N: usize>(engine: &impl Engine, value: &Value) -> Result<[u8; N]> {
     engine
         .decode(value.as_str().context("密钥或加密数据格式无效")?)?
         .try_into()
@@ -280,8 +280,22 @@ fn cipher(key: &[u8; 32]) -> Result<aead::LessSafeKey> {
 }
 
 fn seal(key: &[u8; 32], data: &[u8], context: &str) -> Result<Value> {
+    let (iv, bytes) = seal_bytes(key, data.to_vec(), context)?;
+    Ok(json!({"iv":STANDARD.encode(iv),"data":STANDARD.encode(bytes)}))
+}
+
+fn open(key: &[u8; 32], value: &Value, context: &str) -> Result<Vec<u8>> {
+    let iv = decode_fixed(&STANDARD, &value["iv"])?;
+    let bytes = STANDARD.decode(value["data"].as_str().context("加密数据格式无效")?)?;
+    open_bytes(key, iv, bytes, context)
+}
+
+pub(crate) fn seal_bytes(
+    key: &[u8; 32],
+    mut bytes: Vec<u8>,
+    context: &str,
+) -> Result<([u8; 12], Vec<u8>)> {
     let iv = random::<12>()?;
-    let mut bytes = data.to_vec();
     cipher(key)?
         .seal_in_place_append_tag(
             aead::Nonce::assume_unique_for_key(iv),
@@ -289,12 +303,15 @@ fn seal(key: &[u8; 32], data: &[u8], context: &str) -> Result<Value> {
             &mut bytes,
         )
         .map_err(|_| anyhow!("无法加密消息"))?;
-    Ok(json!({"iv":STANDARD.encode(iv),"data":STANDARD.encode(bytes)}))
+    Ok((iv, bytes))
 }
 
-fn open(key: &[u8; 32], value: &Value, context: &str) -> Result<Vec<u8>> {
-    let iv = decode_fixed(&STANDARD, &value["iv"])?;
-    let mut bytes = STANDARD.decode(value["data"].as_str().context("加密数据格式无效")?)?;
+pub(crate) fn open_bytes(
+    key: &[u8; 32],
+    iv: [u8; 12],
+    mut bytes: Vec<u8>,
+    context: &str,
+) -> Result<Vec<u8>> {
     let plaintext = cipher(key)?
         .open_in_place(
             aead::Nonce::assume_unique_for_key(iv),

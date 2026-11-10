@@ -5,7 +5,9 @@ use rtc::rtp_transceiver::rtp_sender::{
 };
 use serde_json::{Value, json};
 use std::{
+    fs,
     io::{self, BufRead, Write},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -72,6 +74,100 @@ async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Val
         Ok(reply)
     };
     let scenario = message["text"].as_str().unwrap_or_default();
+    if scenario == "验证加密附件" {
+        let media = PathBuf::from(
+            std::env::var_os("RUST_IM_FIXTURE_MEDIA").context("missing media folder")?,
+        );
+        let attachment = &message["attachments"][0];
+        assert_eq!(attachment["name"], "旧 Node 附件.pdf");
+        assert_eq!(attachment["mime"], "application/pdf");
+        let message_id = message["id"].as_str().unwrap();
+        let output = media.join(format!("{message_id}.pdf"));
+        let download = json!({"fileId":attachment["id"],"path":output});
+        for _ in 0..2 {
+            let result = call("attachment.download", download.clone())?;
+            assert_eq!(result["result"]["name"], attachment["name"], "{result}");
+        }
+        let bytes = fs::read(&output)?;
+        assert_eq!(bytes.len(), 1_100_000);
+        assert!(bytes.starts_with(b"%PDF-"));
+        let upload = json!({"fileId":message_id,"path":output,"name":"Rust 回传.pdf"});
+        for _ in 0..2 {
+            let result = call("attachment.upload", upload.clone())?;
+            assert_eq!(result["result"]["id"], message_id, "{result}");
+            assert_eq!(result["result"]["mime"], "application/pdf");
+            assert_eq!(
+                result["result"]["url"],
+                format!(
+                    "/api/im/conversations/{}/files/{message_id}/encrypted.pocket",
+                    message["conversationId"].as_str().unwrap()
+                )
+            );
+        }
+        let mut changed = upload.clone();
+        changed["name"] = json!("不同附件名.pdf");
+        assert_eq!(call("attachment.upload", changed)?["error"]["status"], 409);
+        let result = call(
+            "message.send",
+            json!({
+                "clientId":format!("fixture-file-{message_id}"),"text":"",
+                "options":{"attachmentIds":[message_id],"replyTo":message_id},
+            }),
+        )?;
+        assert_eq!(
+            result["result"]["attachments"][0]["name"], "Rust 回传.pdf",
+            "{result}"
+        );
+
+        let mut changed_bytes = bytes.clone();
+        changed_bytes[1_000] ^= 1;
+        fs::write(&output, &changed_bytes)?;
+        assert_eq!(call("attachment.upload", upload)?["error"]["status"], 409);
+        assert_eq!(
+            call("attachment.download", download.clone())?["error"]["status"],
+            409
+        );
+        assert_eq!(fs::read(&output)?, changed_bytes);
+        let staged = call(
+            "attachment.upload",
+            json!({"path":output,"name":"staged.txt"}),
+        )?;
+        let staged_id = &staged["result"]["id"];
+        assert!(staged_id.is_string(), "{staged}");
+        assert_eq!(
+            call("attachment.remove", json!({"fileId":staged_id}))?["result"]["ok"],
+            true
+        );
+        assert_eq!(
+            call(
+                "attachment.download",
+                json!({"fileId":staged_id,"path":output})
+            )?["error"]["status"],
+            404
+        );
+        fs::write(&output, bytes)?;
+    } else if let Some(file_id) = scenario.strip_prefix("跨会话附件验证 ") {
+        let media = PathBuf::from(
+            std::env::var_os("RUST_IM_FIXTURE_MEDIA").context("missing media folder")?,
+        );
+        let output = media.join("cross-conversation.pdf");
+        let result = call(
+            "attachment.download",
+            json!({"fileId":file_id,"path":output}),
+        )?;
+        assert_eq!(result["error"]["status"], 404, "{result}");
+        assert!(!output.exists());
+        assert_eq!(
+            call(
+                "message.send",
+                json!({
+                    "clientId":format!("fixture-denied-{}", message["id"].as_str().unwrap()),
+                    "text":"跨会话读取已拒绝",
+                })
+            )?["result"]["text"],
+            "跨会话读取已拒绝",
+        );
+    }
     if matches!(
         scenario,
         "启动 Rust 流式回复" | "等待用户取消" | "Agent 自行取消" | "模拟流式失败"

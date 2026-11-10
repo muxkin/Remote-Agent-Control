@@ -155,7 +155,7 @@ try {
   const original = { origin, user: agent.user.id, cursor };
   await privateJson(progress, original);
   const manifest = join(stateDirectory, 'im-agents.json');
-  const profile = { id: 'fixture', state: credentials, messageHandler: handler, callHandler: handler, cursor: 0 };
+  const profile = { id: 'fixture', state: credentials, messageHandler: handler, cursor: 0 };
   await privateJson(manifest, [profile]);
   const incoming = await human.send(conversation.id, '从旧客户端发来的加密消息 👋', 'rust-message');
   start();
@@ -231,6 +231,58 @@ try {
   );
   assert.equal(replayed.length, 4, 'Replay created duplicate stream messages');
   assert.equal((await streamFor(completing.message.id))?.id, complete.id);
+
+  await stop();
+  const media = join(directory, 'media');
+  const environmentFile = join(directory, 'handler.env');
+  await mkdir(media, { mode: 0o700 });
+  privateDir(media);
+  // Dotenv single quotes preserve Windows path separators.
+  await writeFile(environmentFile, `RUST_IM_FIXTURE_MEDIA='${media}'\n`, { mode: 0o600 });
+  if (process.platform === 'win32') platformRuntime().privateFile(environmentFile);
+  await privateJson(manifest, [{ ...profile, messageProtocol: 'rpc', environmentFile }]);
+  const mediaCursor = await readCursor();
+  const contents = Buffer.alloc(1_100_000, 37);
+  contents.write('%PDF-1.7\nRust IM attachment fixture');
+  const { file } = await human.upload(conversation.id, '旧 Node 附件.pdf', contents);
+  const attachment = await human.send(conversation.id, '验证加密附件', 'rust-file-roundtrip', {
+    attachmentIds: [file.id],
+  });
+  const attachedEvent = (await legacy.sync(mediaCursor, 0)).events.find(
+    (event) => event.message?.id === attachment.message.id,
+  );
+  assert(attachedEvent);
+  start();
+  await until(async () => (await readCursor()) >= attachedEvent.sequence);
+  const roundtrip = (await streamFor(attachment.message.id))!;
+  assert.equal(roundtrip.attachments.length, 1);
+  assert.equal(roundtrip.attachments[0].id, attachment.message.id);
+  assert.equal(roundtrip.attachments[0].name, 'Rust 回传.pdf');
+  const downloaded = await human.download(roundtrip.attachments[0].url);
+  assert.equal(downloaded.mime, 'application/pdf');
+  assert.deepEqual(Buffer.from(downloaded.data), contents);
+  assert.deepEqual(await readFile(join(media, attachment.message.id + '.pdf')), contents);
+  const rawMeta = await human.raw<{ name: string; size: number; encrypted: string }>(
+    `/conversations/${conversation.id}/files/${roundtrip.attachments[0].id}/encrypted.pocket?meta=1`,
+  );
+  assert.equal(rawMeta.name, 'encrypted.pocket');
+  assert.equal(rawMeta.size, contents.length + 16);
+  assert(rawMeta.encrypted.startsWith('pocket-e2ee:1:'));
+  assert(!rawMeta.encrypted.includes('Rust 回传.pdf'));
+  await stop();
+  await privateJson(progress, { ...original, cursor: mediaCursor });
+  await privateJson(manifest, [{ ...profile, messageProtocol: 'rpc', environmentFile, callHandler: handler }]);
+  start();
+  await until(async () => (await readCursor()) >= attachedEvent.sequence);
+  const fileReplies = (await human.history(conversation.id)).messages.filter(
+    (message) => message.senderId === agent.user.id && message.replyTo === attachment.message.id,
+  );
+  assert.equal(fileReplies.length, 1, 'Replay created another attachment reply');
+  assert.equal(fileReplies[0].attachments[0].id, roundtrip.attachments[0].id);
+
+  const { conversation: other } = await human.group('另一个附件会话', [agent.user.id]);
+  await human.send(other.id, '跨会话附件验证 ' + file.id, 'rust-file-cross-conversation');
+  await until(async () => (await human.history(other.id)).messages.some((message) => message.text === '跨会话读取已拒绝'));
 
   const calls = new AgentCallsClient(human);
   await until(async () => (await calls.capabilities(conversation.id)).video);
@@ -310,7 +362,7 @@ try {
     await until(async () => !(await calls.capabilities(conversation.id)).audio);
   }
   console.log(
-    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): existing identity and cursor, encrypted text and streaming, revision replay, cancellation and failure, encrypted signaling, and bidirectional audio/video RTP passed.`,
+    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messages, streaming and attachment round trip, cross-conversation isolation, replay, signaling, and bidirectional audio/video RTP passed.`,
   );
 } finally {
   await stop();

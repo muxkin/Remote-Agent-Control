@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::{Client as Http, Method, header, redirect};
+use reqwest::{Client as Http, Method, RequestBuilder, header, redirect};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Read, path::Path, time::Duration};
@@ -160,31 +160,21 @@ impl Client {
         body: Option<&Value>,
     ) -> Result<Value> {
         let limit = if path.starts_with("/sync?") { 35 } else { 15 };
-        let mut request = self
-            .http
-            .request(method, format!("{}/api/im{path}", self.origin))
-            .timeout(Duration::from_secs(limit));
+        let mut request = self.api_request(method, path, limit);
         if let Some(body) = body {
             request = request
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(serde_json::to_vec(body)?);
         }
-        let mut response = request
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)?
-            .error_for_status()
-            .map_err(reqwest::Error::without_url)?;
-        ensure!(response.status().is_success(), "独立 Agent 服务重定向");
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            ensure!(
-                bytes.len() + chunk.len() <= 64 * 1024 * 1024,
-                "独立 Agent 服务响应过大"
-            );
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(serde_json::from_slice(&bytes)?)
+        Ok(serde_json::from_slice(
+            &checked_bytes(request, 64 * 1024 * 1024).await?,
+        )?)
+    }
+
+    pub(crate) fn api_request(&self, method: Method, path: &str, seconds: u64) -> RequestBuilder {
+        self.http
+            .request(method, format!("{}/api/im{path}", self.origin))
+            .timeout(Duration::from_secs(seconds))
     }
 
     pub(crate) async fn verify(&self) -> Result<()> {
@@ -365,9 +355,7 @@ impl Client {
             for file in files {
                 if let Some(encrypted) = file["encrypted"].as_str() {
                     let context = format!("attachment:{cid}:{}", required(file, "id")?);
-                    let envelope = Envelope::parse(encrypted)?;
-                    let sender = envelope.sender().to_owned();
-                    let metadata = self.decrypt(&sender, &context, envelope).await?;
+                    let (_, metadata) = self.attachment_metadata(encrypted, &context).await?;
                     file["name"] = metadata["name"].clone();
                     file["mime"] = metadata["mime"].clone();
                     file["size"] = metadata["size"].clone();
@@ -383,7 +371,7 @@ impl Client {
         Ok(message)
     }
 
-    async fn recipients(&self, endpoint: &str) -> Result<Vec<String>> {
+    pub(crate) async fn recipients(&self, endpoint: &str) -> Result<Vec<String>> {
         let snapshot = self.get(endpoint).await?;
         let recipients = snapshot["conversation"]["members"]
             .as_array()
@@ -585,6 +573,29 @@ pub(crate) fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .context("独立 Agent 协议字段无效")
 }
 
-fn segment(id: &str) -> String {
+pub(crate) fn segment(id: &str) -> String {
     utf8_percent_encode(id, NON_ALPHANUMERIC).to_string()
+}
+
+pub(crate) async fn checked_bytes(request: RequestBuilder, limit: usize) -> Result<Vec<u8>> {
+    let mut response = request
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?
+        .error_for_status()
+        .map_err(reqwest::Error::without_url)?;
+    ensure!(response.status().is_success(), "独立 Agent 服务重定向");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
+        ensure!(
+            chunk.len() <= limit - bytes.len(),
+            "独立 Agent 服务响应过大"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }

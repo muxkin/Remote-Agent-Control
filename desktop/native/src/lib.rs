@@ -17,6 +17,7 @@ mod files;
 mod gateway;
 mod history_media;
 mod im_agent;
+mod im_attachments;
 mod im_calls;
 mod im_client;
 mod im_crypto;

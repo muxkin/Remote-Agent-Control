@@ -1,5 +1,6 @@
 use crate::{
     gateway::{ManagedAgent, Snapshot},
+    im_attachments::{Download, Upload},
     im_calls,
     im_client::{Client, MessageConflict, MessageUpdate, NewMessage, required},
     state::{private_directory, private_file},
@@ -382,6 +383,12 @@ enum MessageRequest {
     History { before: Option<u64> },
     #[serde(rename = "message.cancel")]
     Cancel(MessageRef),
+    #[serde(rename = "attachment.upload")]
+    Upload(Upload),
+    #[serde(rename = "attachment.download")]
+    Download(Download),
+    #[serde(rename = "attachment.remove")]
+    Remove(AttachmentRef),
     #[serde(rename = "done")]
     Done,
 }
@@ -390,6 +397,12 @@ enum MessageRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MessageRef {
     message_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AttachmentRef {
+    file_id: Uuid,
 }
 
 impl MessageRequest {
@@ -406,6 +419,9 @@ impl MessageRequest {
                 client.history(cid, before).await
             }
             Self::Cancel(input) => client.cancel(cid, &input.message_id).await,
+            Self::Upload(input) => client.upload_attachment(cid, input).await,
+            Self::Download(input) => client.download_attachment(cid, input).await,
+            Self::Remove(input) => client.remove_attachment(cid, input.file_id).await,
             Self::Done => Ok(json!({"ok":true})),
         }
     }
@@ -420,7 +436,7 @@ fn message_error(error: &anyhow::Error) -> Value {
         400
     };
     json!({"status":status,"message":if status == 409 {
-        "消息请求标识已用于其他内容，或回复版本已变化"
+        "请求标识、附件或消息版本发生冲突"
     } else {
         "独立 Agent 消息请求未完成"
     }})
