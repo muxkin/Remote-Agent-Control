@@ -62,6 +62,16 @@ pub struct Snapshot {
     pub phase: Phase,
     pub pairing: Option<DisplayPairing>,
     pub history: bool,
+    pub agents: Vec<ManagedAgent>,
+    pub update: String,
+    pub manual_update: bool,
+    pub exit_for_update: bool,
+}
+
+#[derive(Clone, PartialEq, Deserialize)]
+pub struct ManagedAgent {
+    pub name: String,
+    pub connected: bool,
 }
 
 #[derive(Clone, Default, PartialEq)]

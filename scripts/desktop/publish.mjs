@@ -1,9 +1,10 @@
 import { readFile, readdir, writeFile, mkdtemp, rm, mkdir, rename, stat, copyFile } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
+import { updateFilename } from './native-update.mjs';
 const args = process.argv.slice(2),
   get = (key) => args[args.indexOf(key) + 1];
 const output = args.includes('--output') ? resolve(get('--output'), 'desktop-releases') : null;
@@ -29,24 +30,30 @@ if (
   throw Error('Invalid release destination');
 const origin = url?.origin;
 const directory = resolve(args.includes('--directory') ? get('--directory') : 'dist/desktop');
+const nativeVersion = args.includes('--native-version') ? get('--native-version') : null;
+if (args.includes('--native-version') && !/^\d+\.\d+\.\d+$/.test(nativeVersion ?? ''))
+  throw Error('Set --native-version to an explicit version');
 const metadata =
   platform === 'linux' ? 'latest-linux.yml' : platform === 'darwin' ? 'latest-mac.yml' : 'latest.yml';
-const manifest = parse(await readFile(join(directory, metadata), 'utf8'));
-if (!/^\d+\.\d+\.\d+$/.test(manifest.version) || !Array.isArray(manifest.files) || !manifest.files.length)
-  throw Error('Invalid release metadata');
 const artifacts = [];
-for (const file of manifest.files) {
-  if (!/^AgentSpace-[0-9][A-Za-z0-9._-]*\.(exe|dmg|zip|AppImage)$/.test(file.url))
-    throw Error('Release metadata must use relative installer names');
-  const bytes = await readFile(join(directory, file.url));
-  if (createHash('sha512').update(bytes).digest('base64') !== file.sha512 || file.size !== bytes.length)
-    throw Error(`Release integrity mismatch: ${file.url}`);
-  artifacts.push({ file: file.url, size: bytes.length });
+let manifest;
+if (!nativeVersion) {
+  manifest = parse(await readFile(join(directory, metadata), 'utf8'));
+  if (!/^\d+\.\d+\.\d+$/.test(manifest.version) || !Array.isArray(manifest.files) || !manifest.files.length)
+    throw Error('Invalid release metadata');
+  for (const file of manifest.files) {
+    if (!/^AgentSpace-[0-9][A-Za-z0-9._-]*\.(exe|dmg|zip|AppImage)$/.test(file.url))
+      throw Error('Release metadata must use relative installer names');
+    const bytes = await readFile(join(directory, file.url));
+    if (createHash('sha512').update(bytes).digest('base64') !== file.sha512 || file.size !== bytes.length)
+      throw Error(`Release integrity mismatch: ${file.url}`);
+    artifacts.push({ file: file.url, size: bytes.length });
+  }
+  // DMG is the visible macOS installer; updater metadata uses ZIP.
+  for (const name of await readdir(directory))
+    if (name === `AgentSpace-${manifest.version}-mac-${arch}.dmg` && !artifacts.some((x) => x.file === name))
+      artifacts.push({ file: name, size: (await readFile(join(directory, name))).length });
 }
-// DMG is the visible macOS installer; updater metadata uses ZIP.
-for (const name of await readdir(directory))
-  if (name === `AgentSpace-${manifest.version}-mac-${arch}.dmg` && !artifacts.some((x) => x.file === name))
-    artifacts.push({ file: name, size: (await readFile(join(directory, name))).length });
 const publicURL = `${origin}/downloads/desktop/`;
 async function head(name) {
   if (output) {
@@ -61,7 +68,9 @@ async function head(name) {
   return { status: response.status, ok: response.ok, size: Number(response.headers.get('Content-Length')) };
 }
 let index;
-if (output) {
+if (nativeVersion) {
+  index = { files: [] };
+} else if (output) {
   try {
     index = JSON.parse(await readFile(join(output, 'releases.json'), 'utf8'));
   } catch (e) {
@@ -114,6 +123,45 @@ async function put(name, file, type) {
   );
   if (result.status !== 0) throw Error('R2 upload failed; release manifest was not advanced');
   uploaded.set(name, size);
+}
+if (nativeVersion) {
+  const key = process.env.POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE;
+  if (!key) throw Error('Set POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE to the private signing key path');
+  const privateKey = createPrivateKey(await readFile(key));
+  if (privateKey.asymmetricKeyType !== 'ed25519') throw Error('Expected an Ed25519 signing key');
+  const file = updateFilename(nativeVersion, platform, arch);
+  const source = join(directory, file);
+  const bytes = await readFile(source);
+  if (!bytes.length || bytes.length > 512 * 1024 * 1024) throw Error('Installer size out of range');
+  const path = `native/${platform}/${arch}`;
+  const payload = Buffer.from(
+    JSON.stringify({
+      format: 1,
+      platform,
+      arch,
+      version: nativeVersion,
+      file,
+      size: bytes.length,
+      sha512: createHash('sha512').update(bytes).digest('hex'),
+    }),
+  );
+  const envelope = {
+    payload: payload.toString('base64'),
+    signature: sign(null, payload, privateKey).toString('base64'),
+  };
+  await put(`${path}/${file}`, source, 'application/octet-stream');
+  const reachable = await head(`${path}/${file}`);
+  if (!reachable.ok || reachable.size !== bytes.length) throw Error('Native installer is not reachable');
+  const temp = await mkdtemp(join(tmpdir(), 'desktop-native-release-'));
+  try {
+    const metadata = join(temp, 'latest.json');
+    await writeFile(metadata, JSON.stringify(envelope));
+    await put(`${path}/latest.json`, metadata, 'application/json');
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+  console.log(`Published native ${platform}/${arch} ${nativeVersion}`);
+  process.exit(0);
 }
 for (const artifact of artifacts) {
   await put(

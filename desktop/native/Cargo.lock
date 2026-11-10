@@ -151,6 +151,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "jsonschema",
+ "libc",
  "libp2p-core",
  "libp2p-identity",
  "libp2p-noise",

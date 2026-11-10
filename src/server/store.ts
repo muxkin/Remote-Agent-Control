@@ -90,6 +90,12 @@ export class Store {
     this.db.prepare('INSERT INTO pairing VALUES (?, ?)').run(hash(code), expiresAt);
     return { code, expiresAt };
   }
+  pairingPending(code: string) {
+    return !!this.db.prepare('SELECT 1 FROM pairing WHERE hash=? AND expires>?').get(hash(code), Date.now());
+  }
+  discardPairing(code: string) {
+    this.db.prepare('DELETE FROM pairing WHERE hash=?').run(hash(code));
+  }
   pair(
     code: string,
     name: string,
@@ -160,6 +166,14 @@ export class Store {
   }
   revoke(id: string): void {
     this.db.prepare('UPDATE devices SET revoked=1 WHERE id=?').run(id);
+  }
+  completedNativeUpload(id: string, device: string, thread: string): string | undefined {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_uploads'").get())
+      return;
+    const row = this.db.prepare(
+      'SELECT manifest FROM native_uploads WHERE id=? AND device=? AND thread=? AND complete=1',
+    ).get(id, device, thread);
+    if (typeof row?.manifest === 'string') return row.manifest;
   }
   recover(): void {
     this.db

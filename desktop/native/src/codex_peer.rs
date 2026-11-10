@@ -36,14 +36,21 @@ impl Endpoint {
                     Some(PathBuf::from("/usr/lib/chatgpt/ChatGPT"))
                 } else if cfg!(target_os = "macos") {
                     let candidates = [
-                        "/Applications/Codex.app/Contents/MacOS/Codex",
-                        "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+                        Some(PathBuf::from(
+                            "/Applications/Codex.app/Contents/MacOS/Codex",
+                        )),
+                        Some(PathBuf::from(
+                            "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+                        )),
+                        dirs::home_dir()
+                            .map(|home| home.join("Applications/Codex.app/Contents/MacOS/Codex")),
                     ]
                     .into_iter()
-                    .map(PathBuf::from)
+                    .flatten()
+                    .filter_map(|path| path.canonicalize().ok())
                     .filter(|path| path.is_file())
-                    .collect::<Vec<_>>();
-                    (candidates.len() == 1).then(|| candidates[0].clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                    (candidates.len() == 1).then(|| candidates.into_iter().next().unwrap())
                 } else {
                     None
                 }
@@ -206,7 +213,29 @@ fn verify_unix(stream: &tokio::net::UnixStream, expected: &Path, uid: u32) -> Re
     Ok(())
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn verify_unix(stream: &tokio::net::UnixStream, expected: &Path, uid: u32) -> Result<()> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+
+    let credentials = stream.peer_cred()?;
+    ensure!(credentials.uid() == uid, "Codex 对端用户不匹配");
+    let pid = credentials
+        .pid()
+        .filter(|pid| *pid > 0)
+        .context("无法读取 Codex 对端进程")?;
+    let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // The kernel returns the executable path for the PID attached to the connected socket.
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    ensure!(length > 0, "无法读取 Codex 对端程序");
+    let peer = Path::new(std::ffi::OsStr::from_bytes(
+        CStr::from_bytes_until_nul(&buffer)?.to_bytes(),
+    ));
+    ensure!(peer == expected.canonicalize()?, "Codex 对端程序不匹配");
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn verify_unix(_stream: &tokio::net::UnixStream, _expected: &Path, _uid: u32) -> Result<()> {
     bail!("本平台的 Codex IPC 身份校验尚不可用")
 }

@@ -2,7 +2,37 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。Windows 和 Linux 共用 Rust 网关、Noise 协议、SQLite 状态和 Ely 界面。桌面端使用 tray-icon 和 auto-launch 管理托盘与当前用户自启动。服务登记成功后会记住服务地址，接入密钥只在本次进程内使用。
+原生适配器位于 `desktop/native`。Windows、Linux 和 macOS 安装包与 CI 生成的便携包使用相同的 Ely 界面，并附带共享网关、Node、Python 和官方插件。Ely 管理托盘、自启动、配对和更新，Agent 由独立插件宿主连接。源码或无网关负载的构建仍可运行独立 Rust Codex 网关。两种模式使用相同的 Noise 配对协议和 SQLite 状态目录。
+
+### 原生安装包
+
+[原生预览发布页](https://github.com/muxkin/Remote-Agent-Control/releases)列出可下载的实际产物。已发布的 0.2.7 提供 Windows 和 Linux 便携包。以下安装包由新的构建流程生成，随通过验收的后续预览标签发布。
+
+| 平台 | 安装包 | 安装方式 |
+| --- | --- | --- |
+| Windows x64 | `*-windows-x64-setup.exe` | 当前用户安装，安装后从开始菜单打开。从托盘退出适配器后可重新安装或卸载。 |
+| macOS Apple Silicon / Intel | `*-macos-arm64.dmg` / `*-macos-x64.dmg` | 将应用拖入 Applications，再打开。以 macOS 14 为构建目标。 |
+| Linux x64 | `*-linux-x64.deb` | Ubuntu 24.04 或满足依赖的系统运行 `sudo apt install ./AgentSpace-Native-<版本>-linux-x64.deb`，再从应用菜单打开。 |
+
+安装版与便携版使用同一原生状态目录。切换前先从托盘退出原进程。如果便携版已开启自启动，先关闭，再在安装版启用，使自启动指向安装位置。卸载保留身份、配对和附件数据。Windows 预览安装包尚无发布者签名，macOS 预览包尚未通过公证。
+
+### Agent 插件
+
+安装版沿用[插件 SDK 和监督器](ADAPTER_PLUGINS.md)。默认启用 `codex-local`，DSH 和第三方插件可按实例配置。同一种插件可以同时运行多个实例，各有独立宿主、凭据、数据目录和版本绑定。Ely 的概览和诊断显示各实例的连接状态。
+
+把实例数组保存为原生状态目录下的 `instances.json`，并在同目录下的私有 `gateway.env` 设置对应凭据。现有 `POCKET_ADAPTERS_FILE` 和 `POCKET_BACKENDS_FILE` 可继续使用，优先于默认文件。修改实例配置后重启适配器。终端中的 `agent-space-native --adapter list`、`install`、`upgrade` 和 `rollback` 调用原有插件 CLI。官方插件随整包更新交付，监督器按实例安全交接。
+
+从独立 Rust 网关切换时，安装版继续读取同一设备身份、配对、操作记录和已完成的上传。原生上传仍按设备及会话校验归属，并验证文件摘要。上传中的文件需要重新发送。原有 Rust `transport.env` 专用存储设置应按共享网关的 `gateway.env` 配置映射，已有数据目录保持原位。
+
+### 原生安装版自动更新
+
+附带 Ed25519 公钥的安装包默认启用更新。后台首次启动后检查，之后每四小时检查一次。默认跟随当前服务地址，使用 `/downloads/desktop/native/<平台>/<架构>/latest.json`。可在私有 `gateway.env` 用 `POCKET_NATIVE_UPDATE_BASE_URL` 指定 HTTPS 更新根目录，或用 `POCKET_NATIVE_UPDATES=0` 关闭，修改后重启。
+
+更新先验证签名、平台、架构和版本，再从同源下载并验证长度与 SHA-512。安装前向网关确认手机连接、恢复宽限期和在途写操作均已结束。网关停止接入并退出后，独立更新进程才安装并重新启动适配器。Windows 校验安装器的 Authenticode 签名，macOS 校验签名和 Gatekeeper 后替换应用包，Linux DEB 在设置页点「安装已下载更新」，由 apt 和 PolicyKit 授权安装。无签名配置的预览包和便携包不启用整包自动更新。
+
+打包时用 `POCKET_NATIVE_GATEWAY_PAYLOAD` 指向已准备的共享网关，`POCKET_NATIVE_UPDATE_PUBLIC_KEY_FILE` 指向 Ed25519 公钥 PEM。CI 可用仓库变量 `POCKET_NATIVE_UPDATE_PUBLIC_KEY` 提供公钥。签名私钥只由发布者在本地持有。发布使用同一 Node/R2 工具，向原有命令增加 `--native-version <版本>`，并以 `POCKET_NATIVE_UPDATE_SIGNING_KEY_FILE` 指定私钥文件。先发布不可覆盖的安装包，再发布签名清单。原有 Electron 清单和下载索引继续独立维护。正式发布前需提升原生版本号并完成各平台安装验收。
+
+### 本地构建与功能范围
 
 ```bash
 cd desktop/native
@@ -17,17 +47,21 @@ Codex 目录按 `POCKET_NATIVE_CODEX_HOME`、`CODEX_HOME`、`~/.codex` 的顺序
 
 项目名称和会话归属读取 Codex 的项目表及桌面保存的显式分组。打开、新建、改名、整段会话分支和用量读取使用经过验证的桌面应用工具。模型目录来自本机 Codex 桌面缓存，模型、推理强度、速度、计划模式及会话权限随桌面状态同步。技能和插件来自当前项目及本机已启用的目录，选择后随下一条新消息发送。Linux 自动发现应用工具端点，Windows 可用 `POCKET_NATIVE_CODEX_APP_TOOLS` 指定本机 Named Pipe。
 
+实时会话和历史里的工具活动可按需查看命令、输出及可用的文件修改详情。查看过的图片归入工具活动。临时图片被清理后，如果同一会话记录中仍有与该次调用逐项匹配的图片数据，适配器可通过原有加密附件通道恢复。
+
 实时会话支持命令和文件审批、按项授权、同步与异步提问、连接器表单、计划确认及原生消息队列。审批回复需匹配当前回合和请求指纹。队列修改前重新读取桌面状态，并在收到桌面确认后同步结果。指定回复分支需要支持 `lastTurnId` 的已验证 Codex CLI。适配器默认查找 Codex 桌面自带的二进制文件，也可用 `POCKET_NATIVE_CODEX_CLI` 指定本机绝对路径。
 
 原生适配器默认尝试 WebRTC，直连和中继共用同一套 Noise 配对协议。可在私有状态目录的 `transport.env` 中设置 `POCKET_NATIVE_P2P=0` 关闭直连，或设置 `POCKET_STUN_URLS` 指定 STUN 服务。配置七牛私有桶后，无法直连时，大附件优先使用对象存储。通过 `POCKET_NATIVE_STORAGE_ENV_FILE` 引用既有网关私有配置，并用 `POCKET_NATIVE_QINIU_UPLOAD_URL` 指定桶所在区域的 HTTPS 上传源。Web 服务的 CSP 和对象存储的 CORS 需要允许该上传路径。对象上传默认按 25 MiB 分组，可用 `POCKET_NATIVE_STORAGE_BATCH_MIB` 调整到 50 MiB。支持该字段的新网页按配置分组，旧网页沿用 15 MiB。1 MiB 校验块保持兼容。
 
-Windows 和 Linux 的构建与协议夹具见 `.github/workflows/desktop-native.yml`。Linux 已运行窗口和协议验收。Windows x64 便携包已交叉构建，Windows 本机协议测试已加入 CI，图形运行仍待 Windows 验收。现阶段 DSH 后端、自动更新和签名安装器仍需迁移。
+三系统的安装和协议验证入口见 `.github/workflows/desktop-native.yml`。Linux CI 安装 DEB 并用安装后的程序验证协议。macOS CI 挂载 DMG，校验应用包并用其中的程序验证 Socket 对端和协议。Windows CI 验证安装、重装和卸载，并用同一提交的控制台构建验证 Named Pipe 和协议。Windows 和 macOS 的桌面实机验收仍需单独完成。
+
+独立 Rust 便携模式继续面向 Codex。Windows 和 macOS 签名发行及自动安装仍需实机验收。旧版独立 Agent 的消息和通话由相应的独立进程接入。
 
 在仓库根目录运行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts`，可验证旧身份和配对、新配对、历史、原生会话控制、文件传输和重启恢复。设置 `POCKET_NATIVE_TEST_RELAY=cloudflare` 可使用同一个夹具验证 Cloudflare Worker。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
 
 只运行网关时，可以在 Alpine 等原生 musl 构建环境中使用 `cargo build --release --locked --no-default-features --target x86_64-unknown-linux-musl` 生成静态可执行文件。跨目标构建还需要 musl C 编译器来构建 SQLite 等依赖。Ely 图形版需要动态加载系统的 Vulkan 等图形库。Alpine 上已用 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=-crt-static'` 构建并启动窗口，需要该系统的 musl 图形运行库。
 
-## 用户安装
+## 原有 Electron 安装版
 
 在网页“我的 → 电脑适配器”选择已发布的平台安装包。Windows 使用每用户 NSIS 安装程序，macOS 使用 DMG，Linux 使用 AppImage（首次运行需允许执行）。安装包内置 Node、Python、编译后的 Gateway 和官方插件，不要求用户克隆源码、安装 npm 依赖或手动升级插件。
 

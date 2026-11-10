@@ -107,17 +107,33 @@ it('does not expose tool paths that were never shared as attachment links', asyn
   await expect(f.history.attachment(THREAD, f.image)).rejects.toThrow('附件未在此会话中找到');
 });
 
-it('preserves the missing-file error for a viewed image in the live transcript', async () => {
+it('recovers both missing images from one live tool call in event order', async () => {
   const f = fixture();
   f.records.pop();
+  const other = f.image + '.second.png';
+  const otherBytes = Buffer.from('second original image');
+  f.records[2].payload.output.push({
+    type: 'input_image',
+    image_url: 'data:image/png;base64,' + otherBytes.toString('base64'),
+  });
+  f.records.splice(2, 0, {
+    type: 'event_msg',
+    payload: {
+      type: 'item_completed',
+      thread_id: THREAD,
+      item: { type: 'ImageView', path: pathToFileURL(other).href },
+    },
+  });
   f.save();
   const desktop = new DesktopAdapter(f.config);
   const snapshot = state();
   snapshot.turnHistory.history.entitiesByKey.one.items = [
     { type: 'imageView', id: 'view-image', path: pathToFileURL(f.image).href },
+    { type: 'imageView', id: 'second-view-image', path: pathToFileURL(other).href },
   ];
   desktop.view = () => normalizedView(snapshot, 1, true);
   const backend = new CodexBackend(f.config, desktop, f.history);
-  await expect(backend.attachment(THREAD, f.image)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(readFileSync(await backend.attachment(THREAD, f.image))).toEqual(f.bytes);
+  expect(readFileSync(await backend.attachment(THREAD, other))).toEqual(otherBytes);
   await expect(backend.attachment(THREAD, f.image + '.unrelated')).rejects.toThrow('附件未在此会话中找到');
 });

@@ -22,6 +22,8 @@ interface Download {
   size: number;
 }
 const files = shallowRef<Download[]>([]);
+const previewBase = '/downloads/desktop/native/preview/linux/x64/';
+const preview = shallowRef<{ version: string; files: { name: string; size: number }[] }>();
 const sections = computed(() =>
   platforms.map((platform) => ({
     ...platform,
@@ -37,6 +39,23 @@ watch(
     const controller = new AbortController();
     onCleanup(() => controller.abort());
     state.value = 'loading';
+    void fetch(previewBase + 'preview.json', { signal: controller.signal, cache: 'no-cache' })
+      .then(async (response) => (response.ok ? response.json() : undefined))
+      .then((manifest) => {
+        if (controller.signal.aborted || !manifest || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(manifest.version))
+          return;
+        if (!Array.isArray(manifest.files)) return;
+        const expected = ['deb', 'tar.xz'].map(
+          (suffix) => `AgentSpace-Native-${manifest.version}-linux-x64.${suffix}`,
+        );
+        const files = manifest.files.filter(
+          (file: { name?: string; size?: number }) =>
+            file && expected.includes(file.name ?? '') && Number.isFinite(file.size) && Number(file.size) > 0,
+        );
+        if (files.length === 2 && new Set(files.map((file: { name: string }) => file.name)).size === 2)
+          preview.value = { version: manifest.version, files };
+      })
+      .catch(() => {});
 
     try {
       const response = await fetch('/downloads/desktop/releases.json', {
@@ -73,6 +92,17 @@ watch(
       </span>
       <h2>连接你的电脑</h2>
       <p>安装适配器，打开已有的 Codex / Agent，<br />再用手机扫码配对。</p>
+    </section>
+    <section v-if="preview" class="donation-card">
+      <h3>Linux x64 插件版预览 v{{ preview.version }}</h3>
+      <p>内置 Codex 和 DSH 插件。预览包的自动更新暂未启用。</p>
+      <p v-for="file in preview.files" :key="file.name">
+        <a :href="previewBase + file.name" download>{{
+          file.name.endsWith('.deb') ? '下载 DEB 安装包' : '下载便携包'
+        }}</a>
+        <small> · {{ Math.ceil(file.size / 1024 / 1024) }} MB</small>
+      </p>
+      <p><a :href="previewBase + 'preview.json'">SHA-256 校验清单</a></p>
     </section>
     <section class="donation-card">
       <h3>原生托盘版 v{{ version }}</h3>

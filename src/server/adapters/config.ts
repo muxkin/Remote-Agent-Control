@@ -20,12 +20,12 @@ export interface AdapterInstance {
   config: Record<string, unknown>;
 }
 /** One-way legacy mapping preserves IDs and does not write credentials to the registry. */
-export function readInstances(): AdapterInstance[] {
+export function readInstances(codexVersion = '1.0.7'): AdapterInstance[] {
   const codex: AdapterInstance = {
     id: 'codex-local',
     name: 'Codex',
     plugin: '@agent-remote/adapter-codex',
-    version: '1.0.7',
+    version: codexVersion,
     config: {},
   };
   for (const [key, env] of Object.entries({
@@ -37,7 +37,10 @@ export function readInstances(): AdapterInstance[] {
     python: 'POCKET_PYTHON',
   }))
     if (process.env[env]) codex.config[key] = process.env[env];
-  const file = process.env.POCKET_ADAPTERS_FILE ?? process.env.POCKET_BACKENDS_FILE;
+  const file =
+    process.env.POCKET_ADAPTERS_FILE ??
+    process.env.POCKET_BACKENDS_FILE ??
+    process.env.POCKET_NATIVE_DEFAULT_INSTANCES;
   if (!file) return [codex];
   const input = z
     .array(z.unknown())

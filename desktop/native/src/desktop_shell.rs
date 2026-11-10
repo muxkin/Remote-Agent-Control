@@ -35,6 +35,10 @@ pub fn register_launcher() -> Result<()> {
 
     let data = dirs::data_dir().context("无法定位桌面应用目录")?;
     let path = std::env::current_exe()?;
+    if path == Path::new("/usr/bin/agent-space-native") {
+        // The system package provides its own launcher and icon.
+        return Ok(());
+    }
     let path = path.to_str().context("无法表示适配器路径")?;
     anyhow::ensure!(
         !path.contains('=') && !path.chars().any(char::is_control),
@@ -107,10 +111,16 @@ pub fn register_launcher() -> Result<()> {
 
 pub fn startup() -> Result<AutoLaunch> {
     let path = std::env::current_exe()?;
+    let path = path.to_str().context("无法表示适配器路径")?;
+    // auto-launch writes the Windows Run value as a command line.
+    #[cfg(windows)]
+    let quoted_path = format!("\"{path}\"");
+    #[cfg(windows)]
+    let path = &quoted_path;
     let mut setup = AutoLaunchBuilder::new();
     setup
         .set_app_name("agent-space-native")
-        .set_app_path(path.to_str().context("无法表示适配器路径")?)
+        .set_app_path(path)
         .set_args(&["--background"]);
     #[cfg(windows)]
     setup.set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser);

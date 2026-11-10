@@ -17,6 +17,18 @@ use uuid::Uuid;
 const LIMIT: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_LINE: u64 = 32 * 1024 * 1024;
 const INLINE_LIMIT: usize = 24 * 1024 * 1024;
+const MAX_VIEWED_IMAGES: usize = 32;
+
+#[derive(Debug)]
+pub struct MissingAttachment;
+
+impl std::fmt::Display for MissingAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("原附件文件已不可用，且没有可恢复的数据，请在电脑端重新发送。")
+    }
+}
+
+impl std::error::Error for MissingAttachment {}
 
 #[derive(Default, Clone)]
 pub struct Rollouts(Arc<Mutex<HashMap<PathBuf, Expanded>>>);
@@ -122,6 +134,7 @@ pub fn description(
             .as_ref()
             .is_some_and(|path| local_path(link, &cwd).is_ok_and(|link| &link == path))
     };
+    let mut missing = false;
     if let Some(view) = live {
         if inline && let Some(data) = view.inline.get(reference) {
             return embedded(data);
@@ -143,8 +156,9 @@ pub fn description(
                         && links(text).any(|link| link_matches(&link)))
             })
         {
-            if let Ok(source) = project_file(path, history.home(), &cwd) {
-                return Ok(source);
+            match project_file(path, history.home(), &cwd) {
+                Ok(source) => return Ok(source),
+                Err(error) => missing |= is_not_found(&error),
             }
         }
     }
@@ -164,24 +178,30 @@ pub fn description(
             continue;
         }
         let Ok(record) = serde_json::from_slice::<Value>(&line) else {
+            calls.clear();
             continue;
         };
         let p = &record["payload"];
+        if record["type"] == "turn_context"
+            || (record["type"] == "event_msg"
+                && matches!(p["type"].as_str(), Some("task_started" | "task_complete")))
+        {
+            calls.clear();
+        }
         if record["type"] == "response_item" {
-            let media = media(p);
             if inline {
-                if let Some(data) = media
-                    .iter()
+                if let Some(data) = media(p)
+                    .into_iter()
                     .find(|source| media_reference(source) == reference)
                 {
-                    return embedded(data);
+                    return embedded(&data);
                 }
                 continue;
             }
             let path = requested.as_ref().unwrap();
             let text = crate::codex_live::native_text(&p["content"]);
             let (_, attachments) = files::message_attachment_text(&text);
-            if media.iter().any(|source| link_matches(source))
+            if media(p).iter().any(|source| link_matches(source))
                 || (p["type"] == "message"
                     && p["role"] == "assistant"
                     && links(&text).any(|link| link_matches(&link)))
@@ -191,8 +211,9 @@ pub fn description(
                         .iter()
                         .any(|item| item["path"].as_str().is_some_and(link_matches)))
             {
-                if let Ok(source) = project_file(path, history.home(), &cwd) {
-                    return Ok(source);
+                match project_file(path, history.home(), &cwd) {
+                    Ok(source) => return Ok(source),
+                    Err(error) => missing |= is_not_found(&error),
                 }
             }
             let call = p["call_id"].as_str();
@@ -216,30 +237,86 @@ pub fn description(
                     Some("function_call_output" | "custom_tool_call_output")
                 )
                 && let Some((paths, false)) = calls.remove(call)
-                && paths.len() == 1
-                && link_matches(&paths[0])
-                && media.len() == 1
-                && media[0].starts_with("data:image/")
             {
-                return embedded(&media[0]);
+                let mut matches = paths
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, path)| link_matches(path));
+                if let Some((index, _)) = matches.next()
+                    && matches.next().is_none()
+                {
+                    // A single exec can emit several ImageView events. Match its own
+                    // image results in order only when the association is complete.
+                    if let Some(images) = viewed_images(&p["output"])
+                        && images.len() == paths.len()
+                        && let Ok(source) = embedded(images[index])
+                    {
+                        return Ok(source);
+                    }
+                }
             }
         } else if !inline
             && record["type"] == "event_msg"
             && p["type"] == "item_completed"
-            && p["thread_id"] == thread.to_string()
             && p["item"]["type"] == "ImageView"
-            && calls.len() == 1
             && let Some(path) = p["item"]["path"].as_str()
-            && let Some((paths, ambiguous)) = calls.values_mut().next()
         {
-            if paths.len() < 2 {
-                paths.push(path.to_owned());
-            } else {
-                *ambiguous = true;
+            let own_thread = p["thread_id"]
+                .as_str()
+                .and_then(|id| Uuid::parse_str(id).ok())
+                == Some(thread);
+            if own_thread && link_matches(path) {
+                match project_file(requested.as_ref().unwrap(), history.home(), &cwd) {
+                    Ok(source) => return Ok(source),
+                    Err(_) => missing = true,
+                }
+            }
+            if calls.len() == 1
+                && let Some((paths, ambiguous)) = calls.values_mut().next()
+            {
+                if own_thread && paths.len() < MAX_VIEWED_IMAGES {
+                    paths.push(path.to_owned());
+                } else {
+                    *ambiguous = true;
+                }
             }
         }
     }
+    if missing {
+        return Err(MissingAttachment.into());
+    }
     bail!("文件未作为可读取附件出现在当前会话")
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn viewed_images(output: &Value) -> Option<Vec<&str>> {
+    let mut images = Vec::new();
+    for item in output.as_array()? {
+        match item["type"].as_str()? {
+            "text" | "input_text" | "output_text" => {}
+            "input_image" | "image_url" => {
+                let image = item["image_url"]
+                    .as_str()
+                    .or_else(|| item["image_url"]["url"].as_str())?;
+                let (kind, _) = image.strip_prefix("data:")?.split_once(";base64,")?;
+                if !kind.starts_with("image/")
+                    || extension(kind).is_none()
+                    || image.len() > INLINE_LIMIT
+                    || images.len() == MAX_VIEWED_IMAGES
+                {
+                    return None;
+                }
+                images.push(image);
+            }
+            _ => return None,
+        }
+    }
+    Some(images)
 }
 
 fn legacy_root() -> Option<PathBuf> {
@@ -331,6 +408,7 @@ fn project_file(path: &Path, home: &Path, cwd: &Path) -> Result<Source> {
             }),
         "此文件不能通过附件入口读取"
     );
+    ensure!(canonical.metadata()?.is_file(), "附件不是普通文件");
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -418,7 +496,9 @@ pub fn media(item: &Value) -> Vec<String> {
             return;
         }
         let source = match item["type"].as_str() {
-            Some("localImage" | "imageView") => item["path"].as_str().map(str::to_owned),
+            Some("localImage" | "imageView" | "ImageView") => {
+                item["path"].as_str().map(str::to_owned)
+            }
             Some("imageGeneration") => ["savedPath", "src", "result"]
                 .into_iter()
                 .find_map(|key| item[key].as_str())

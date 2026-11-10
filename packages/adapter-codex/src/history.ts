@@ -368,10 +368,10 @@ export class HistoryIndex {
     }
     return null;
   }
-  async attachment(id: string, reference: string): Promise<string> {
+  async attachment(id: string, reference: string, liveMissing?: unknown): Promise<string> {
     const thread = this.get(id);
     if (!thread) throw Error('找不到此会话');
-    let missing: unknown;
+    let missing = liveMissing;
     for await (const record of this.records(id)) {
       const message = rolloutMessage(record, 'history');
       if (!message) continue;

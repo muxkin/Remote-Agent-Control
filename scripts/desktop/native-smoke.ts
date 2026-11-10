@@ -10,6 +10,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
 import { Store } from '../../src/server/store.js';
 import { hostIdentity } from '../../src/server/device-identity.js';
 import { buildRelay } from '../../src/server/relay.js';
@@ -24,7 +25,9 @@ import { historyFixture, THREAD } from '../../test/helpers.js';
 import { FrameReader, encodeFrame } from '../../packages/adapter-codex/src/framing.js';
 
 const executable = resolve(process.argv[2] ?? 'desktop/native/target/release/agent-space-native');
-const directory = await mkdtemp(join(tmpdir(), 'native-adapter-smoke-'));
+const directory = await mkdtemp(
+  join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'native-adapter-smoke-'),
+);
 const state = join(directory, 'state');
 const codexHome = join(directory, 'codex');
 await mkdir(state, { mode: 0o700 });
@@ -67,9 +70,66 @@ const assistantRecord = {
     ],
   },
 };
+const viewed = await Promise.all(
+  [32, 192].map(async (width, index) => ({
+    path: pathToFileURL(join(directory, `removed-page-${5 + index}.png`)).href,
+    bytes: await readFile(`src/web/public/app-icon-${width}.png`),
+    width,
+  })),
+);
+const unpaired = pathToFileURL(join(directory, 'unpaired.png')).href;
+const activityEvent = (item: Record<string, unknown>) => ({
+  type: 'event_msg',
+  payload: { type: 'item_completed', thread_id: THREAD, turn_id: 'earlier-turn', item },
+});
+const imageCall = (id: string, paths: string[], outputs: Buffer[]) => [
+  { type: 'response_item', payload: { type: 'custom_tool_call', call_id: id } },
+  ...paths.map((path) => activityEvent({ type: 'ImageView', path })),
+  {
+    type: 'response_item',
+    payload: {
+      type: 'custom_tool_call_output',
+      call_id: id,
+      output: [
+        { type: 'input_text', text: 'test fixture' },
+        ...outputs.map((bytes) => ({
+          type: 'input_image',
+          image_url: 'data:image/png;base64,' + bytes.toString('base64'),
+        })),
+      ],
+    },
+  },
+];
+const historicalTool = activityEvent({
+  type: 'CommandExecution',
+  command: ['printf', 'historical tool'],
+  status: 'completed',
+  aggregated_output: 'historical output',
+  exit_code: 0,
+});
 await writeFile(
   rollout + '.zst',
-  zstdCompressSync(Buffer.from(JSON.stringify(legacyRecord) + '\n' + JSON.stringify(assistantRecord) + '\n')),
+  zstdCompressSync(
+    Buffer.from(
+      [
+        legacyRecord,
+        historicalTool,
+        ...imageCall(
+          'viewed',
+          viewed.map((item) => item.path),
+          viewed.map((item) => item.bytes),
+        ),
+        ...imageCall(
+          'unpaired',
+          [unpaired],
+          viewed.map((item) => item.bytes),
+        ),
+        assistantRecord,
+      ]
+        .map((record) => JSON.stringify(record))
+        .join('\n') + '\n',
+    ),
+  ),
 );
 const historyDb = new DatabaseSync(join(codexHome, 'state_5.sqlite'));
 historyDb.exec("INSERT INTO projects VALUES ('native-project','材料研究',0),('empty-project','空项目',1)");
@@ -304,7 +364,20 @@ async function desktopFixture() {
       {
         turnId: 'earlier-turn',
         status: 'completed',
-        items: [{ id: 'earlier-message', type: 'agentMessage', text: 'earlier response '.repeat(1000) }],
+        items: [
+          { id: 'earlier-message', type: 'agentMessage', text: 'earlier response '.repeat(1000) },
+          {
+            id: 'live-command',
+            type: 'commandExecution',
+            command: 'printf live',
+            status: 'completed',
+            aggregatedOutput: 'live output',
+            exitCode: 0,
+            accessToken: 'fixture-secret',
+          },
+          { id: 'live-image', type: 'imageView', path: viewed[0].path },
+          { id: 'second-live-image', type: 'imageView', path: viewed[1].path },
+        ],
       },
     ];
     const send = (value: unknown) => socket.write(encodeFrame(value));
@@ -614,6 +687,18 @@ async function testLive(
     );
     assert.equal(full.message.truncated, false);
     assert.equal(full.message.text, 'earlier response '.repeat(1000));
+    const activity = update.changed.find((message: any) => message.id === 'live-command');
+    assert.equal(activity.text, '命令 · printf live · completed');
+    assert.equal(activity.deferred, true);
+    assert(!JSON.stringify(activity).includes('live output'));
+    assert.equal(update.changed.find((message: any) => message.id === 'live-image').role, 'tool');
+    const details = await session.rpc<{ message: Record<string, unknown> }>(
+      apiCall(`/threads/${THREAD}/content?messageId=live-command`),
+    );
+    assert.equal(details.message.output, 'live output');
+    assert.equal(details.message.details, 'printf live\n退出码：0');
+    assert.equal(details.message.deferred, false);
+    assert(!JSON.stringify(details).includes('fixture-secret'));
     assert.equal(view.projectName, '材料研究');
     const usage = await session.rpc<{ available: boolean; buckets: unknown[] }>(apiCall('/usage'));
     assert.equal(usage.available, true);
@@ -1034,6 +1119,19 @@ async function browserDirect(
     await page.getByRole('button', { name: /测试会话/ }).click();
     await page.getByRole('button', { name: '继续此会话', exact: true }).click();
     await expect(page.getByLabel('消息', { exact: true })).toBeEnabled({ timeout: 15000 });
+    const activities = page.locator('.activity-group').filter({ hasText: '查看 3 项工具活动' });
+    await activities.locator('summary').first().click();
+    await expect(activities.getByText('命令 · printf live · completed', { exact: true })).toBeVisible();
+    await activities.getByRole('button', { name: '展开活动详情', exact: true }).click();
+    await activities.getByText('命令输出', { exact: true }).click();
+    await expect(activities.getByText('live output', { exact: true })).toBeVisible();
+    for (const [index, { width }] of viewed.entries()) {
+      const card = activities.locator('[data-media-type=image]').nth(index);
+      await card.scrollIntoViewIfNeeded();
+      await expect
+        .poll(() => card.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
+        .toBe(width);
+    }
     await page.getByRole('button', { name: '模型设置', exact: true }).click();
     await expect(page.getByText('Fixture Model', { exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
@@ -1176,19 +1274,34 @@ try {
     );
     assert.equal(searched.threads[0]?.projectName, '材料研究');
     const history = await session.rpc<{
-      messages: { id: string; text: string; truncated: boolean; attachments: { path: string }[] }[];
+      messages: {
+        id: string;
+        text: string;
+        deferred?: boolean;
+        truncated: boolean;
+        attachments: { path: string }[];
+      }[];
     }>(apiCall(`/threads/${THREAD}/history`));
-    assert.deepEqual(
-      history.messages.map(({ text }) => text),
-      ['历史消息', Buffer.from(historicalReply).subarray(0, 12_000).toString()],
-    );
+    assert.deepEqual(history.messages.map(({ text }) => text).filter(Boolean), [
+      '历史消息',
+      '命令 · printf historical tool · completed',
+      Buffer.from(historicalReply).subarray(0, 12_000).toString(),
+    ]);
     assert.equal(history.messages[0].attachments[0].path, legacyPath);
-    assert.equal(history.messages[1].truncated, true);
+    const historicalActivity = history.messages[1];
+    assert.equal(historicalActivity.deferred, true);
+    const historicalDetails = await session.rpc<{ message: Record<string, unknown> }>(
+      apiCall(`/threads/${THREAD}/content?messageId=${historicalActivity.id}`),
+    );
+    assert.equal(historicalDetails.message.output, 'historical output');
+    assert.equal(historicalDetails.message.deferred, false);
+    const earlierReply = history.messages.at(-1)!;
+    assert.equal(earlierReply.truncated, true);
     const historic = await session.rpc<{ message: { text: string } }>(
-      apiCall(`/threads/${THREAD}/content?messageId=${history.messages[1].id}`),
+      apiCall(`/threads/${THREAD}/content?messageId=${earlierReply.id}`),
     );
     assert.equal(historic.message.text, historicalReply);
-    assert.equal(history.messages[1].attachments[0].path, inlineRef);
+    assert.equal(earlierReply.attachments[0].path, inlineRef);
     await writeFile(
       join(legacyState, 'uploads', legacyId + '.json'),
       JSON.stringify({
@@ -1207,10 +1320,12 @@ try {
       platformRuntime().privateFile(join(legacyState, 'uploads', legacyId + '.json'));
     const describe = (path: string) =>
       session.rpc<FileManifest>(apiCall(`/threads/${THREAD}/media`, 'POST', { path }));
+    await assert.rejects(describe(unpaired), /没有可恢复的数据/);
     for (const [path, expected] of [
       [legacyPath, legacyBytes],
       [inlineRef, inlineBytes],
       [projectFile, Buffer.from('project attachment')],
+      ...viewed.map(({ path, bytes }) => [path, bytes] as const),
     ] as const) {
       const manifest = await describe(path);
       const data = await session.request('file', {

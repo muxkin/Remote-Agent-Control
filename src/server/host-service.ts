@@ -66,6 +66,9 @@ export class HostService {
   get idleForUpdate() {
     return this.sessions.size === 0 && [...this.cores.values()].every((core) => !core.operations.dispatching);
   }
+  refreshPairingRoutes() {
+    this.relay?.announce();
+  }
   readonly core;
   readonly journal = new SyncJournal();
   readonly registry: BackendRegistry;

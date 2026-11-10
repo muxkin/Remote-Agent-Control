@@ -3,7 +3,7 @@ use crate::{
     codex::History,
     codex_peer::{Endpoint, Stream},
     files::{Attachment, message_attachment_text},
-    history_media, queue, requests, settings,
+    history_media, queue, requests, settings, tool_activity,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -388,6 +388,7 @@ pub struct View {
     pub thread: Value,
     pub messages: Vec<Value>,
     pub expanded: HashMap<String, String>,
+    pub activities: HashMap<String, Value>,
     pub pending: Vec<Value>,
     pub inline: Arc<HashMap<String, String>>,
     pub turns: Vec<Turn>,
@@ -968,13 +969,15 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
                     &mut inline,
                     &mut inline_budget,
                 );
-                messages.push(json!({"id": format!("{turn_id}:input"), "role":"user", "text":requests::display_reply(text),
-                    "attachments":attachments,"turnId":turn_id,"clientMessageId":request}));
+                messages.push((json!({"id": format!("{turn_id}:input"), "role":"user", "text":requests::display_reply(text),
+                    "attachments":attachments,"turnId":turn_id,"clientMessageId":request}), None));
             }
         }
         for (index, item) in items.into_iter().enumerate() {
             let kind = item["type"].as_str().unwrap_or_default();
             let media = history_media::media(item);
+            let summary = tool_activity::summary(item);
+            let is_activity = summary.is_some();
             let (role, text) = match kind {
                 "userMessage" | "steeringUserMessage" => (
                     "user",
@@ -988,15 +991,8 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
                     "assistant",
                     native_text(item.get("text").unwrap_or(&item["content"])),
                 ),
-                "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall"
-                | "webSearch" => (
-                    "tool",
-                    format!(
-                        "{} · {}",
-                        item["tool"].as_str().unwrap_or(kind),
-                        item["status"].as_str().unwrap_or("已记录")
-                    ),
-                ),
+                _ if is_activity => ("tool", summary.unwrap()),
+                "imageView" if !media.is_empty() => ("tool", String::new()),
                 _ if !media.is_empty() => ("assistant", String::new()),
                 _ => continue,
             };
@@ -1021,21 +1017,29 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{turn_id}:{index}"));
-            messages.push(json!({
+            messages.push((json!({
                 "id": item_id, "role": role, "text": text, "turnId": turn_id, "attachments": attachments,
                 "phase": item["phase"], "clientMessageId": item["clientUserMessageId"].as_str()
                     .or_else(|| item["clientId"].as_str()).or_else(|| (kind == "userMessage").then_some(request).flatten()),
-            }));
+            }), is_activity.then_some(item)));
         }
     }
     let mut seen = HashSet::new();
     let mut expanded = HashMap::new();
+    let mut activities = HashMap::new();
     let messages = messages
         .into_iter()
         .rev()
-        .filter(|value| seen.insert(value["id"].as_str().unwrap_or_default().to_owned()))
+        .filter(|(value, _)| seen.insert(value["id"].as_str().unwrap_or_default().to_owned()))
         .take(96)
-        .map(|mut message| {
+        .map(|(mut message, item)| {
+            if let Some(details) = item.and_then(tool_activity::details) {
+                activities.insert(
+                    message["id"].as_str().unwrap_or_default().to_owned(),
+                    details,
+                );
+                message["deferred"] = json!(true);
+            }
             let text = message["text"].as_str().unwrap_or_default();
             if text.len() > 12_000 {
                 let excerpt = text[..text.floor_char_boundary(12_000)].to_owned();
@@ -1075,6 +1079,7 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
         }),
         messages,
         expanded,
+        activities,
         pending,
         inline: Arc::new(inline),
         turns,

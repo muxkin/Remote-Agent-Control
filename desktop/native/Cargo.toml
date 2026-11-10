@@ -56,6 +56,9 @@ rustix = { version = "1", features = ["fs", "net", "process"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 embed-resource = "3.0.12"
 

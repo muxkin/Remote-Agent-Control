@@ -58,8 +58,7 @@ impl Store {
             !directory.join("adapters/supervisor.json").exists(),
             "此目录属于现有适配器。原型需要独立状态目录"
         );
-        let lock = private_file(&directory.join("native.lock"), true)?;
-        lock.try_lock().context("已有原生适配器使用此状态目录")?;
+        let lock = lock_directory(directory)?;
         let identity_path = directory.join("device-identity-v2.json");
         let identity = if identity_path.exists() {
             use std::io::Read;
@@ -241,6 +240,27 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+pub(crate) fn lock_directory(directory: &Path) -> Result<File> {
+    private_directory(directory)?;
+    let lock = private_file(&directory.join("native.lock"), true)?;
+    lock.try_lock().context("已有原生适配器使用此状态目录")?;
+    for name in [
+        "device-identity-v2.json",
+        "state.sqlite",
+        "state.sqlite-wal",
+        "state.sqlite-shm",
+        "state.sqlite-journal",
+    ] {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => drop(private_file(&path, false)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(lock)
 }
 
 pub fn now() -> i64 {

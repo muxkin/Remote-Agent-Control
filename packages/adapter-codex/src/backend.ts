@@ -149,13 +149,9 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
     try {
       return await authorizeFile(reference, thread.cwd, this.desktop.view(id)?.messages ?? []);
     } catch (liveError) {
-      try {
-        return await this.index.attachment(id, reference);
-      } catch (historyError) {
-        // History can omit a viewed image that was already authorized in the live transcript.
-        if ((liveError as NodeJS.ErrnoException).code === 'ENOENT') throw liveError;
-        throw historyError;
-      }
+      return await this.index.attachment(
+        id, reference, (liveError as NodeJS.ErrnoException).code === 'ENOENT' ? liveError : undefined,
+      );
     }
   }
   fullMessage(id: string, messageId: string) {

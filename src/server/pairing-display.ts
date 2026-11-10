@@ -11,18 +11,29 @@ const escapeHtml = (value: string) =>
     (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!,
   );
 
+const qrOptions = { errorCorrectionLevel: 'M' as const, margin: 4, width: 512 };
+
+export async function desktopPairingLink(config: Pick<Config, 'origin' | 'stateDir'>, code: string) {
+  const url = new URL(config.origin);
+  const identity = await hostIdentity(config.stateDir);
+  url.hash = new URLSearchParams({ pair: code, host: identity.peerId }).toString();
+  return url.href;
+}
+
+// The desktop supervisor needs only the image. Keep its short-lived ticket out of disk artifacts.
+export async function desktopPairingImage(config: Pick<Config, 'origin' | 'stateDir'>, code: string) {
+  const png = await QRCode.toBuffer(await desktopPairingLink(config, code), qrOptions);
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
+
 /** Private local artifacts only. No unauthenticated endpoint may mint or serve pairing QR codes. */
 export async function createPairingDisplay(
   config: Pick<Config, 'origin' | 'stateDir'>,
   pairing: { code: string; expiresAt: number },
 ) {
-  const url = new URL(config.origin);
-  const identity = await hostIdentity(config.stateDir);
-  url.hash = new URLSearchParams({ pair: pairing.code, host: identity.peerId }).toString();
-  const link = url.href;
-  const options = { errorCorrectionLevel: 'M' as const, margin: 4, width: 512 };
+  const link = await desktopPairingLink(config, pairing.code);
   const [png, terminal] = await Promise.all([
-    QRCode.toBuffer(link, options),
+    QRCode.toBuffer(link, qrOptions),
     QRCode.toString(link, { type: 'terminal', small: true, errorCorrectionLevel: 'M' }),
   ]);
   const directory = join(config.stateDir, 'pairing');

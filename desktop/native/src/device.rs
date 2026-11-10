@@ -236,6 +236,9 @@ impl DeviceSession {
                         Err(error) if error.is::<Conflict>() => {
                             json!({"type":"response","id":id,"status":409,"error":"请求 ID 已用于其他操作"})
                         }
+                        Err(error) if error.is::<history_media::MissingAttachment>() => {
+                            json!({"type":"response","id":id,"status":404,"error":error.to_string()})
+                        }
                         Err(_) => json!({"type":"response","id":id,"status":400,"error":"请求未完成，请核对本机会话和参数"}),
                     };
                     reply_packet(io, value, &reply_bytes).await?;
@@ -527,6 +530,9 @@ impl DeviceSession {
                     if let Some(text) = view.expanded.get(message_id) {
                         message["text"] = json!(text);
                         message["truncated"] = json!(false);
+                    }
+                    if let Some(details) = view.activities.get(message_id) {
+                        crate::tool_activity::apply_details(&mut message, details);
                     }
                     return Ok(Some(json!({"message":message})));
                 }

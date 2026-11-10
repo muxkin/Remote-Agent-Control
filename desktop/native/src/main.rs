@@ -10,6 +10,7 @@ mod direct;
 mod files;
 mod gateway;
 mod history_media;
+mod managed;
 mod operations;
 mod queue;
 mod reply_fork;
@@ -17,6 +18,7 @@ mod requests;
 mod settings;
 mod state;
 mod storage;
+mod tool_activity;
 mod tools_catalog;
 mod usage;
 
@@ -52,6 +54,19 @@ fn start() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("无法初始化 TLS 加密提供程序"))?;
     let arguments: Vec<String> = env::args().skip(1).collect();
+    let executable = env::current_exe()?;
+    let payload = managed::payload(&executable);
+    let directory = env::var_os("POCKET_NATIVE_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")))
+        .context("无法定位状态目录")?;
+    let directory = std::path::absolute(directory)?;
+    if arguments.first().is_some_and(|value| value == "--adapter") {
+        let root = payload.context("此构建没有附带插件网关")?;
+        let origin =
+            state::saved_origin(&directory)?.unwrap_or_else(|| "http://127.0.0.1:4317".into());
+        return managed::adapter_cli(&root, &directory, &origin, &arguments[1..]);
+    }
     let headless = arguments.iter().any(|value| value == "--headless");
     let configure = arguments.iter().any(|value| value == "--configure");
     let background = arguments.iter().any(|value| value == "--background");
@@ -65,11 +80,6 @@ fn start() -> Result<()> {
             && (!background || (!headless && !configure)),
         "用法: agent-space-native [--configure | --background | --headless [--print-pair]]"
     );
-    let directory = env::var_os("POCKET_NATIVE_STATE_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")))
-        .context("无法定位状态目录")?;
-    let directory = std::path::absolute(directory)?;
     let configured_origin = if configure {
         None
     } else {
@@ -81,10 +91,40 @@ fn start() -> Result<()> {
     let runtime = Runtime::new()?;
     let (state, updates) = watch::channel(Snapshot::default());
     let (pair, commands) = mpsc::channel(1);
+    let (install, installs) = mpsc::channel(1);
+    let (stop, stopping) = watch::channel(false);
+    let managed_task = Arc::new(Mutex::new(None));
+    let task = managed_task.clone();
+    let mut installs = Some(installs);
     let mut commands = Some(commands);
     let handle = runtime.handle().clone();
     let mut connect = move |origin: &str, enrollment: String| -> Result<String> {
         let mut config = RelayConfig::new(origin, enrollment)?;
+        if let Some(root) = &payload {
+            let origin = config.origin.origin().ascii_serialization();
+            let gateway = managed::Gateway {
+                root: root.clone(),
+                directory: directory.clone(),
+                executable: executable.clone(),
+                origin: origin.clone(),
+                enrollment: config.enrollment,
+                lock: state::lock_directory(&directory)?,
+            };
+            let commands = commands.take().context("连接已初始化")?;
+            let installs = installs.take().context("连接已初始化")?;
+            let stopping = stopping.clone();
+            let state = state.clone();
+            *task.lock().unwrap() = Some(handle.spawn(async move {
+                if let Err(error) = gateway
+                    .run(commands, installs, stopping, state.clone())
+                    .await
+                {
+                    eprintln!("{error:#}");
+                    state.send_modify(|current| current.phase = Phase::Unavailable);
+                }
+            }));
+            return Ok(origin);
+        }
         let explicit = env::var_os("POCKET_NATIVE_CODEX_HOME");
         let home = explicit
             .as_ref()
@@ -124,15 +164,34 @@ fn start() -> Result<()> {
         None
     };
 
-    if headless {
+    let result = if headless {
         ensure!(configured.is_some(), "请先设置 POCKET_NATIVE_ORIGIN");
-        return runtime.block_on(run_headless(updates, pair, print_pair));
+        runtime.block_on(run_headless(updates, pair, print_pair))
+    } else {
+        #[cfg(feature = "ely")]
+        {
+            ui::run(
+                updates,
+                pair,
+                install,
+                configured,
+                Box::new(connect),
+                background,
+            )
+        }
+        #[cfg(not(feature = "ely"))]
+        {
+            let _ = install;
+            Err(anyhow::anyhow!(
+                "此二进制没有编译 Ely 界面，请使用 --headless"
+            ))
+        }
+    };
+    let _ = stop.send(true);
+    if let Some(task) = managed_task.lock().unwrap().take() {
+        let _ = runtime.block_on(task);
     }
-
-    #[cfg(feature = "ely")]
-    return ui::run(updates, pair, configured, Box::new(connect), background);
-    #[cfg(not(feature = "ely"))]
-    bail!("此二进制没有编译 Ely 界面，请使用 --headless");
+    result
 }
 
 async fn run_headless(
@@ -145,6 +204,9 @@ async fn run_headless(
     let mut last_phase = Phase::Setup;
     loop {
         let state = updates.borrow_and_update().clone();
+        if state.exit_for_update {
+            return Ok(());
+        }
         if last_phase != state.phase {
             if state.phase == Phase::Online {
                 println!("中继已连接");

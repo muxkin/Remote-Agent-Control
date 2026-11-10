@@ -1,7 +1,7 @@
 import { build } from 'esbuild';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 rmSync('dist/server', { recursive: true, force: true });
-await build({
+const { metafile } = await build({
   entryPoints: [
     'src/server/main.ts',
     'src/server/relay-main.ts',
@@ -19,7 +19,9 @@ await build({
   target: 'node24',
   packages: 'external',
   sourcemap: true,
+  metafile: true,
 });
+writeFileSync('dist/server/build-meta.json', JSON.stringify(metafile));
 
 // The migration executable is offline tooling, never part of the relay request path.
 await build({

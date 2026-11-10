@@ -2,6 +2,8 @@
 
 网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口；产品协议和系统连接器分别位于 `packages/adapter-codex`、`packages/adapter-dsh`。默认附带两款官方插件。每个配置实例有独立 Node 宿主、配置、状态目录与订阅；宿主只连接已有 Agent。
 
+Ely 安装版使用同一网关与插件注册表。它默认读取原生状态目录下的 `instances.json`，通过 `agent-space-native --adapter` 调用同一管理命令。独立 Rust 便携模式的 Codex 实现与插件网关分开运行。 [原生安装与更新](DESKTOP_ADAPTER.md)
+
 ```mermaid
 flowchart LR
   UI[共享聊天界面] <--> G[加密网关与操作记录]
@@ -26,7 +28,7 @@ flowchart LR
     "id": "dsh-one",
     "name": "我的 DSH",
     "plugin": "@agent-remote/adapter-dsh",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "config": { "url": "http://127.0.0.1:3080", "version": "0.2.1-rc.5" },
     "secrets": { "token": "DSH_ONE_TOKEN" }
   },

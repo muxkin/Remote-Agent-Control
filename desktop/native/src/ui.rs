@@ -92,6 +92,7 @@ struct AdapterWindow {
     focus: gpui::FocusHandle,
     snapshot: Snapshot,
     pair: mpsc::Sender<()>,
+    install: mpsc::Sender<()>,
     connection: Rc<RefCell<Connection>>,
     fields: Option<ConnectionFields>,
     startup: bool,
@@ -102,6 +103,7 @@ impl AdapterWindow {
     fn new(
         updates: watch::Receiver<Snapshot>,
         pair: mpsc::Sender<()>,
+        install: mpsc::Sender<()>,
         connection: Rc<RefCell<Connection>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -150,6 +152,7 @@ impl AdapterWindow {
             focus: cx.focus_handle(),
             snapshot,
             pair,
+            install,
             connection,
             fields,
             startup: desktop_shell::startup()
@@ -195,11 +198,28 @@ impl AdapterWindow {
             .child(label)
     }
 
-    fn agent_status(&self) -> &'static str {
-        if self.snapshot.history {
-            "Codex 已配置"
+    fn agent_status(&self) -> String {
+        if !self.snapshot.agents.is_empty() {
+            self.snapshot
+                .agents
+                .iter()
+                .map(|agent| {
+                    format!(
+                        "{} {}",
+                        agent.name,
+                        if agent.connected {
+                            "已连接"
+                        } else {
+                            "待接入"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        } else if self.snapshot.history {
+            "Codex 已配置".into()
         } else {
-            "待接入"
+            "待接入".into()
         }
     }
 
@@ -374,6 +394,7 @@ impl AdapterWindow {
         let panel = card().child(section_title("连接配置"));
         let Some(fields) = &self.fields else {
             let view = cx.weak_entity();
+            let install = self.install.clone();
             return div()
                 .flex()
                 .flex_col()
@@ -420,6 +441,16 @@ impl AdapterWindow {
                         ))
                         .when(self.startup_error, |card| {
                             card.child(note("无法修改自启动，请检查系统设置。"))
+                        })
+                        .when(!self.snapshot.update.is_empty(), |card| {
+                            card.child(row("自动更新", note(self.snapshot.update.clone())))
+                        })
+                        .when(self.snapshot.manual_update, |card| {
+                            card.child(Button::new("install-update", "安装已下载更新").on_click(
+                                move |_, _, _| {
+                                    let _ = install.try_send(());
+                                },
+                            ))
                         })
                         .child(div().flex().child(
                             Button::new("quit", "退出适配器").on_click(|_, _, cx| cx.quit()),
@@ -652,6 +683,7 @@ fn open_window(
     window: &mut Option<WindowHandle<AdapterWindow>>,
     updates: &watch::Receiver<Snapshot>,
     pair: &mpsc::Sender<()>,
+    install: &mpsc::Sender<()>,
     connection: &Rc<RefCell<Connection>>,
     cx: &mut App,
 ) -> Result<()> {
@@ -682,6 +714,7 @@ fn open_window(
             AdapterWindow::new(
                 updates.clone(),
                 pair.clone(),
+                install.clone(),
                 connection.clone(),
                 window,
                 cx,
@@ -695,6 +728,7 @@ fn open_window(
 pub fn run(
     updates: watch::Receiver<Snapshot>,
     pair: mpsc::Sender<()>,
+    install: mpsc::Sender<()>,
     origin: Option<String>,
     connect: Connect,
     background: bool,
@@ -705,6 +739,19 @@ pub fn run(
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             let result = (|| -> Result<()> {
+                let mut shutdown = updates.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        if shutdown.borrow_and_update().exit_for_update {
+                            cx.update(|cx| cx.quit());
+                            break;
+                        }
+                        if shutdown.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
                 cx.set_app_identity(desktop_shell::APP_ID, desktop_shell::APP_NAME);
                 #[cfg(target_os = "linux")]
                 if let Err(error) = desktop_shell::register_launcher() {
@@ -725,11 +772,17 @@ pub fn run(
                     let window = window.clone();
                     let updates = updates.clone();
                     let pair = pair.clone();
+                    let install = install.clone();
                     let connection = connection.clone();
                     move |cx: &mut App| {
-                        if let Err(error) =
-                            open_window(&mut window.borrow_mut(), &updates, &pair, &connection, cx)
-                        {
+                        if let Err(error) = open_window(
+                            &mut window.borrow_mut(),
+                            &updates,
+                            &pair,
+                            &install,
+                            &connection,
+                            cx,
+                        ) {
                             eprintln!("无法从托盘打开适配器：{error}");
                         }
                     }
@@ -742,11 +795,19 @@ pub fn run(
                     }
                     Err(error) => {
                         eprintln!("无法创建系统托盘图标：{error}");
+                        cx.set_quit_mode(QuitMode::LastWindowClosed);
                         false
                     }
                 };
                 if !background || !configured || !has_tray {
-                    open_window(&mut window.borrow_mut(), &updates, &pair, &connection, cx)?;
+                    open_window(
+                        &mut window.borrow_mut(),
+                        &updates,
+                        &pair,
+                        &install,
+                        &connection,
+                        cx,
+                    )?;
                 }
                 Ok(())
             })();
