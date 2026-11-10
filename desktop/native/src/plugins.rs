@@ -2,8 +2,14 @@ use crate::{dsh::Dsh, files::VerifiedUpload, history_media::Source, state::priva
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::{collections::HashMap, env, io::Read, path::Path, sync::Arc};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    env,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -15,6 +21,7 @@ pub(crate) trait Adapter: Send + Sync {
     async fn status(&self) -> Value;
     async fn read(&self, method: &str, params: &Value, query: &Value) -> Result<Option<Value>>;
     async fn media(&self, thread: &str, reference: &str) -> Result<Media>;
+    async fn export_log(&self, thread: &str) -> Result<Source>;
     fn subscribe(self: Arc<Self>, thread: &str) -> Result<Arc<Subscription>>;
     async fn write(
         &self,
@@ -64,6 +71,8 @@ pub(crate) enum Write {
         text: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         files: Vec<VerifiedUpload>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
     },
     Steer {
         expected: String,
@@ -95,6 +104,7 @@ pub(crate) enum Write {
     Settings(ModelSettings),
     Control(Control),
     Respond(crate::requests::Response),
+    Open,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -160,6 +170,34 @@ pub(crate) enum Control {
     Plan {
         enabled: bool,
     },
+    Compact,
+    Feedback {
+        text: String,
+    },
+    Goal {
+        operation: GoalOperation,
+        #[serde(rename = "ref")]
+        reference: Option<GoalRef>,
+        objective: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum GoalOperation {
+    Create,
+    Edit,
+    Pause,
+    Resume,
+    Complete,
+    Clear,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GoalRef {
+    pub id: String,
+    pub revision: u64,
 }
 
 impl Write {
@@ -182,6 +220,7 @@ impl Write {
             Self::Settings(_) => "settings",
             Self::Control(_) => "control",
             Self::Respond(_) => "respond",
+            Self::Open => "open",
         }
     }
 }
@@ -189,6 +228,7 @@ impl Write {
 pub(crate) enum Delivery {
     Accepted(Option<String>),
     Completed(Option<String>),
+    Command { id: String, succeeded: bool },
     Rejected(&'static str),
     Uncertain,
 }
@@ -207,31 +247,91 @@ struct Instance {
     secrets: HashMap<String, String>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConfigRow {
+    Package(Instance),
+    Legacy {
+        #[serde(rename = "type")]
+        kind: String,
+        id: String,
+        name: String,
+        url: String,
+        #[serde(rename = "tokenEnv")]
+        token_env: String,
+        version: String,
+    },
+}
+
+impl ConfigRow {
+    fn into_instance(self) -> Option<Instance> {
+        match self {
+            Self::Package(instance) => Some(instance),
+            Self::Legacy {
+                kind,
+                id,
+                name,
+                url,
+                token_env,
+                version,
+            } if kind == "dsh" => Some(Instance {
+                id,
+                name,
+                plugin: "@agent-remote/adapter-dsh".to_owned(),
+                config: json!({"url":url,"version":version}),
+                secrets: HashMap::from([("token".to_owned(), token_env)]),
+            }),
+            Self::Legacy { .. } => None,
+        }
+    }
+}
+
 impl Registry {
     pub(crate) fn load(directory: &Path) -> Result<Self> {
-        let configured = env::var_os("POCKET_ADAPTERS_FILE");
-        let file = configured
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| directory.join("instances.json"));
-        if configured.is_none() && !file.exists() {
-            return Ok(Self::default());
+        let legacy = env::var_os("POCKET_NATIVE_LEGACY_STATE")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && path != directory);
+        let mut secrets = HashMap::new();
+        for root in legacy
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(std::iter::once(directory))
+        {
+            let path = root.join("gateway.env");
+            if path.exists() {
+                for entry in dotenvy::Iter::new(private_file(&path, false)?) {
+                    let (name, value) = entry.map_err(|_| anyhow::anyhow!("插件凭据配置无效"))?;
+                    secrets.insert(name, value);
+                }
+            }
         }
+        let path = |key: &str| {
+            env::var_os(key)
+                .map(PathBuf::from)
+                .or_else(|| secrets.get(key).map(PathBuf::from))
+                .filter(|path| !path.as_os_str().is_empty())
+        };
+        let local = directory.join("instances.json");
+        let file = path("POCKET_ADAPTERS_FILE")
+            .or_else(|| path("POCKET_BACKENDS_FILE"))
+            .or_else(|| local.exists().then_some(local))
+            .or_else(|| {
+                legacy
+                    .as_ref()
+                    .map(|root| root.join("instances.json"))
+                    .filter(|file| file.exists())
+            })
+            .or_else(|| path("POCKET_NATIVE_DEFAULT_INSTANCES"));
+        let Some(file) = file else {
+            return Ok(Self::default());
+        };
         let mut bytes = Vec::new();
         private_file(&file, false)?
             .take(128 * 1024 + 1)
             .read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 128 * 1024, "插件实例配置过大");
-        let rows: Vec<Instance> = serde_json::from_slice(&bytes).context("插件实例配置无效")?;
-        ensure!(rows.len() <= 16, "插件实例配置过多");
-        let private_env = directory.join("gateway.env");
-        let mut secrets = HashMap::new();
-        if private_env.exists() {
-            for entry in dotenvy::Iter::new(private_file(&private_env, false)?) {
-                let (name, value) = entry.map_err(|_| anyhow::anyhow!("插件凭据配置无效"))?;
-                secrets.insert(name, value);
-            }
-        }
+        let rows: Vec<ConfigRow> = serde_json::from_slice(&bytes).context("插件实例配置无效")?;
+        ensure!(rows.len() <= 33, "插件实例配置过多");
         let read_only = ["POCKET_NATIVE_READ_ONLY", "POCKET_READ_ONLY"]
             .iter()
             .any(|key| {
@@ -239,7 +339,7 @@ impl Registry {
                     || secrets.get(*key).is_some_and(|value| value == "1")
             });
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
-        for row in rows {
+        for row in rows.into_iter().filter_map(ConfigRow::into_instance) {
             if row.plugin != "@agent-remote/adapter-dsh" {
                 continue;
             }
@@ -253,17 +353,21 @@ impl Registry {
                     && (1..=160).contains(&row.name.len()),
                 "DSH 实例标识无效"
             );
-            let variable = row.secrets.get("token").context("DSH 缺少凭据变量")?;
-            ensure!(
-                variable
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
-                "DSH 凭据变量无效"
-            );
-            let token = env::var(variable)
-                .ok()
-                .or_else(|| secrets.get(variable).cloned())
-                .unwrap_or_default();
+            let token = if let Some(variable) = row.secrets.get("token") {
+                ensure!(
+                    !variable.is_empty()
+                        && variable
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+                    "DSH 凭据变量无效"
+                );
+                env::var(variable)
+                    .ok()
+                    .or_else(|| secrets.get(variable).cloned())
+                    .unwrap_or_default()
+            } else {
+                row.config["token"].as_str().unwrap_or_default().to_owned()
+            };
             let dsh = Dsh::new(
                 row.id,
                 row.name,

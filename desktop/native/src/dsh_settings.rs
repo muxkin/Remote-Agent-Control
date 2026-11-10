@@ -1,6 +1,6 @@
 use crate::{
     dsh::{Dsh, Refused, Session},
-    plugins::{Control, CreationSettings, Delivery, ModelSettings},
+    plugins::{Control, CreationSettings, Delivery, GoalOperation, GoalRef, ModelSettings},
     state::hash,
 };
 use anyhow::{Context, Result, ensure};
@@ -264,7 +264,7 @@ impl Dsh {
             catalog.options.retain(|option| permission_id(&option.id));
         }
         let has_presets = !presets.is_empty();
-        let (state, mut actions) = if thread == "new" {
+        let (state, mut actions, goal) = if thread == "new" {
             let mut actions = Vec::new();
             if permissions.is_some() {
                 actions.push("permission");
@@ -279,6 +279,7 @@ impl Dsh {
                     "plan":false,
                 }),
                 actions,
+                Value::Null,
             )
         } else {
             let (projections, commands) =
@@ -295,16 +296,26 @@ impl Dsh {
             if has_presets && projections.get("agentPreset").is_some() {
                 actions.push("preset");
             }
-            if commands.iter().any(|c| c.name == "plan") {
-                actions.push("plan");
+            for action in ["plan", "compact", "feedback"] {
+                if commands.iter().any(|c| c.name == action) {
+                    actions.push(action);
+                }
             }
-            (state(&projections), actions)
+            let mut goal = Value::Null;
+            if commands.iter().any(|c| c.name == "goal")
+                && let Ok(value) = self.call("goals/get", json!({"agentId":thread})).await
+                && let Some(value) = goal_catalog(value)
+            {
+                actions.push("goal");
+                goal = value;
+            }
+            (state(&projections), actions, goal)
         };
         if read_only {
             actions.clear();
         }
         Ok(json!({
-            "product":"dsh", "state":state, "actions":actions,
+            "product":"dsh", "state":state, "actions":actions, "goal":goal,
             "permissions":permissions.map(|p| p.options).unwrap_or_default(),
             "presets":presets.iter().map(|p| json!({
                 "id":p.id, "name":p.name.as_ref().unwrap_or(&p.id), "description":p.description
@@ -380,7 +391,12 @@ impl Dsh {
         Ok(None)
     }
 
-    async fn execute_command(&self, session: &Session, thread: &str, line: &str) -> Result<()> {
+    async fn native_command(
+        &self,
+        session: &Session,
+        thread: &str,
+        line: &str,
+    ) -> Result<(String, bool)> {
         let result = self
             .exchange(
                 session,
@@ -390,12 +406,22 @@ impl Dsh {
                 }),
             )
             .await?;
-        ensure!(result["commandId"].as_str().is_some(), "DSH 原生命令未确认");
-        if result["result"]["kind"] == "error" {
-            return Err(Refused.into());
+        let id = result["commandId"]
+            .as_str()
+            .filter(|id| valid_identity(id))
+            .context("DSH 原生命令未确认")?;
+        let kind = result["result"]["kind"]
+            .as_str()
+            .context("DSH 原生命令未确认")?;
+        ensure!(matches!(kind, "success" | "error"), "DSH 原生命令未确认");
+        Ok((id.to_owned(), kind == "success"))
+    }
+
+    async fn execute_command(&self, session: &Session, thread: &str, line: &str) -> Result<()> {
+        match self.native_command(session, thread, line).await? {
+            (_, true) => Ok(()),
+            (_, false) => Err(Refused.into()),
         }
-        ensure!(result["result"]["kind"] == "success", "DSH 原生命令未确认");
-        Ok(())
     }
 
     pub(crate) async fn change_control(
@@ -477,6 +503,58 @@ impl Dsh {
                     .await;
                 ("plan", json!(enabled), result)
             }
+            Control::Compact => {
+                if !allows("compact") {
+                    return Delivery::Rejected("DSH 会话未提供压缩操作");
+                }
+                return match self.native_command(session, thread, "/compact").await {
+                    Ok((id, succeeded)) => Delivery::Command { id, succeeded },
+                    Err(error) => delivery(Err(error)),
+                };
+            }
+            Control::Feedback { text } => {
+                let text = text.trim();
+                if !allows("feedback") || !(1..=16_000).contains(&text.encode_utf16().count()) {
+                    return Delivery::Rejected("DSH 反馈不可用或内容无效");
+                }
+                return match self
+                    .exchange(
+                        session,
+                        "sessionFeedback/record",
+                        json!({"request":{"sessionId":thread,"text":text}}),
+                    )
+                    .await
+                {
+                    Ok(value) if value["ok"] == true => Delivery::Completed(None),
+                    Ok(value)
+                        if value["ok"] == false
+                            && value["error"]["code"] == "session-not-found" =>
+                    {
+                        Delivery::Rejected("DSH 会话不存在")
+                    }
+                    Ok(_) => Delivery::Uncertain,
+                    Err(error) => delivery(Err(error)),
+                };
+            }
+            Control::Goal {
+                operation,
+                reference,
+                objective,
+            } => {
+                if !allows("goal") {
+                    return Delivery::Rejected("DSH 会话未提供目标管理");
+                }
+                return self
+                    .change_goal(
+                        session,
+                        thread,
+                        operation,
+                        reference,
+                        objective,
+                        &catalog["goal"],
+                    )
+                    .await;
+            }
         };
         if let Err(error) = applied {
             return delivery(Err(error));
@@ -496,6 +574,110 @@ impl Dsh {
         } else {
             Delivery::Uncertain
         }
+    }
+
+    async fn change_goal(
+        &self,
+        session: &Session,
+        thread: &str,
+        operation: GoalOperation,
+        reference: Option<GoalRef>,
+        objective: Option<String>,
+        current: &Value,
+    ) -> Delivery {
+        let mut args = json!({"agentId":thread});
+        if matches!(operation, GoalOperation::Create) {
+            if reference.is_some() || (!current.is_null() && current["phase"] != "complete") {
+                return Delivery::Rejected("DSH 目标已存在，请刷新");
+            }
+        } else if let Some(reference) = &reference
+            && valid_identity(&reference.id)
+            && reference.revision > 0
+            && current["ref"]["id"] == reference.id
+            && current["ref"]["revision"] == reference.revision
+        {
+            args["ref"] = json!(reference);
+        } else {
+            return Delivery::Rejected("DSH 目标已变化，请刷新");
+        }
+        if matches!(operation, GoalOperation::Create | GoalOperation::Edit) {
+            let Some(objective) = objective
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| (1..=16_000).contains(&text.encode_utf16().count()))
+            else {
+                return Delivery::Rejected("DSH 目标内容无效");
+            };
+            args["request"] = json!({"objective":objective});
+        } else if objective.is_some() {
+            return Delivery::Rejected("DSH 目标参数无效");
+        }
+        let endpoint = match operation {
+            GoalOperation::Create => "goals/create",
+            GoalOperation::Edit => "goals/edit",
+            GoalOperation::Pause => "goals/pause",
+            GoalOperation::Resume => "goals/resume",
+            GoalOperation::Complete => "goals/complete",
+            GoalOperation::Clear => "goals/clear",
+        };
+        match self.exchange(session, endpoint, args).await {
+            Ok(value) => {
+                let confirmed = if let Some(reference) = reference {
+                    value["id"] == reference.id
+                        && reference
+                            .revision
+                            .checked_add(1)
+                            .is_some_and(|revision| value["revision"] == revision)
+                } else {
+                    goal_identity(&value["ref"]).is_some()
+                };
+                if confirmed {
+                    Delivery::Completed(None)
+                } else {
+                    Delivery::Uncertain
+                }
+            }
+            Err(error) => delivery(Err(error)),
+        }
+    }
+
+    pub(crate) async fn skills(&self, thread: &str) -> Result<Vec<Value>> {
+        let data = self
+            .call("skills/list", json!({"request":{"sessionId":thread}}))
+            .await?;
+        Ok(data["skills"].as_array().context("DSH 技能目录无效")?.iter().filter_map(|skill| {
+            let name = skill["name"].as_str().filter(|name| skill_name(name))?;
+            Some(json!({
+                "id":name,"name":name,"description":skill["description"].as_str().unwrap_or_default(),
+                "source":skill["path"].as_str().unwrap_or("DSH"),
+            }))
+        }).collect())
+    }
+
+    pub(crate) async fn skill_prompt(
+        &self,
+        thread: &str,
+        text: String,
+        skills: Vec<String>,
+    ) -> Result<String> {
+        if skills.is_empty() {
+            return Ok(text);
+        }
+        let available = self.skills(thread).await?;
+        ensure!(
+            skills
+                .iter()
+                .all(|name| available.iter().any(|skill| skill["id"] == *name)),
+            "DSH 技能已失效"
+        );
+        let mut prompt = skills
+            .into_iter()
+            .map(|name| format!("/{name}"))
+            .collect::<Vec<_>>();
+        if !text.is_empty() {
+            prompt.push(text);
+        }
+        Ok(prompt.join("\n"))
     }
 
     pub(crate) async fn initialize_controls(
@@ -542,6 +724,45 @@ impl Dsh {
         }
         true
     }
+}
+
+pub(crate) fn skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+fn valid_identity(id: &str) -> bool {
+    (1..=200).contains(&id.encode_utf16().count()) && !id.chars().any(char::is_control)
+}
+
+fn goal_identity(value: &Value) -> Option<(&str, u64)> {
+    Some((
+        value["id"].as_str().filter(|id| valid_identity(id))?,
+        value["revision"]
+            .as_u64()
+            .filter(|&revision| revision > 0)?,
+    ))
+}
+
+fn goal_catalog(value: Value) -> Option<Value> {
+    if value.is_null() {
+        return Some(value);
+    }
+    let (id, revision) = goal_identity(&value)?;
+    let objective = value["objective"].as_str()?;
+    let phase = value["phase"]
+        .as_str()
+        .filter(|phase| matches!(*phase, "active" | "paused" | "blocked" | "complete"))?;
+    Some(
+        json!({"ref":{"id":id,"revision":revision},"objective":objective,"phase":phase,
+        "activation":value["activation"].as_str()}),
+    )
 }
 
 fn permission_id(value: &str) -> bool {

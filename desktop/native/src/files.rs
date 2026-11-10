@@ -489,6 +489,7 @@ fn content_type(name: &str) -> &'static str {
         "avif" => "image/avif",
         "flac" => "audio/flac",
         "pdf" => "application/pdf",
+        "zip" => "application/zip",
         "txt" | "md" | "csv" => "text/plain",
         _ => "application/octet-stream",
     }

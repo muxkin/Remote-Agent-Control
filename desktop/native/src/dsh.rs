@@ -37,6 +37,8 @@ const READS: &[&str] = &[
     "commands/list",
     "session/attachment",
     "fileReferences/list",
+    "skills/list",
+    "goals/get",
 ];
 
 #[derive(Clone)]
@@ -855,16 +857,19 @@ impl Adapter for Dsh {
             "skills",
             "plugins",
         ] {
-            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"|"settings"|"attachments"|"respond"))) {"experimental"} else {"unavailable"}}));
+            capabilities.insert(name.into(), json!({"state":if connected && (name=="history" || (!self.read_only && matches!(name,"send"|"steer"|"interrupt"|"create"|"queue"|"settings"|"attachments"|"respond"|"skills"|"open"))) {"experimental"} else {"unavailable"}}));
         }
         json!({"id":self.id,"name":self.name,"product":"dsh","version":self.version,"connected":connected,
         "profile":"rust-native","capabilities":capabilities,"presentation":{
-            "description":"DSH Web","creation":{"empty":false,"permission":if self.read_only {"native"} else {"select"},"preset":!self.read_only,"plan":!self.read_only},
-            "plan":if self.read_only {"none"} else {"control"},"fileReferences":true,"exportLog":false,"nativeCommands":!self.read_only,
+            "description":"DSH Web","creation":{"empty":true,"permission":if self.read_only {"native"} else {"select"},"preset":!self.read_only,"plan":!self.read_only},
+            "plan":if self.read_only {"none"} else {"control"},"fileReferences":true,"exportLog":true,"nativeCommands":!self.read_only,
         }})
     }
     async fn media(&self, thread: &str, reference: &str) -> Result<Media> {
         self.attachment(thread, reference).await
+    }
+    async fn export_log(&self, thread: &str) -> Result<crate::history_media::Source> {
+        self.session_log(thread).await
     }
     async fn status(&self) -> Value {
         let connected = self.authenticate().await.is_ok();
@@ -877,11 +882,17 @@ impl Adapter for Dsh {
             None
         };
         json!({"connected":connected,"writesEnabled":writable,"supportedVersion":self.version == "0.2.1-rc.5",
-            "reason":reason,"capabilities":{"send":writable,"steer":writable,"interrupt":writable,"newThread":writable,"queue":writable,"modelSettings":writable,"approvals":writable,"questions":writable}})
+            "reason":reason,"capabilities":{"send":writable,"steer":writable,"interrupt":writable,"newThread":writable,"queue":writable,"modelSettings":writable,"approvals":writable,"questions":writable,"openThread":writable}})
     }
     async fn read(&self, method: &str, params: &Value, query: &Value) -> Result<Option<Value>> {
         match method {
             "threads.list" => return self.threads(query).await.map(Some),
+            "plugins.list" => return Ok(Some(json!({"plugins":[]}))),
+            "usage.read" => {
+                return Ok(Some(json!({
+                    "available":false,"updatedAt":crate::state::now(),"buckets":[],"reason":"此实例尚未提供用量信息"
+                })));
+            }
             "models.list" => return self.models().await.map(Some),
             "controls.read" => {
                 let id = params["id"]
@@ -913,7 +924,8 @@ impl Adapter for Dsh {
                     .collect();
                 return Ok(Some(json!({"projects":projects})));
             }
-            "thread.read" | "history.read" | "content.read" | "references.list" => {}
+            "thread.read" | "history.read" | "content.read" | "references.list" | "skills.list" => {
+            }
             _ => return Ok(None),
         }
         let id = params["id"]
@@ -925,6 +937,12 @@ impl Adapter for Dsh {
                 .file_references(id, query["q"].as_str().unwrap_or_default())
                 .await
                 .map(Some);
+        }
+        if method == "skills.list" {
+            return self
+                .skills(id)
+                .await
+                .map(|skills| Some(json!({"skills":skills})));
         }
         if method == "history.read"
             && let Some(cursor) = query["cursor"].as_str()
@@ -1001,10 +1019,33 @@ impl Adapter for Dsh {
             .and_then(|live| live.0.borrow().clone())
             .filter(|view| view.thread["synchronized"] == true);
         if matches!(&action, Write::Create { .. }) {
-            if thread != "new" && view.is_none() {
+            if thread != "new" && view.is_none() && self.snapshot(thread).await.is_err() {
                 return Delivery::Rejected("DSH 会话尚未同步");
             }
             return self.create(&session, request, action, created).await;
+        }
+        if matches!(&action, Write::Open) {
+            return if view.is_some() || self.snapshot(thread).await.is_ok() {
+                Delivery::Completed(None)
+            } else {
+                Delivery::Rejected("DSH 会话尚未同步")
+            };
+        }
+        if let Write::Rename { title } = action {
+            return match self
+                .exchange(
+                    &session,
+                    "session/rename",
+                    json!({"request":{"sessionId":thread,"title":title}}),
+                )
+                .await
+            {
+                Ok(value) if value["title"] == title && value["seq"].is_i64() => {
+                    Delivery::Completed(None)
+                }
+                Err(error) if error.is::<Refused>() => Delivery::Rejected("DSH 拒绝改名"),
+                _ => Delivery::Uncertain,
+            };
         }
         let (Some(view), Some(live)) = (view, live) else {
             return Delivery::Rejected("DSH 会话尚未同步");
@@ -1026,7 +1067,14 @@ impl Adapter for Dsh {
                 };
                 return hub.respond(self, thread, &view, response).await;
             }
-            Write::Send { text, files } if active.is_none() => {
+            Write::Send {
+                text,
+                files,
+                skills,
+            } if active.is_none() => {
+                let Ok(text) = self.skill_prompt(thread, text, skills).await else {
+                    return Delivery::Rejected("DSH 技能已失效，请重新选择");
+                };
                 let Ok(content) = self
                     .prompt_content(&session, thread, &text, files, &view.image_limits)
                     .await
@@ -1086,11 +1134,6 @@ impl Adapter for Dsh {
                     Delivery::Completed(None),
                 )
             }
-            Write::Rename { title } => (
-                "session/rename",
-                json!({"sessionId":thread,"title":title}),
-                Delivery::Completed(None),
-            ),
             Write::Queue { .. } | Write::RemoveQueued { .. } => {
                 return Delivery::Rejected("队列已变化，请刷新");
             }
@@ -1100,14 +1143,7 @@ impl Adapter for Dsh {
             .exchange(&session, endpoint, json!({"request":args}))
             .await
         {
-            Ok(value)
-                if endpoint == "session/rename"
-                    && value["title"] == args["title"]
-                    && value["seq"].is_i64() =>
-            {
-                accepted
-            }
-            Ok(value) if endpoint != "session/rename" && value["accepted"] == true => accepted,
+            Ok(value) if value["accepted"] == true => accepted,
             Err(error) if error.is::<Refused>() => Delivery::Rejected("DSH 拒绝请求"),
             _ => Delivery::Uncertain,
         }

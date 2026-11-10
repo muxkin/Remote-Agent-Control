@@ -251,9 +251,27 @@ impl Dsh {
     }
 
     async fn download_link(&self, path: &str) -> Result<Source> {
-        let session = self.authenticate().await?;
         let mut url = self.base.join("api/file")?;
         url.query_pairs_mut().append_pair("path", path);
+        let name = path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| valid_name(name))
+            .unwrap_or("DSH 文件");
+        self.download_source(url, name.to_owned(), false).await
+    }
+
+    pub(crate) async fn session_log(&self, thread: &str) -> Result<Source> {
+        let mut url = self.base.join("api/session.export")?;
+        url.query_pairs_mut()
+            .append_pair("sessionId", thread)
+            .append_pair("includeDescendants", "true");
+        let name = format!("dsh-session-{}.zip", &hash(thread)[..12]);
+        self.download_source(url, name, true).await
+    }
+
+    async fn download_source(&self, url: url::Url, name: String, zip: bool) -> Result<Source> {
+        let session = self.authenticate().await?;
         let mut response = self
             .authorized(&session, self.http.get(url))
             .timeout(Duration::from_secs(30))
@@ -274,14 +292,18 @@ impl Dsh {
             file.write_all(&chunk).await?;
         }
         file.flush().await?;
-        let name = path
-            .rsplit(['/', '\\'])
-            .next()
-            .filter(|name| valid_name(name))
-            .unwrap_or("DSH 文件");
+        if zip {
+            file.rewind().await?;
+            let mut signature = [0; 4];
+            file.read_exact(&mut signature).await?;
+            ensure!(
+                matches!(&signature, b"PK\x03\x04" | b"PK\x05\x06"),
+                "DSH 日志不是 ZIP 文件"
+            );
+        }
         Ok(Source {
             file: file.into_std().await,
-            name: name.to_owned(),
+            name,
             expected: None,
         })
     }

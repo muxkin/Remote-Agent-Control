@@ -616,6 +616,16 @@ impl DeviceSession {
     fn plugin_write(&self, plugin: Arc<dyn Adapter>, method: &str, call: &Value) -> Result<Value> {
         let thread = plugin_thread(&call["params"]["id"])?;
         let (request, action) = match method {
+            "thread.open" => {
+                ensure!(
+                    call["body"].as_object().is_some_and(|body| body.len() == 1),
+                    "DSH 打开请求无效"
+                );
+                (
+                    serde_json::from_value(call["body"]["requestId"].clone())?,
+                    Write::Open,
+                )
+            }
             "request.respond" => {
                 let response: crate::requests::Response =
                     serde_json::from_value(call["body"].clone())?;
@@ -669,9 +679,10 @@ impl DeviceSession {
             .plugin_watches
             .get(&(plugin.id().to_owned(), thread.to_owned()))
             .map(|watch| watch.live.clone());
-        if matches!(&action, Write::Create { .. }) {
-            ensure!(thread == "new" || live.is_some(), "请先打开 DSH 会话");
-        } else {
+        if !matches!(
+            &action,
+            Write::Create { .. } | Write::Open | Write::Rename { .. }
+        ) {
             ensure!(live.is_some(), "请先打开 DSH 会话");
         }
         let (operation, fresh) = self
@@ -755,13 +766,17 @@ impl DeviceSession {
                     self.begin_upload(Scope::plugin(plugin.id(), thread), call["body"].clone())
                         .await
                 }
-                "media.describe" => {
+                "media.describe" | "log.export" => {
                     let thread = plugin_thread(&call["params"]["id"])?;
-                    let reference = call["body"]["path"]
-                        .as_str()
-                        .filter(|path| (1..=4096).contains(&path.encode_utf16().count()))
-                        .context("附件地址无效")?;
-                    let media = plugin.media(thread, reference).await?;
+                    let media = if method == "log.export" {
+                        Media::Download(plugin.export_log(thread).await?)
+                    } else {
+                        let reference = call["body"]["path"]
+                            .as_str()
+                            .filter(|path| (1..=4096).contains(&path.encode_utf16().count()))
+                            .context("附件地址无效")?;
+                        plugin.media(thread, reference).await?
+                    };
                     let scope = Scope::plugin(plugin.id(), thread);
                     let db = self.db.clone();
                     let device = self.device.id.clone();
@@ -810,7 +825,7 @@ impl DeviceSession {
                 }
                 "message.send" | "turn.steer" | "turn.interrupt" | "thread.rename"
                 | "thread.create" | "queue.add" | "queue.remove" | "settings.update"
-                | "control.execute" | "request.respond" => {
+                | "control.execute" | "request.respond" | "thread.open" => {
                     self.plugin_write(plugin, method, &call).map(Some)
                 }
                 _ => plugin.read(method, &call["params"], &call["query"]).await,
@@ -1217,9 +1232,17 @@ impl PluginRequest {
         resolve: impl FnOnce(&[Uuid]) -> Result<Vec<VerifiedUpload>>,
     ) -> Result<(Uuid, Write)> {
         ensure!(
-            self.skill_ids.as_ref().is_none_or(Vec::is_empty)
-                && self.plugin_ids.as_ref().is_none_or(Vec::is_empty),
-            "DSH 技能尚未迁移"
+            self.plugin_ids.as_ref().is_none_or(Vec::is_empty),
+            "DSH 不支持 Codex 插件"
+        );
+        let skills = self.skill_ids.unwrap_or_default();
+        ensure!(
+            skills.len() <= 10
+                && (skills.is_empty() || method == "message.send")
+                && skills
+                    .iter()
+                    .all(|name| crate::dsh_settings::skill_name(name)),
+            "DSH 技能选项无效"
         );
         let uploads = self.upload_ids.as_deref().unwrap_or_default();
         ensure!(
@@ -1292,6 +1315,7 @@ impl PluginRequest {
                 Write::Send {
                     text: prompt_text(self.text)?,
                     files,
+                    skills,
                 }
             }
             "turn.steer" if self.title.is_none() => Write::Steer {

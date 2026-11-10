@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename as renameFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -19,6 +19,8 @@ const legacy = join(state, 'legacy');
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const png = await readFile('src/web/public/app-icon-32.png');
 const workspacePdf = Buffer.from('%PDF-1.7\nfixture document\n');
+const sessionZip = Buffer.from('504b0506000000000000000000000000000000000000', 'hex');
+type GoalView = { id: string; revision: number; objective: string; phase: string; activation: string };
 const modelId = (model: string) => JSON.stringify(['fixture', model]);
 const defaultProjections = () => ({
   modelSelection: { next: { provider: 'fixture', model: 'base' } },
@@ -48,6 +50,8 @@ const instances = ['dsh-one', 'dsh-two'].map((id) => ({
   projectionSeq: 1,
   pageWindow: 100,
   calls: [] as { method: string; request: any }[],
+  goal: null as GoalView | null,
+  failCompact: false,
   records: [
     {
       event: {
@@ -85,6 +89,12 @@ const dsh = createServer(async (request, response) => {
   }
   const instance = cookie(request.headers.cookie);
   if (!instance) return response.writeHead(403).end();
+  if (path.pathname === '/api/session.export') {
+    assert.equal(request.method, 'GET');
+    assert.equal(path.searchParams.get('includeDescendants'), 'true');
+    if (path.searchParams.get('sessionId') !== 'shared') return response.writeHead(404).end();
+    return response.writeHead(200, { 'content-type': 'application/zip' }).end(sessionZip);
+  }
   if (path.pathname === '/api/file') {
     assert.equal(instance, one);
     assert.equal(path.searchParams.get('path'), '/fixture/report copy.pdf');
@@ -115,6 +125,74 @@ const dsh = createServer(async (request, response) => {
   const args = rpc.payload.args.request ?? rpc.payload.args;
   let value;
   switch (rpc.method) {
+    case 'skills/list':
+      assert.equal(args.sessionId, 'shared');
+      value = {
+        skills:
+          instance === one
+            ? [{ name: 'fixture-skill', description: 'Fixture skill', modelInvocable: false }]
+            : [],
+      };
+      break;
+    case 'goals/get':
+      assert.equal(args.agentId, 'shared');
+      value = instance.goal ?? undefined;
+      break;
+    case 'goals/create':
+    case 'goals/edit':
+    case 'goals/pause':
+    case 'goals/resume':
+    case 'goals/complete':
+    case 'goals/clear': {
+      assert.equal(instance, one);
+      const { agentId, ref, request } = rpc.payload.args;
+      assert.equal(agentId, 'shared');
+      if (rpc.method === 'goals/create') {
+        assert.equal(ref, undefined);
+        instance.goal = {
+          id: 'goal-' + randomUUID(),
+          revision: 1,
+          objective: request.objective,
+          phase: 'active',
+          activation: 'armed',
+        };
+        value = { ref: { id: instance.goal.id, revision: instance.goal.revision } };
+      } else {
+        const current = instance.goal!;
+        assert.deepEqual(ref, { id: current.id, revision: current.revision });
+        const next = { ...current, revision: current.revision + 1 };
+        if (rpc.method === 'goals/edit') next.objective = request.objective;
+        if (rpc.method === 'goals/pause') {
+          next.phase = 'paused';
+          next.activation = 'disarmed';
+        }
+        if (rpc.method === 'goals/resume') {
+          next.phase = 'active';
+          next.activation = 'armed';
+        }
+        if (rpc.method === 'goals/complete') {
+          next.phase = 'complete';
+          next.activation = 'disarmed';
+        }
+        if (rpc.method === 'goals/clear') {
+          value = { id: next.id, revision: next.revision };
+          instance.goal = null;
+        } else {
+          instance.goal = next;
+          value = next;
+        }
+        if (request?.objective === 'lost goal response') {
+          instance.calls.push({ method: rpc.method, request: args });
+          return response.destroy();
+        }
+      }
+      break;
+    }
+    case 'sessionFeedback/record':
+      assert.equal(instance, one);
+      assert.deepEqual(args, { sessionId: 'shared', text: 'Fixture feedback' });
+      value = { ok: true, value: {} };
+      break;
     case '$events/result':
       assert(
         [...instance.eventClients.values()].some(
@@ -244,11 +322,27 @@ const dsh = createServer(async (request, response) => {
       break;
     case 'commands/list':
       assert(instance.projections.has(args.agentId));
-      value = [{ name: 'permission' }, { name: 'plan' }];
+      value = [
+        'permission',
+        'plan',
+        ...(instance === one && args.agentId === 'shared' ? ['compact', 'feedback', 'goal'] : []),
+      ].map((name) => ({ name }));
       break;
     case 'commands/execute':
       assert.deepEqual(args.submittedAttachments, []);
-      if (args.line === '/permission restricted' || args.line === '/permission ask') {
+      if (args.line === '/compact') {
+        const commandId = randomUUID();
+        const kind = instance.failCompact ? 'error' : 'success';
+        instance.failCompact = false;
+        record(instance, 'command/run', { commandId, name: 'compact', args: '' });
+        record(instance, 'command/done', {
+          commandId,
+          kind,
+          text: kind === 'success' ? 'Compacted' : 'Fixture failure',
+        });
+        value = { commandId, result: { kind } };
+        break;
+      } else if (args.line === '/permission restricted' || args.line === '/permission ask') {
         project(instance, args.agentId, 'permissions', { currentValue: args.line.split(' ')[1] });
       } else {
         assert(['/plan', '/plan off'].includes(args.line));
@@ -536,7 +630,7 @@ async function launch() {
       POCKET_NATIVE_ORIGIN: origin,
       POCKET_NATIVE_ENROLLMENT: enrollment,
       POCKET_NATIVE_P2P: '0',
-      ...Object.fromEntries(instances.map(({ token }, index) => ['RUST_DSH_TEST_TOKEN_' + index, token])),
+      RUST_DSH_TEST_TOKEN_0: one.token,
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -565,17 +659,30 @@ try {
   await once(dsh, 'listening');
   const carrier = dsh.address();
   assert(carrier && typeof carrier !== 'string');
+  const legacyConfig = join(legacy, 'old-backends.json');
+  const legacyEnv = join(legacy, 'gateway.env');
+  const carrierUrl = 'http://127.0.0.1:' + carrier.port;
+  await mkdir(legacy, { mode: 0o700 });
+  await writeFile(legacyEnv, `RUST_DSH_TEST_TOKEN_1=${two.token}\n`, { mode: 0o600 });
   await writeFile(
     join(state, 'instances.json'),
-    JSON.stringify(
-      instances.map(({ id }, index) => ({
-        id,
-        name: id,
+    JSON.stringify([
+      {
+        id: one.id,
+        name: one.id,
         plugin: '@agent-remote/adapter-dsh',
-        config: { url: 'http://127.0.0.1:' + carrier.port, version: '0.2.1-rc.5' },
-        secrets: { token: 'RUST_DSH_TEST_TOKEN_' + index },
-      })),
-    ),
+        config: { url: carrierUrl, version: '0.2.1-rc.5' },
+        secrets: { token: 'RUST_DSH_TEST_TOKEN_0' },
+      },
+      {
+        id: two.id,
+        name: two.id,
+        type: 'dsh',
+        url: carrierUrl,
+        tokenEnv: 'RUST_DSH_TEST_TOKEN_1',
+        version: '0.2.1-rc.5',
+      },
+    ]),
     { mode: 0o600 },
   );
   await relay.app.listen({ host: '127.0.0.1', port: address.port });
@@ -622,6 +729,10 @@ try {
       backends.map(({ id, connected }) => [id, connected]),
       instances.map(({ id }) => [id, true]),
     );
+    const open = randomUUID();
+    await rpc(one.id, '/threads/shared/open', 'POST', { requestId: open });
+    await operation(open, 'completed');
+    assert.equal(one.opens, 0);
     for (const instance of instances) {
       const { threads } = await rpc<{ threads: { id: string; title: string }[] }>(instance.id, '/threads');
       assert.deepEqual([threads[0].id, threads[0].title], ['shared', instance.id]);
@@ -969,7 +1080,12 @@ try {
       one.id,
       '/threads/shared/controls',
     );
-    assert.deepEqual(controls.actions, ['permission', 'preset', 'plan']);
+    assert.deepEqual(controls.actions, ['permission', 'preset', 'plan', 'compact', 'feedback', 'goal']);
+    assert.deepEqual((await rpc<{ actions: string[] }>(two.id, '/threads/shared/controls')).actions, [
+      'permission',
+      'preset',
+      'plan',
+    ]);
     assert.deepEqual(
       controls.presets.map(({ id }) => id),
       ['standard', 'custom'],
@@ -1014,7 +1130,7 @@ try {
     const control = async (value: object, expected = 'completed') => {
       const requestId = randomUUID();
       await rpc(one.id, '/threads/shared/control', 'POST', { requestId, control: value });
-      await operation(requestId, expected);
+      return operation(requestId, expected);
     };
     const permissionRevision = views.get(one.id)?.thread.controls.permissionRevision;
     assert.equal(typeof permissionRevision, 'string');
@@ -1037,6 +1153,93 @@ try {
     project(one, 'shared', 'turnOutline', []);
     await control({ action: 'preset', value: 'custom' });
     await wait(() => views.get(one.id)?.thread.controls.preset === 'custom');
+
+    assert.deepEqual(await rpc(one.id, '/threads/shared/skills'), {
+      skills: [{ id: 'fixture-skill', name: 'fixture-skill', description: 'Fixture skill', source: 'DSH' }],
+    });
+    assert.deepEqual(await rpc(two.id, '/threads/shared/skills'), { skills: [] });
+    const staleSkill = { requestId: randomUUID(), text: 'stale skill', skillIds: ['missing-skill'] };
+    await rpc(one.id, '/threads/shared/messages', 'POST', staleSkill);
+    await operation(staleSkill.requestId, 'rejected');
+    assert(!one.calls.some(({ request }) => request.requestId === staleSkill.requestId));
+    const skillSend = { requestId: randomUUID(), text: 'skill prompt', skillIds: ['fixture-skill'] };
+    await rpc(one.id, '/threads/shared/messages', 'POST', skillSend);
+    await operation(skillSend.requestId, 'accepted');
+    assert.deepEqual(
+      one.calls.find(({ request }) => request.requestId === skillSend.requestId)?.request.content,
+      [{ type: 'text', text: '/fixture-skill\nskill prompt' }],
+    );
+    await assert.rejects(
+      rpc(one.id, '/threads/shared/messages', 'POST', {
+        ...skillSend,
+        requestId: randomUUID(),
+        skillIds: ['fixture-skill\n/compact'],
+      }),
+    );
+
+    const compact = (await control({ action: 'compact' })) as { turnId?: string };
+    assert.equal(typeof compact.turnId, 'string');
+    await wait(() => views.get(one.id)?.messages.get('command-' + compact.turnId)?.output === 'Compacted');
+    one.failCompact = true;
+    const failedCompact = (await control({ action: 'compact' }, 'failed')) as { turnId?: string };
+    await wait(
+      () => views.get(one.id)?.messages.get('command-' + failedCompact.turnId)?.output === 'Fixture failure',
+    );
+    await control({ action: 'feedback', text: '   Fixture feedback ' });
+    const readGoal = async () =>
+      (
+        await rpc<{
+          goal: null | {
+            ref: { id: string; revision: number };
+            objective: string;
+            phase: string;
+            activation: string;
+          };
+        }>(one.id, '/threads/shared/controls')
+      ).goal;
+    assert.equal(await readGoal(), null);
+    await control({ action: 'goal', operation: 'create', objective: 'Fixture goal' });
+    const firstGoal = (await readGoal())!;
+    assert.deepEqual([firstGoal.phase, firstGoal.activation, firstGoal.ref.revision], ['active', 'armed', 1]);
+    await control({ action: 'goal', operation: 'pause', ref: { ...firstGoal.ref, revision: 2 } }, 'rejected');
+    assert(!one.calls.some(({ method }) => method === 'goals/pause'));
+    const lostGoal = {
+      requestId: randomUUID(),
+      control: {
+        action: 'goal',
+        operation: 'edit',
+        ref: firstGoal.ref,
+        objective: 'lost goal response',
+      },
+    };
+    await rpc(one.id, '/threads/shared/control', 'POST', lostGoal);
+    await operation(lostGoal.requestId, 'uncertain');
+    await rpc(one.id, '/threads/shared/control', 'POST', lostGoal);
+    assert.equal(one.calls.filter(({ method }) => method === 'goals/edit').length, 1);
+    assert.equal((await readGoal())?.objective, 'lost goal response');
+    for (const [operation, phase] of [
+      ['pause', 'paused'],
+      ['resume', 'active'],
+      ['complete', 'complete'],
+    ] as const) {
+      const current = (await readGoal())!;
+      await control({ action: 'goal', operation, ref: current.ref });
+      const result = (await readGoal())!;
+      assert.deepEqual([result.phase, result.ref.revision], [phase, current.ref.revision + 1]);
+    }
+    await control({ action: 'goal', operation: 'clear', ref: (await readGoal())!.ref });
+    assert.equal(await readGoal(), null);
+    const zip = await rpc<{ id: string; mime: string; name: string }>(
+      one.id,
+      '/threads/shared/export',
+      'POST',
+    );
+    assert.equal(zip.mime, 'application/zip');
+    assert(zip.name.endsWith('.zip'));
+    const zipFile = { fileId: zip.id, backendId: one.id, threadId: 'shared', action: 'read', index: 0 };
+    assert.deepEqual(Buffer.from((await session.request('file', zipFile)).bytes!), sessionZip);
+    await assert.rejects(session.request('file', { ...zipFile, backendId: two.id }));
+    await assert.rejects(rpc(one.id, '/threads/not-watched/export', 'POST'), { status: 404 });
     const lostSetting = {
       ...staleModel,
       requestId: randomUUID(),
@@ -1106,6 +1309,12 @@ try {
     remove();
     session.close();
     await stop();
+    await renameFile(join(state, 'instances.json'), legacyConfig);
+    await writeFile(
+      legacyEnv,
+      `RUST_DSH_TEST_TOKEN_1=${two.token}\nPOCKET_BACKENDS_FILE=${JSON.stringify(legacyConfig)}\n`,
+      { mode: 0o600 },
+    );
     await launch();
     views.clear();
     session = await nodeSession(origin, host, phone, ready.ticket, {
@@ -1115,6 +1324,7 @@ try {
     });
     remove = listen();
     await watch(one.id);
+    await watch(two.id);
     assert.deepEqual(await download(fileRef, 'text/plain'), attachment);
     await rpc(one.id, '/threads/shared/settings', 'POST', lostSetting);
     await operation(lostSetting.requestId, 'uncertain');
@@ -1165,12 +1375,17 @@ try {
     assert.equal(one.calls.length, before);
     await control({ action: 'plan', enabled: false }, 'rejected');
     assert.equal(one.calls.length, before);
+    const readonlyZip = await rpc<{ id: string }>(one.id, '/threads/shared/export', 'POST');
+    assert.deepEqual(
+      Buffer.from((await session.request('file', { ...zipFile, fileId: readonlyZip.id })).bytes!),
+      sessionZip,
+    );
   } finally {
     remove();
     session.close();
   }
   console.log(
-    'Rust DSH: scoped media, settings, approvals and questions, timed delegation and late answers, recovery, replay and read-only policy passed.',
+    'Rust DSH: media, native skills and controls, goals, ZIP export, approvals and questions, recovery, replay and read-only policy passed.',
   );
 } finally {
   await stop();

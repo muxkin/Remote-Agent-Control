@@ -148,6 +148,14 @@ impl Store {
         let (state, turn, error, thread) = match result {
             Delivery::Accepted(turn) => ("accepted", turn, None, None),
             Delivery::Completed(thread) => ("completed", None, None, thread),
+            Delivery::Command {
+                id,
+                succeeded: true,
+            } => ("completed", Some(id), None, None),
+            Delivery::Command {
+                id,
+                succeeded: false,
+            } => ("failed", Some(id), Some("DSH 原生命令执行失败"), None),
             Delivery::Rejected(reason) => ("rejected", None, Some(reason), None),
             Delivery::Uncertain => (
                 "uncertain",
