@@ -4,7 +4,7 @@
 
 原生适配器位于 `desktop/native`。v0.3.34 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
-v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
+v0.2.8 Linux 混合版安装包附带 Node 和 Python。纯 Rust 安装器的发布验收覆盖 Linux x64、Windows x64、macOS Apple Silicon 和 macOS Intel。
 
 ### 原生安装包
 
@@ -125,11 +125,23 @@ Codex 目录按 `POCKET_NATIVE_CODEX_HOME`、`CODEX_HOME`、`~/.codex` 的顺序
 
 原生适配器默认尝试 WebRTC，直连和中继共用同一套 Noise 配对协议。可在私有状态目录的 `transport.env` 中设置 `POCKET_NATIVE_P2P=0` 关闭直连，或设置 `POCKET_STUN_URLS` 指定 STUN 服务。配置七牛私有桶后，无法直连时，大附件优先使用对象存储。适配器可沿用已启用七牛媒体存储的旧 `gateway.env`，也可用 `POCKET_NATIVE_STORAGE_ENV_FILE` 指定既有的私有配置。首次使用时按桶发现七牛区域并验证桶为私有。需要固定上传端点时仍可设置 `POCKET_NATIVE_QINIU_UPLOAD_URL`。Web 服务的 CSP 和对象存储的 CORS 需要允许该上传路径。对象上传默认按 25 MiB 分组，可用 `POCKET_NATIVE_STORAGE_BATCH_MIB` 调整到 50 MiB。支持该字段的新网页按配置分组，旧网页沿用 15 MiB。1 MiB 校验块保持兼容。自定义私有存储可通过独立原生插件接入。 [原生对象存储插件](STORAGE_ADAPTER.md#原生对象存储插件)
 
-三系统的安装和协议验证入口见 `.github/workflows/desktop-native.yml`。Linux CI 安装 DEB 并用安装后的程序验证协议。macOS CI 挂载 DMG，校验应用包并用其中的程序验证 Socket 对端和协议。Windows CI 验证安装、重装和卸载，并用同一提交的控制台构建验证 Named Pipe 和协议。Windows 和 macOS 的桌面实机验收仍需单独完成。
+### 旧版功能验收
 
-Windows 和 macOS 的实际更新交接仍需在对应系统验收。
+以旧 Node 网关的业务协议及 v0.2.8 混合安装版为基线。下列入口使用隔离的配对、会话和服务数据。
 
-在仓库根目录运行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts`，可验证旧身份和配对、新配对、历史、原生会话控制、文件传输和重启恢复。设置 `POCKET_NATIVE_TEST_RELAY=cloudflare` 可使用同一个夹具验证 Cloudflare Worker。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
+| 核对项 | 验收入口及覆盖范围 |
+| --- | --- |
+| 身份、配对、状态和配置 | [网关验收](../scripts/desktop/native-smoke.ts)验证旧设备重连、一次性配对码、操作记录、外观、草稿和上传恢复。随包插件模式也验证从旧桌面设置导入外部环境文件，重启后按原工作目录读取实例配置。 |
+| Codex 会话和附件 | 同一网关验收覆盖历史、会话操作、工具活动、审批、模型和队列。启用 Chromium 用例后，在已配对的工作台打开历史 PDF 和 PNG，验证工具活动详情、移动端审批和 5 MiB WebRTC 直传。 |
+| DSH 原生交互 | [DSH 验收](../scripts/desktop/native-dsh-smoke.ts)覆盖历史和工作区附件、发送和追加、审批和同步提问、模型权限和计划、技能、目标、反馈、ZIP 导出及断线恢复。 |
+| 独立插件 | [插件宿主验收](../scripts/desktop/native-plugin-smoke.ts)验证外部插件安装、故障恢复、在线切换及回滚。安装包验收还确认首次启动登记官方 Codex 和 DSH，随包升级后可以回滚并跨重启保留绑定。 |
+| 独立 Agent | [消息与通话验收](../scripts/desktop/native-rust-im-smoke.ts)验证复用旧身份和游标、新注册账号与旧客户端互通、流式回复、加密附件和审批。语音和视频通过 WebRTC 双向传输，Linux 另验证独立 `--im-call` 入口。 |
+| 安装与签名更新 | [安装器矩阵](../.github/workflows/desktop-native.yml)安装 DEB、挂载并检查 DMG、安装及卸载 Windows EXE。[更新验收](../scripts/desktop/native-rust-update-smoke.mjs)使用一次性发布密钥验证实际安装器交接和配对保留。Linux 另用归档的 v0.2.8 混合 DEB 验证过渡到 v0.3.34，保留配对并迁移自定义更新源。 |
+| VPS/Node 和 Cloudflare | `npm test` 和 `npm run test:cf` 包含共享的中继协议用例。`npm run check:deployments` 用相同公开参数逐文件比较两端的前端输出。网关及独立 Agent 的验收入口支持通过 `POCKET_NATIVE_TEST_RELAY=cloudflare` 切换中继。 |
+
+验收中的 Codex Socket、Windows Named Pipe、DSH 及通话对端使用测试夹具。用户实际安装的桌面应用版本、自编插件和媒体处理器需要在各自环境验证。
+
+从仓库根目录执行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts <适配器路径>` 可复跑网关验收。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
 
 只运行网关时，可以在 Alpine 等原生 musl 构建环境中使用 `cargo build --release --locked --no-default-features --target x86_64-unknown-linux-musl` 生成静态可执行文件。跨目标构建还需要 musl C 编译器来构建 SQLite 等依赖。Ely 图形版需要动态加载系统的 Vulkan 等图形库。Alpine 上已用 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=-crt-static'` 构建并启动窗口，需要该系统的 musl 图形运行库。
 
