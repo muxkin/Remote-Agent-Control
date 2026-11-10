@@ -27,6 +27,7 @@ use url::Url;
 use uuid::Uuid;
 
 mod discovery;
+mod import;
 mod plugin;
 use discovery::Endpoints;
 use plugin::NativeStorage;
@@ -369,71 +370,21 @@ impl Storage {
         let key = self.inner.key(object);
         let (indices, download) = match &native {
             Some((indices, download)) => (serde_json::from_str(indices)?, *download),
-            None if action == "storage-import" => {
-                let indices = legacy_object_indices(&device, &scope, id, object, &key)?;
-                let missing = db.lock().expect("database mutex poisoned").file_request(
-                    &device,
-                    &scope,
-                    id,
-                    "missing",
-                    None,
-                    &[],
-                )?;
-                for &index in &indices {
-                    block_length(&missing["manifest"], index)?;
-                }
-                let missing: Vec<usize> = serde_json::from_value(missing["missing"].clone())?;
-                if indices.iter().all(|index| !missing.contains(index)) {
-                    return Ok(json!({"ok":true}));
-                }
-                (indices, false)
-            }
+            None if action == "storage-import" => (
+                legacy_object_indices(&device, &scope, id, object, &key)?,
+                false,
+            ),
             None => anyhow::bail!("对象不属于此附件或已过期"),
         };
         match action {
             "storage-import" if !download => {
-                let (manifest, _) = db
-                    .lock()
-                    .expect("database mutex poisoned")
-                    .storage_manifest(&device, &scope, id)?;
-                let size = indices.iter().try_fold(0, |total, &index| {
-                    Ok::<_, anyhow::Error>(
-                        total + block_length(&manifest, index)? + aead::MAX_TAG_LEN,
-                    )
-                })?;
-                let url = self.inner.provider.download_url(&key, 300).await?;
-                let mut response = self.inner.http.get(url).send().await?;
-                ensure!(
-                    response.status().is_success()
-                        && response.content_length().is_none_or(|n| n == size as u64),
-                    "对象读取失败或大小无效"
-                );
-                let mut encrypted = Vec::with_capacity(size);
-                while let Some(chunk) = response.chunk().await? {
-                    ensure!(encrypted.len() + chunk.len() <= size, "对象数据过大");
-                    encrypted.extend_from_slice(&chunk);
+                let received = self
+                    .inner
+                    .receive_object(&db, &device, &scope, id, &key, indices)
+                    .await?;
+                if !received && native.is_none() {
+                    return Ok(json!({"ok":true}));
                 }
-                ensure!(encrypted.len() == size, "对象数据未传完");
-                let device = device.clone();
-                let db = db.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut offset = 0;
-                    for index in indices {
-                        let end = offset + block_length(&manifest, index)? + aead::MAX_TAG_LEN;
-                        let plain = decrypt(&manifest, index, encrypted[offset..end].to_vec())?;
-                        db.lock().expect("database mutex poisoned").file_request(
-                            &device,
-                            &scope,
-                            id,
-                            "write",
-                            Some(index as u64),
-                            &plain,
-                        )?;
-                        offset = end;
-                    }
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await??;
             }
             "storage-done" if download => {}
             _ => anyhow::bail!("对象方向无效"),

@@ -6,7 +6,7 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    io::Write,
+    io::{Seek, SeekFrom, Write},
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -46,8 +46,18 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
     let thread = Uuid::new_v4();
     let scope = Scope::codex(crate::codex_backend::ID, thread);
     let device = Uuid::new_v4().to_string();
-    let bytes = b"existing private object";
-    let digest = format!("{:x}", Sha256::digest(bytes));
+    let blocks = [
+        vec![16; BLOCK],
+        vec![27; BLOCK],
+        vec![38; BLOCK],
+        b"existing private object".to_vec(),
+    ];
+    let bytes = blocks.concat();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let hashes = blocks
+        .iter()
+        .map(|block| format!("{:x}", Sha256::digest(block)))
+        .collect::<Vec<_>>();
     let part_directory = uploads.join(transfer.to_string());
     private_directory(&uploads)?;
     private_directory(&part_directory)?;
@@ -55,7 +65,7 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
     let expires = now() + 86_400_000;
     let manifest = json!({
         "id":transfer,"name":"old.txt","size":bytes.len(),"sha256":digest,
-        "hashes":[digest],"version":Uuid::new_v4(),"key":STANDARD.encode([73;32]),
+        "hashes":hashes,"version":Uuid::new_v4(),"key":STANDARD.encode([73;32]),
         "nonce":STANDARD.encode([16;8]),"mime":"application/octet-stream","storage":true,
     });
     private_json(
@@ -66,16 +76,23 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
             "offset":0,"expires":expires,
         }),
     )?;
+    let part = part_directory.join("old.txt.part");
+    let mut old_file = private_file(&part, true)?;
+    old_file.seek(SeekFrom::Start(BLOCK as u64))?;
+    old_file.write_all(&blocks[1])?;
+    drop(old_file);
+    let old_bytes = std::fs::read(&part)?;
     private_json(
         &transfers.join(format!("{transfer}.json")),
         &json!({
-            "manifest":manifest,"file":part_directory.join("old.txt.part"),"device":device,
-            "thread":thread,"direction":"up","present":[],"expires":expires,
+            "manifest":manifest,"file":part,"device":device,
+            "thread":thread,"direction":"up","present":[1],"expires":expires,
         }),
     )?;
     let record_path = transfers.join(format!("{object}.object"));
     let key = format!("codex-pocket/private-encrypted-v2/{object}");
-    let record = json!({"id":object,"key":key,"transfer":transfer,"indices":[0],"expires":expires});
+    let record =
+        json!({"id":object,"key":key,"transfer":transfer,"indices":[0,1,2,3],"expires":expires});
     private_json(&record_path, &record)?;
     migration::import(&legacy, &state, None)?;
     migration::initialize(&state)?;
@@ -83,22 +100,40 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let ciphertext = encrypt(&manifest, 0, bytes.to_vec())?;
+    let mut ciphertext = Vec::new();
+    for (index, bytes) in blocks.into_iter().enumerate() {
+        ciphertext.extend(encrypt(&manifest, index, bytes)?);
+    }
     let requests = Arc::new(AtomicUsize::new(0));
+    let cleanup = Arc::new(AtomicUsize::new(0));
     let reads = requests.clone();
+    let deletes = cleanup.clone();
     let fixture = tokio::spawn(async move {
+        let full = BLOCK + aead::MAX_TAG_LEN;
+        let ranges = [
+            0..full,
+            0..full,
+            2 * full..3 * full,
+            2 * full..3 * full,
+            3 * full..ciphertext.len(),
+        ];
         while let Ok((socket, _)) = listener.accept().await {
             let mut socket = BufReader::new(socket);
             let mut first = String::new();
             socket.read_line(&mut first).await?;
+            let mut range_header = String::new();
             let mut line = String::new();
             loop {
                 line.clear();
                 if socket.read_line(&mut line).await? == 0 || line == "\r\n" {
                     break;
                 }
+                if line.to_ascii_lowercase().starts_with("range: ") {
+                    range_header = line["range: ".len()..].trim().to_owned();
+                }
             }
             if first.starts_with("POST /delete/") {
+                deletes.fetch_add(1, Ordering::SeqCst);
                 socket
                     .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
                     .await?;
@@ -106,20 +141,38 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
             }
             assert!(first.starts_with(&format!("GET /{key}?e=")));
             assert!(first.contains("&token=fixture:"));
-            let mut body = ciphertext.clone();
-            if reads.fetch_add(1, Ordering::SeqCst) == 0 {
-                body[0] ^= 1;
-            }
-            socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
+            let attempt = reads.fetch_add(1, Ordering::SeqCst);
+            let range = ranges[attempt].clone();
+            assert_eq!(
+                range_header,
+                format!("bytes={}-{}", range.start, range.end - 1)
+            );
+            if attempt == 4 {
+                // The provider switches to a full response after serving an earlier range.
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            ciphertext.len()
+                        )
+                        .as_bytes(),
                     )
-                    .as_bytes(),
-                )
-                .await?;
-            socket.write_all(&body).await?;
+                    .await?;
+                socket.write_all(&ciphertext).await?;
+                continue;
+            }
+            let start = range.start + usize::from(attempt == 2);
+            socket.write_all(format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                range.end - 1, ciphertext.len(), range.len(),
+            ).as_bytes()).await?;
+            if attempt != 2 {
+                let mut body = ciphertext[range].to_vec();
+                if attempt == 0 {
+                    body[0] ^= 1;
+                }
+                socket.write_all(&body).await?;
+            }
         }
         Ok::<_, std::io::Error>(())
     });
@@ -170,7 +223,7 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
     for (field, value) in [
         ("key", json!("different/private-encrypted-v2/object")),
         ("transfer", json!(Uuid::new_v4())),
-        ("indices", json!([1])),
+        ("indices", json!([4])),
         ("expires", json!(now() - 1)),
     ] {
         let mut invalid = record.clone();
@@ -182,6 +235,14 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
     private_json(&record_path, &record)?;
     assert!(resume(device.clone(), scope.clone()).await.is_err());
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let invalid_range = resume(device.clone(), scope.clone()).await.unwrap_err();
+    assert!(invalid_range.to_string().contains("字节范围"));
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+    let staged =
+        db.lock()
+            .unwrap()
+            .file_request(&device, &scope, transfer, "missing", None, &[])?;
+    assert_eq!(staged["missing"], json!([2, 3]));
     assert_eq!(
         resume(device.clone(), scope.clone()).await?,
         json!({"ok":true})
@@ -190,7 +251,9 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
         resume(device.clone(), scope.clone()).await?,
         json!({"ok":true})
     );
-    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    assert_eq!(requests.load(Ordering::SeqCst), 5);
+    assert_eq!(cleanup.load(Ordering::SeqCst), 1);
+    assert_eq!(std::fs::read(part)?, old_bytes);
     let path = db
         .lock()
         .unwrap()

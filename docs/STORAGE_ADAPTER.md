@@ -24,7 +24,7 @@ POCKET_MEDIA_PREFIX=codex-pocket
 | `storage/putFile` | 接收 `key`、本机临时密文文件 `file`、`contentType`、`cacheControl`、`allowedOrigin` 和 `expiresAt`。返回 `"created"` 或 `"exists"`。返回后网关清理临时文件。 |
 | `storage/remove` | 仅在 `storage/info` 声明支持清理时调用。接收 `key`，清理成功或对象已不存在时返回 `{ok:true}`。 |
 
-保持对象存储的私有生命周期策略、浏览器 CSP 和存储 CORS。适配器沿用现有浏览器传输协议，按块认证解密并验证文件。VPS 与 Cloudflare 的公开静态资源发布仍由各自的服务部署配置负责。
+保持对象存储的私有生命周期策略、浏览器 CSP 和存储 CORS。适配器沿用现有浏览器传输协议，通过 HTTP Range 读取仍缺失的密文块，认证解密后逐块保存。存储若返回完整对象，适配器核对对象长度后只写入缺失块。VPS 与 Cloudflare 的公开静态资源发布仍由各自的服务部署配置负责。
 
 ## Node 网关加载方式
 
