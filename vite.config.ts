@@ -28,7 +28,7 @@ export default defineConfig(() => {
     /^version = "([0-9.]+)"$/m,
   )?.[1];
   if (!nativeVersion) throw new Error('Missing native adapter version');
-  hash.update(nativeVersion);
+  hash.update(nativeVersion).update(readFileSync('desktop/native/update-release.pub'));
   const buildId = hash.digest('hex').slice(0, 16);
   const themeBoot = readFileSync('src/web/theme/boot.js', 'utf8');
   const startup = readFileSync('src/web/startup.js', 'utf8');

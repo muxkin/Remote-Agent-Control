@@ -1,0 +1,72 @@
+name: Publish verified Rust desktop packages
+on:
+  push:
+    tags: ['native-rust-v*']
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retrieve the exact packages already tested on all four targets
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' desktop/native/Cargo.toml)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$GITHUB_REF_NAME" = "native-rust-v$version"
+          commit=$(git rev-parse HEAD)
+          run_id=$(gh api "repos/$GH_REPO/actions/workflows/desktop-native.yml/runs?head_sha=$commit&status=success&event=push&per_page=30" \
+            --jq '.workflow_runs | map(select(.conclusion == "success" and (.head_branch | startswith("native-rust-qa-v")))) | first | .id // empty')
+          test -n "$run_id" || { echo 'A successful four-target QA run is required for this commit'; exit 1; }
+          mkdir release
+          out="$PWD/release"
+          for target in win32-x64 darwin-arm64 darwin-x64 linux-x64; do
+            arch=${target#*-}
+            case "$target" in
+              win32-*) platform=windows; installers=(windows-x64-setup.exe windows-x64.zip); executable_suffix=.exe ;;
+              darwin-*) platform=macos; installers=("macos-$arch.dmg"); executable_suffix= ;;
+              linux-*) platform=linux; installers=(linux-x64.deb linux-x64.tar.xz); executable_suffix= ;;
+            esac
+            download="$RUNNER_TEMP/$target"
+            gh run download "$run_id" --name "agent-space-native-$target" --dir "$download"
+            for suffix in "${installers[@]}"; do
+              file="AgentSpace-Native-$version-$suffix"
+              (
+                cd "$download"
+                read -r digest recorded < "$file.sha256"
+                test "$recorded" = "$file"
+                printf '%s  %s\n' "$digest" "$file" | sha256sum --check --strict
+                cp -- "$file" "$out/"
+              )
+            done
+            for product in codex dsh; do
+              entry="agent-space-adapter-$product$executable_suffix"
+              plugin="$RUNNER_TEMP/$product-$target"
+              gh run download "$run_id" --name "agent-space-adapter-$product-$target" --dir "$plugin"
+              digest=$(jq -er --arg product "$product" --arg version "$version" --arg entry "$entry" '
+                select(.sdk == 1 and .product == $product and .version == $version and
+                  .name == ("@agent-remote/adapter-" + $product) and .entry == $entry)
+                | .sha256 | select(test("^[0-9a-f]{64}$"))
+              ' "$plugin/adapter.json")
+              (
+                cd "$plugin"
+                printf '%s  %s\n' "$digest" "$entry" | sha256sum --check --strict
+                chmod 0755 "$entry"
+                tar -cJf "$out/AgentSpace-Adapter-${product^^}-$version-$platform-$arch.tar.xz" \
+                  adapter.json "$entry" LICENSE THIRD-PARTY-NOTICES.txt
+              )
+            done
+          done
+          cd "$out"
+          sha256sum AgentSpace-* > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+      - name: Publish the verified installers and independently installable plugins
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/AgentSpace-* release/SHA256SUMS \
+            --verify-tag --title "Agent Space Rust Desktop ${GITHUB_REF_NAME#native-rust-}" \
+            --notes "Verified installers and independent Codex and DSH plugin packages for Windows x64, macOS Apple Silicon and Intel, and Linux x64. Verify the SHA-256 checksums, extract the plugin for your system, then use agent-space-native --adapter install with the extracted directory. The automatic update feed is published separately with the desktop release key."

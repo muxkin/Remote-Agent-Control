@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from 'vue';
+import { nativeInstallerTargets } from '../../shared/desktop-releases.js';
 import SvgIcon from '../SvgIcon.vue';
+import { loadNativeInstaller, type NativeInstaller } from './native-installers.js';
 import './donation.css';
 
 const version = '0.2.7'; // Last GitHub release with both portable packages.
@@ -24,39 +26,23 @@ interface Download {
 const files = shallowRef<Download[]>([]);
 const previewBase = '/downloads/desktop/native/preview/linux/x64/';
 const preview = shallowRef<{ version: string; files: { name: string; size: number }[] }>();
-const signedBase = '/downloads/desktop/native/linux/x64/';
-const signedLinux = shallowRef<{ version: string; file: string; size: number }>();
-const releaseKey = 'MCowBQYDK2VwAyEA8sqXWWd6moWnpeBJiNk9yHRDApRW/+Qbm6yUwCSA/F8=';
-const bytes = (base64: string) => Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+const signedLinux = shallowRef<NativeInstaller>();
+const nativeNames = {
+  'windows-x64-setup.exe': 'Windows x64',
+  'macos-arm64.dmg': 'macOS Apple Silicon',
+  'macos-x64.dmg': 'macOS Intel',
+  'linux-x64.deb': 'Linux x64',
+} as const;
+type NativeResult = NativeInstaller | 'loading' | 'unpublished' | 'error';
+const nativeResults = shallowRef<NativeResult[]>([]);
+const nativeRows = computed(() =>
+  nativeInstallerTargets.map((target, index) => ({
+    name: nativeNames[target.suffix],
+    target,
+    result: nativeResults.value[index] ?? 'loading',
+  })),
+);
 
-async function loadSignedLinux(signal: AbortSignal) {
-  const response = await fetch(signedBase + 'latest.json', { signal, cache: 'no-cache' });
-  if (!response.ok) return;
-  const envelope = await response.json();
-  if (
-    typeof envelope.payload !== 'string' ||
-    envelope.payload.length > 16384 ||
-    typeof envelope.signature !== 'string' ||
-    envelope.signature.length !== 88
-  )
-    return;
-  const payload = bytes(envelope.payload);
-  const key = await crypto.subtle.importKey('spki', bytes(releaseKey), 'Ed25519', false, ['verify']);
-  if (!(await crypto.subtle.verify('Ed25519', key, bytes(envelope.signature), payload)) || signal.aborted)
-    return;
-  const release = JSON.parse(new TextDecoder().decode(payload));
-  if (
-    release.format === 1 &&
-    release.platform === 'linux' &&
-    release.arch === 'x64' &&
-    typeof release.version === 'string' &&
-    /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(release.version) &&
-    release.file === `AgentSpace-Native-${release.version}-linux-x64.deb` &&
-    Number.isSafeInteger(release.size) &&
-    release.size > 0
-  )
-    signedLinux.value = { version: release.version, file: release.file, size: release.size };
-}
 const sections = computed(() =>
   platforms.map((platform) => ({
     ...platform,
@@ -72,7 +58,27 @@ watch(
     const controller = new AbortController();
     onCleanup(() => controller.abort());
     state.value = 'loading';
-    void loadSignedLinux(controller.signal).catch(() => {});
+    nativeResults.value = nativeInstallerTargets.map(() => 'loading');
+    nativeInstallerTargets.forEach((target, index) => {
+      const set = (result: NativeResult) => {
+        if (controller.signal.aborted) return;
+        nativeResults.value = nativeResults.value.map((value, current) =>
+          current === index ? result : value,
+        );
+      };
+      void loadNativeInstaller(target, 'rust', controller.signal)
+        .then((release) => set(release ?? 'unpublished'))
+        .catch(() => set('error'));
+      if (target.platform === 'linux') {
+        void loadNativeInstaller(target, 'hybrid', controller.signal)
+          .then((release) => {
+            if (!controller.signal.aborted) signedLinux.value = release ?? undefined;
+          })
+          .catch(() => {
+            if (!controller.signal.aborted) signedLinux.value = undefined;
+          });
+      }
+    });
     void fetch(previewBase + 'preview.json', { signal: controller.signal, cache: 'no-cache' })
       .then(async (response) => (response.ok ? response.json() : undefined))
       .then((manifest) => {
@@ -127,14 +133,35 @@ watch(
       <h2>连接你的电脑</h2>
       <p>安装适配器，打开已有的 Codex / Agent，<br />再用手机扫码配对。</p>
     </section>
+    <section class="donation-card">
+      <h3>纯 Rust 安装版</h3>
+      <p>支持自动更新。Codex 和 DSH 插件可独立安装和升级。Linux 安装更新时需要系统授权。</p>
+      <p v-for="{ name, target, result } in nativeRows" :key="target.suffix" class="native-release-row">
+        <template v-if="typeof result !== 'string'">
+          <a :href="result.href" download>{{ name }} · 下载 v{{ result.version }}</a>
+          <span class="native-release-meta">
+            <small>{{ Math.ceil(result.size / 1024 / 1024) }} MiB</small>
+            <small v-if="result.releaseKeyOnly">发布密钥验签</small>
+            <small><a :href="result.manifest" :aria-label="name + ' 签名清单'">签名清单</a></small>
+          </span>
+        </template>
+        <template v-else-if="result === 'loading'">{{ name }} · 正在检查…</template>
+        <template v-else-if="result === 'unpublished'">{{ name }} · 待发布</template>
+        <template v-else>{{ name }} · 暂时无法验证安装包</template>
+      </p>
+      <button v-if="nativeResults.includes('error')" class="secondary" @click="attempt++">
+        重试纯 Rust 安装包
+      </button>
+    </section>
+    <h3>旧版与便携包</h3>
     <section v-if="signedLinux" class="donation-card">
-      <h3>Linux x64 签名安装版 v{{ signedLinux.version }}</h3>
+      <h3>Linux x64 旧签名安装版 v{{ signedLinux.version }}</h3>
       <p>内置 Agent 插件和独立 Agent 的消息与通话接入。更新下载后由系统授权安装。</p>
       <p>
-        <a :href="signedBase + signedLinux.file" download>下载签名 DEB</a>
+        <a :href="signedLinux.href" download>下载签名 DEB</a>
         <small> · {{ Math.ceil(signedLinux.size / 1024 / 1024) }} MB</small>
       </p>
-      <p><a :href="signedBase + 'latest.json'">签名更新清单</a></p>
+      <p><a :href="signedLinux.manifest">签名更新清单</a></p>
     </section>
     <section v-if="preview" class="donation-card">
       <h3>Linux x64 插件版预览 v{{ preview.version }}</h3>
@@ -178,3 +205,21 @@ watch(
     </template>
   </div>
 </template>
+
+<style scoped>
+.native-release-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 12px;
+  margin-block: 6px;
+}
+.native-release-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+}
+.native-release-row a {
+  color: var(--accent);
+}
+</style>

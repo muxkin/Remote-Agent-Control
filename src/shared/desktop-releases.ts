@@ -2,6 +2,16 @@ export interface ReleaseStore {
   head(key: string): Promise<{ size: number; etag: string } | null>;
   read(key: string, range?: { offset: number; length: number }): Promise<ReadableStream<Uint8Array> | null>;
 }
+
+export const nativeInstallerTargets = [
+  { platform: 'win32', arch: 'x64', suffix: 'windows-x64-setup.exe' },
+  { platform: 'darwin', arch: 'arm64', suffix: 'macos-arm64.dmg' },
+  { platform: 'darwin', arch: 'x64', suffix: 'macos-x64.dmg' },
+  { platform: 'linux', arch: 'x64', suffix: 'linux-x64.deb' },
+] as const;
+
+export type NativeInstallerTarget = (typeof nativeInstallerTargets)[number];
+
 export function releaseKey(path: string) {
   const name = path.replace(/^\/downloads\/desktop\//, '');
   if (name === 'releases.json') return `desktop-releases/${name}`;
@@ -16,12 +26,9 @@ export function releaseKey(path: string) {
       name,
     );
   if (native) {
-    const suffix = {
-      'linux/x64': 'linux-x64.deb',
-      'win32/x64': 'windows-x64-setup.exe',
-      'darwin/arm64': 'macos-arm64.dmg',
-      'darwin/x64': 'macos-x64.dmg',
-    }[native[1]];
+    const suffix = nativeInstallerTargets.find(
+      ({ platform, arch }) => `${platform}/${arch}` === native[1],
+    )?.suffix;
     return native[2] === 'latest.json' || native[3] === suffix ? `desktop-releases/${name}` : null;
   }
   if (
