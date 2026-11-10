@@ -123,16 +123,13 @@ impl Store {
                manifest TEXT NOT NULL, present TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0,
                expires INTEGER NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS native_storage_objects (
-               id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, transfer TEXT NOT NULL,
-               indices TEXT NOT NULL, download INTEGER NOT NULL, expires INTEGER NOT NULL
-             );
              CREATE TABLE IF NOT EXISTS legacy_upload_progress (
                id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, sha256 TEXT NOT NULL,
                size INTEGER NOT NULL, offset INTEGER NOT NULL, expires INTEGER NOT NULL
              );",
         )?;
         crate::appearance::initialize(&db)?;
+        crate::storage::initialize_receipts(&mut db)?;
         migrate_operations(&mut db)?;
         db.execute(
             "CREATE INDEX IF NOT EXISTS operations_by_conversation ON operations(backend_id,thread_id,device_id,created)",

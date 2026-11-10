@@ -32,6 +32,29 @@ fn private_json(path: &Path, data: &Value) -> Result<()> {
     Ok(())
 }
 
+fn fixture_storage(address: std::net::SocketAddr) -> Result<Storage> {
+    let endpoint = format!("http://{address}");
+    let http = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()?;
+    Storage::new(
+        Provider::Qiniu(Qiniu {
+            http,
+            upload_override: None,
+            endpoints: OnceCell::new_with(Some(Endpoints {
+                upload: Url::parse(&endpoint)?,
+                resource: Url::parse(&endpoint)?,
+            })),
+            download: Url::parse(&endpoint)?,
+            access_key: "fixture".into(),
+            secret: hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"fixture secret"),
+            bucket: "fixture".into(),
+        }),
+        &|key| (key == "POCKET_NATIVE_STORAGE_BATCH_MIB").then(|| "1".into()),
+    )
+}
+
 #[tokio::test]
 async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
     let temp = TempState(std::env::temp_dir().join(format!("native-storage-{}", Uuid::new_v4())));
@@ -176,26 +199,7 @@ async fn resumes_an_existing_node_object_after_state_import() -> Result<()> {
         }
         Ok::<_, std::io::Error>(())
     });
-    let endpoint = format!("http://{address}");
-    let http = Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(2))
-        .build()?;
-    let storage = Storage::new(
-        Provider::Qiniu(Qiniu {
-            http,
-            upload_override: None,
-            endpoints: OnceCell::new_with(Some(Endpoints {
-                upload: Url::parse(&endpoint)?,
-                resource: Url::parse(&endpoint)?,
-            })),
-            download: Url::parse(&endpoint)?,
-            access_key: "fixture".into(),
-            secret: hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"fixture secret"),
-            bucket: "fixture".into(),
-        }),
-        &|key| (key == "POCKET_NATIVE_STORAGE_BATCH_MIB").then(|| "1".into()),
-    )?;
+    let storage = fixture_storage(address)?;
     let request = json!({"objectId":object});
     let resume = |owner: String, scope: Scope| {
         storage.handle(
@@ -387,6 +391,174 @@ async fn discovers_provider_endpoints_and_requires_a_private_bucket() -> Result<
     qiniu.upload_override = Some(Url::parse("https://uploads.example.org/")?);
     let overridden = qiniu.discover(&control).await?;
     assert_eq!(overridden.upload.as_str(), "https://uploads.example.org/");
+    fixture.await??;
+    Ok(())
+}
+
+#[test]
+fn upgrades_a_legacy_grant_deadline_exactly_once() -> Result<()> {
+    let mut db = rusqlite::Connection::open_in_memory()?;
+    db.execute_batch(
+        "CREATE TABLE native_storage_objects (
+           id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, transfer TEXT NOT NULL,
+           indices TEXT NOT NULL, download INTEGER NOT NULL, expires INTEGER NOT NULL
+         );",
+    )?;
+    let grant = now() - 300_000;
+    db.execute(
+        "INSERT INTO native_storage_objects VALUES ('old','phone','thread','transfer','[0]',0,?1)",
+        [grant],
+    )?;
+    for _ in 0..2 {
+        initialize_receipts(&mut db)?;
+        let receipt = db.query_row(
+            "SELECT expires,grant_expires,indices FROM native_storage_objects WHERE id='old'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        assert_eq!(
+            receipt,
+            (grant + OBJECT_TTL_MS - GRANT_TTL_MS, grant, "[0]".into())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn imports_after_grant_expiry_and_retries_cleanup() -> Result<()> {
+    let temp = TempState(std::env::temp_dir().join(format!("native-receipts-{}", Uuid::new_v4())));
+    private_directory(&temp.0)?;
+    let device = "old-device";
+    let scope = Scope::codex(crate::codex_backend::ID, Uuid::new_v4());
+    let bytes = b"uploaded before the phone grant expired";
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    let mut store = Store::open(&temp.0)?;
+    let manifest = store.begin_upload(
+        device,
+        &scope,
+        json!({"name":"new.txt","size":bytes.len(),"sha256":hash,"hashes":[hash]}),
+        Some(1),
+    )?;
+    let transfer = Uuid::parse_str(manifest["id"].as_str().unwrap())?;
+    let db = Arc::new(Mutex::new(store));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let storage = fixture_storage(listener.local_addr()?)?;
+    let grant = storage
+        .handle(
+            db.clone(),
+            device.into(),
+            scope.clone(),
+            transfer,
+            "storage-plan",
+            &json!({"indices":[0]}),
+        )
+        .await?;
+    let object = Uuid::parse_str(grant["objectId"].as_str().unwrap())?;
+    let stale = Uuid::new_v4();
+    {
+        let store = db.lock().unwrap();
+        let duration = store.db.query_row(
+            "SELECT expires-grant_expires FROM native_storage_objects WHERE id=?1",
+            [object.to_string()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(duration, OBJECT_TTL_MS - GRANT_TTL_MS);
+        store.db.execute(
+            "UPDATE native_storage_objects SET grant_expires=?1 WHERE id=?2",
+            params![now() - 1, object.to_string()],
+        )?;
+        store.record_storage_object(stale, device, &scope, transfer, &[0], false)?;
+        store.db.execute(
+            "UPDATE native_storage_objects SET expires=?1 WHERE id=?2",
+            params![now() - 1, stale.to_string()],
+        )?;
+    }
+    drop(db);
+    let db = Arc::new(Mutex::new(Store::open(&temp.0)?));
+    let key = storage.inner.key(object);
+    let delete = |id| {
+        format!(
+            "POST /delete/{} ",
+            URL_SAFE.encode(format!("fixture:{}", storage.inner.key(id))),
+        )
+    };
+    let delete_stale = delete(stale);
+    let delete_imported = delete(object);
+    let ciphertext = encrypt(&manifest, 0, bytes.to_vec())?;
+    let fixture = tokio::spawn(async move {
+        let size = ciphertext.len();
+        for attempt in 0..4 {
+            let (socket, _) = listener.accept().await?;
+            let mut socket = BufReader::new(socket);
+            let mut first = String::new();
+            socket.read_line(&mut first).await?;
+            let mut line = String::new();
+            let mut range = String::new();
+            loop {
+                line.clear();
+                if socket.read_line(&mut line).await? == 0 || line == "\r\n" {
+                    break;
+                }
+                if line.to_ascii_lowercase().starts_with("range: ") {
+                    range = line["range: ".len()..].trim().to_owned();
+                }
+            }
+            match attempt {
+                0 | 1 => assert!(first.starts_with(&delete_stale)),
+                2 => {
+                    assert!(first.starts_with(&format!("GET /{key}?")));
+                    assert_eq!(range, format!("bytes=0-{}", size - 1));
+                }
+                _ => assert!(first.starts_with(&delete_imported)),
+            }
+            let response = match attempt {
+                0 => "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                2 => format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{size}\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n", size-1),
+                _ => "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".into(),
+            };
+            socket.write_all(response.as_bytes()).await?;
+            if attempt == 2 {
+                socket.write_all(&ciphertext).await?;
+            }
+        }
+        Ok::<_, std::io::Error>(())
+    });
+    let count = || {
+        db.lock()
+            .unwrap()
+            .db
+            .query_row("SELECT count(*) FROM native_storage_objects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+    };
+    storage.remove_expired_batch(&db, "").await?;
+    assert_eq!(count()?, 2);
+    storage.remove_expired_batch(&db, "").await?;
+    assert_eq!(count()?, 1);
+    let imported = storage
+        .handle(
+            db.clone(),
+            device.into(),
+            scope.clone(),
+            transfer,
+            "storage-import",
+            &json!({"objectId":object}),
+        )
+        .await?;
+    assert_eq!(imported, json!({"ok":true}));
+    assert_eq!(count()?, 0);
+    let complete =
+        db.lock()
+            .unwrap()
+            .file_request(device, &scope, transfer, "finish", None, &[])?;
+    assert_eq!(std::fs::read(complete["path"].as_str().unwrap())?, bytes);
     fixture.await??;
     Ok(())
 }

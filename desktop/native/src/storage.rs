@@ -29,8 +29,13 @@ use uuid::Uuid;
 mod discovery;
 mod import;
 mod plugin;
+mod receipts;
 use discovery::Endpoints;
 use plugin::NativeStorage;
+pub(crate) use receipts::initialize as initialize_receipts;
+
+const GRANT_TTL_MS: i64 = 900_000;
+const OBJECT_TTL_MS: i64 = 86_400_000;
 
 #[derive(Clone)]
 pub struct Storage {
@@ -308,31 +313,9 @@ impl Storage {
             } else {
                 Some(self.inner.provider.plan(&key, size).await?)
             };
-            {
-                let store = db.lock().expect("database mutex poisoned");
-                store.db.execute(
-                    "DELETE FROM native_storage_objects WHERE expires<=?1",
-                    [now()],
-                )?;
-                let count: i64 = store.db.query_row(
-                    "SELECT count(*) FROM native_storage_objects WHERE device=?1",
-                    [&device],
-                    |row| row.get(0),
-                )?;
-                ensure!(count < 32, "待处理对象存储批次过多");
-                store.db.execute(
-                    "INSERT INTO native_storage_objects VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                    params![
-                        object.to_string(),
-                        device,
-                        scope.key(),
-                        id.to_string(),
-                        serde_json::to_string(&indices)?,
-                        complete,
-                        now() + 900_000
-                    ],
-                )?;
-            }
+            db.lock()
+                .expect("database mutex poisoned")
+                .record_storage_object(object, &device, &scope, id, &indices, complete)?;
             if let Some(grant) = grant {
                 return Ok(json!({"objectId":object,"upload":grant}));
             }
@@ -355,7 +338,11 @@ impl Storage {
                 ciphertext.extend(block);
             }
             self.inner.provider.put(&key, ciphertext).await?;
-            let url = self.inner.provider.download_url(&key, 900).await?;
+            let url = self
+                .inner
+                .provider
+                .download_url(&key, GRANT_TTL_MS / 1_000)
+                .await?;
             return Ok(
                 json!({"objectId":object,"url":url.as_str(), "indices":indices, "size":size}),
             );
@@ -509,7 +496,7 @@ impl Qiniu {
 
     fn token(&self, key: &str, size: usize) -> Result<String> {
         let policy = json!({"scope":format!("{}:{key}",self.bucket),"insertOnly":1,
-            "deadline":now()/1000+900,"fsizeMin":size,"fsizeLimit":size,"deleteAfterDays":1});
+            "deadline":(now() + GRANT_TTL_MS)/1000,"fsizeMin":size,"fsizeLimit":size,"deleteAfterDays":1});
         let policy = URL_SAFE.encode(serde_json::to_vec(&policy)?);
         Ok(format!("{}:{policy}", self.sign(&policy)))
     }

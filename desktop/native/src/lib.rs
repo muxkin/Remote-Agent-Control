@@ -153,6 +153,9 @@ pub fn start() -> Result<()> {
         config.plugins = plugins;
         config.direct = transports.direct;
         config.storage = transports.storage;
+        if let Some(storage) = config.storage.clone() {
+            handle.spawn(storage.cleanup_expired(db.clone()));
+        }
         let origin = config.origin.origin().ascii_serialization();
         let receiver = commands.take().context("连接已初始化")?;
         let gate = update::UpdateGate::default();

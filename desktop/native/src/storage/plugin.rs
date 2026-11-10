@@ -1,4 +1,4 @@
-use super::{now, origin};
+use super::{GRANT_TTL_MS, OBJECT_TTL_MS, now, origin};
 use crate::{plugin_catalog::Catalog, plugin_host::Host, state::private_file};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -118,7 +118,7 @@ impl NativeStorage {
             .host
             .call(
                 "storage/createUpload",
-                json!({"key":key,"size":size,"expiresAt":now() + 900_000}),
+                json!({"key":key,"size":size,"expiresAt":now() + GRANT_TTL_MS}),
                 Duration::from_secs(15),
             )
             .await?;
@@ -158,7 +158,7 @@ impl NativeStorage {
                 json!({
                     "key":key,"file":staged.1,"contentType":"application/octet-stream",
                     "cacheControl":"private, max-age=0","allowedOrigin":self.allowed_origin,
-                    "expiresAt":now() + 86_400_000
+                    "expiresAt":now() + OBJECT_TTL_MS
                 }),
                 Duration::from_secs(120),
             )

@@ -74,9 +74,28 @@ const inlineSource = 'data:image/png;base64,' + inlineBytes.toString('base64');
 const inlineRef = 'pocket-inline:' + createHash('sha256').update(inlineSource).digest('hex') + '.png';
 const projectPath = join(directory, 'project');
 const projectFile = join(projectPath, 'report.txt');
+const projectPdf = 'main.pdf';
+const projectPng = 'wphase-ce-search-page-5.png';
+const pdfObjects = [
+  '<< /Type /Catalog /Pages 2 0 R >>',
+  '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+  '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>',
+];
+let pdf = '%PDF-1.4\n';
+const offsets = pdfObjects.map((body, index) => {
+  const start = pdf.length;
+  pdf += `${index + 1} 0 obj\n${body}\nendobj\n`;
+  return String(start).padStart(10, '0') + ' 00000 n \n';
+});
+const xref = pdf.length;
+pdf += `xref\n0 4\n0000000000 65535 f \n${offsets.join('')}trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+const pdfBytes = Buffer.from(pdf);
+const pngBytes = await readFile('src/web/public/app-icon-32.png');
 const unrelatedFile = join(projectPath, 'unrelated.txt');
 await mkdir(projectPath, { recursive: true });
 await writeFile(projectFile, 'project attachment');
+await writeFile(join(projectPath, projectPdf), pdfBytes);
+await writeFile(join(projectPath, projectPng), pngBytes);
 await writeFile(unrelatedFile, 'unmentioned file');
 await mkdir(join(legacyState, 'uploads', legacyId), { mode: 0o700, recursive: true });
 await writeFile(legacyPath, legacyBytes, { mode: 0o600 });
@@ -172,6 +191,7 @@ legacyRecord.payload.content[0].text +=
   '\n\n手机上传的附件（保留原始文件）：\n' + JSON.stringify({ name: legacyName, path: legacyPath });
 const historicalReply =
   ':codex-file-citation{path="./report.txt" purpose="open"}\n' +
+  `[${projectPdf}](sandbox:./${projectPdf})\n![${projectPng}](sandbox:./${projectPng})\n` +
   '`:codex-file-citation{path="./unrelated.txt"}`\n' +
   'Earlier history. '.repeat(800);
 const assistantRecord = {
@@ -1861,13 +1881,16 @@ try {
     const describe = (path: string) =>
       session.rpc<FileManifest>(apiCall(`/threads/${THREAD}/media`, 'POST', { path }));
     await assert.rejects(describe(unpaired), /没有可恢复的数据/);
-    for (const [path, expected] of [
+    for (const [path, expected, mime] of [
       [legacyPath, legacyBytes],
       [inlineRef, inlineBytes],
       [projectFile, Buffer.from('project attachment')],
+      [`sandbox:./${projectPdf}`, pdfBytes, 'application/pdf'],
+      [`sandbox:./${projectPng}`, pngBytes, 'image/png'],
       ...viewed.map(({ path, bytes }) => [path, bytes] as const),
     ] as const) {
       const manifest = await describe(path);
+      if (mime) assert.equal(manifest.mime, mime);
       const data = await session.request('file', {
         backendId: 'codex-local',
         threadId: THREAD,
