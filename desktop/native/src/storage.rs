@@ -173,7 +173,7 @@ impl Storage {
         &self,
         db: Database,
         device: String,
-        thread: Uuid,
+        scope: crate::files::Scope,
         id: Uuid,
         action: &str,
         request: &Value,
@@ -196,7 +196,7 @@ impl Storage {
             let (manifest, complete) = db
                 .lock()
                 .expect("database mutex poisoned")
-                .storage_manifest(&device, thread, id)?;
+                .storage_manifest(&device, &scope, id)?;
             let size = indices.iter().try_fold(0, |total, &index| {
                 Ok::<_, anyhow::Error>(total + block_length(&manifest, index)? + aead::MAX_TAG_LEN)
             })?;
@@ -218,7 +218,7 @@ impl Storage {
                     params![
                         object.to_string(),
                         device,
-                        thread.to_string(),
+                        scope.key(),
                         id.to_string(),
                         serde_json::to_string(&indices)?,
                         complete,
@@ -236,10 +236,11 @@ impl Storage {
                 let db = db.clone();
                 let device = device.clone();
                 let manifest = manifest.clone();
+                let scope = scope.clone();
                 let block = tokio::task::spawn_blocking(move || {
                     let plain = db.lock().expect("database mutex poisoned").read_upload(
                         &device,
-                        thread,
+                        &scope,
                         id,
                         index as u64,
                     )?;
@@ -257,7 +258,7 @@ impl Storage {
         let object = Uuid::parse_str(request["objectId"].as_str().context("对象编号无效")?)?;
         let (indices, download) = db.lock().expect("database mutex poisoned").db.query_row(
             "SELECT indices,download FROM native_storage_objects WHERE id=?1 AND device=?2 AND thread=?3 AND transfer=?4 AND expires>?5",
-            params![object.to_string(), device, thread.to_string(), id.to_string(), now()],
+            params![object.to_string(), device, scope.key(), id.to_string(), now()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         ).optional()?.context("对象不属于此附件或已过期")?;
         let key = self.inner.key(object);
@@ -267,7 +268,7 @@ impl Storage {
                 let (manifest, _) = db
                     .lock()
                     .expect("database mutex poisoned")
-                    .storage_manifest(&device, thread, id)?;
+                    .storage_manifest(&device, &scope, id)?;
                 let size = indices.iter().try_fold(0, |total, &index| {
                     Ok::<_, anyhow::Error>(
                         total + block_length(&manifest, index)? + aead::MAX_TAG_LEN,
@@ -299,7 +300,7 @@ impl Storage {
                         let plain = decrypt(&manifest, index, encrypted[offset..end].to_vec())?;
                         db.lock().expect("database mutex poisoned").file_request(
                             &device,
-                            thread,
+                            &scope,
                             id,
                             "write",
                             Some(index as u64),

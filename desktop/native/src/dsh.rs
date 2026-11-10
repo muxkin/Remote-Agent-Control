@@ -756,6 +756,9 @@ impl Adapter for Dsh {
     fn id(&self) -> &str {
         &self.id
     }
+    fn uploads_enabled(&self) -> bool {
+        !self.read_only
+    }
     async fn info(&self) -> Value {
         let connected = self.authenticate().await.is_ok();
         let mut capabilities = serde_json::Map::new();

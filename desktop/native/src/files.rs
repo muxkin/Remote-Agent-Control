@@ -15,6 +15,24 @@ use uuid::Uuid;
 
 pub const BLOCK: usize = 1024 * 1024;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Scope(String);
+
+impl Scope {
+    pub(crate) fn codex(thread: Uuid) -> Self {
+        // Keep the original SQLite key so completed and resumable Codex uploads survive.
+        Self(thread.to_string())
+    }
+
+    pub(crate) fn plugin(backend: &str, thread: &str) -> Self {
+        Self(format!("{backend}/{thread}"))
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Spec {
@@ -64,14 +82,14 @@ pub struct Download {
     document: Value,
     expires: i64,
     device: String,
-    thread: Uuid,
+    scope: Scope,
 }
 
 impl Download {
     pub fn prepare(
         mut source: crate::history_media::Source,
         device: String,
-        thread: Uuid,
+        scope: Scope,
         batch: Option<usize>,
     ) -> Result<Self> {
         let info = source.file.metadata()?;
@@ -120,12 +138,12 @@ impl Download {
             document,
             expires: now() + 1_800_000,
             device,
-            thread,
+            scope,
         })
     }
 
-    fn allowed(&self, device: &str, thread: Uuid) -> bool {
-        self.device == device && self.thread == thread && self.expires > now()
+    fn allowed(&self, device: &str, scope: &Scope) -> bool {
+        self.device == device && &self.scope == scope && self.expires > now()
     }
 }
 
@@ -140,7 +158,7 @@ impl Store {
     pub fn begin_upload(
         &mut self,
         device: &str,
-        thread: Uuid,
+        scope: &Scope,
         body: Value,
         storage_batch: Option<usize>,
     ) -> Result<Value> {
@@ -204,7 +222,7 @@ impl Store {
         })?;
         self.db.execute(
             "INSERT INTO native_uploads (id,device,thread,manifest,present,expires) VALUES (?1,?2,?3,?4,'[]',?5)",
-            params![id.to_string(), device, thread.to_string(), manifest.to_string(), now() + 86_400_000],
+            params![id.to_string(), device, scope.key(), manifest.to_string(), now() + 86_400_000],
         )?;
         Ok(manifest)
     }
@@ -212,13 +230,13 @@ impl Store {
     pub fn file_request(
         &self,
         device: &str,
-        thread: Uuid,
+        scope: &Scope,
         id: Uuid,
         action: &str,
         index: Option<u64>,
         bytes: &[u8],
     ) -> Result<Value> {
-        let mut upload = self.upload(device, thread, id)?;
+        let mut upload = self.upload(device, scope, id)?;
         let hashes = upload.document["hashes"]
             .as_array()
             .context("附件摘要无效")?;
@@ -284,8 +302,8 @@ impl Store {
         }
     }
 
-    pub fn attachment(&self, device: &str, thread: Uuid, id: Uuid) -> Result<Attachment> {
-        let upload = self.upload(device, thread, id)?;
+    pub fn attachment(&self, device: &str, scope: &Scope, id: Uuid) -> Result<Attachment> {
+        let upload = self.upload(device, scope, id)?;
         ensure!(upload.complete, "附件尚未传完");
         Ok(Attachment {
             name: upload.document["name"]
@@ -296,7 +314,7 @@ impl Store {
         })
     }
 
-    pub fn describe_upload(&self, device: &str, thread: Uuid, reference: &Path) -> Result<Value> {
+    pub fn describe_upload(&self, device: &str, scope: &Scope, reference: &Path) -> Result<Value> {
         let directory = reference.parent().context("附件地址无效")?;
         let id = Uuid::parse_str(
             directory
@@ -304,7 +322,7 @@ impl Store {
                 .and_then(|name| name.to_str())
                 .context("附件地址无效")?,
         )?;
-        let upload = self.upload(device, thread, id)?;
+        let upload = self.upload(device, scope, id)?;
         ensure!(
             upload.complete && upload.path == reference,
             "附件不属于当前设备和会话"
@@ -328,33 +346,33 @@ impl Store {
         Ok(manifest)
     }
 
-    pub fn storage_manifest(&self, device: &str, thread: Uuid, id: Uuid) -> Result<(Value, bool)> {
+    pub fn storage_manifest(&self, device: &str, scope: &Scope, id: Uuid) -> Result<(Value, bool)> {
         if let Some(item) = self
             .downloads
             .get(&id)
-            .filter(|item| item.allowed(device, thread))
+            .filter(|item| item.allowed(device, scope))
         {
             return Ok((item.document.clone(), true));
         }
-        let upload = self.upload(device, thread, id)?;
+        let upload = self.upload(device, scope, id)?;
         Ok((upload.document, upload.complete))
     }
 
     pub fn read_upload(
         &mut self,
         device: &str,
-        thread: Uuid,
+        scope: &Scope,
         id: Uuid,
         index: u64,
     ) -> Result<Vec<u8>> {
         if let Some(item) = self
             .downloads
             .get_mut(&id)
-            .filter(|item| item.allowed(device, thread))
+            .filter(|item| item.allowed(device, scope))
         {
             return read_block(&mut item.file, &item.document, index);
         }
-        let upload = self.upload(device, thread, id)?;
+        let upload = self.upload(device, scope, id)?;
         ensure!(upload.complete, "附件尚未传完");
         read_block(
             &mut private_file(&upload.path, false)?,
@@ -363,10 +381,10 @@ impl Store {
         )
     }
 
-    fn upload(&self, device: &str, thread: Uuid, id: Uuid) -> Result<Upload> {
+    fn upload(&self, device: &str, scope: &Scope, id: Uuid) -> Result<Upload> {
         let (document, present, complete): (String, String, bool) = self.db.query_row(
             "SELECT manifest,present,complete FROM native_uploads WHERE id=?1 AND device=?2 AND thread=?3 AND (complete=1 OR expires>?4)",
-            params![id.to_string(), device, thread.to_string(), now()],
+            params![id.to_string(), device, scope.key(), now()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional()?.context("附件不属于此会话或已过期")?;
         let mut document: Value = serde_json::from_str(&document)?;

@@ -465,6 +465,23 @@ try {
       await watch(instance.id);
     }
 
+    const attachment = Buffer.from('staged DSH attachment');
+    const digest = createHash('sha256').update(attachment).digest('hex');
+    const uploadSpec = { name: 'scope.txt', size: attachment.length, sha256: digest, hashes: [digest] };
+    const upload = await rpc<{ id: string }>(one.id, '/threads/shared/uploads', 'POST', uploadSpec);
+    const file = { fileId: upload.id, backendId: one.id, threadId: 'shared' };
+    await assert.rejects(session.request('file', { ...file, action: 'missing', backendId: two.id }));
+    await assert.rejects(session.request('file', { ...file, action: 'missing', threadId: 'different' }));
+    await assert.rejects(session.request('file', { ...file, action: 'write', index: 0 }, Uint8Array.of(0)));
+    await session.request('file', { ...file, action: 'write', index: 0 }, attachment);
+    assert.deepEqual((await session.request('file', { ...file, action: 'missing' })).value.missing, []);
+    await session.request('file', { ...file, action: 'finish' });
+    assert.deepEqual(
+      Buffer.from((await session.request('file', { ...file, action: 'read', index: 0 })).bytes!),
+      attachment,
+    );
+    await assert.rejects(session.request('file', { ...file, action: 'read', index: 0, backendId: two.id }));
+
     const requestId = randomUUID();
     const send = { requestId, text: 'first' };
     await rpc(one.id, '/threads/shared/messages', 'POST', send);
@@ -749,6 +766,12 @@ try {
     assert.equal(views.get(one.id)?.thread.canSend, false);
     assert.equal((await rpc<{ writesEnabled: boolean }>(one.id, '/status')).writesEnabled, false);
     assert.deepEqual((await rpc<{ actions: string[] }>(one.id, '/threads/shared/controls')).actions, []);
+    await assert.rejects(rpc(one.id, '/threads/shared/uploads', 'POST', uploadSpec));
+    await assert.rejects(session.request('file', { ...file, action: 'finish' }));
+    assert.deepEqual(
+      Buffer.from((await session.request('file', { ...file, action: 'read', index: 0 })).bytes!),
+      attachment,
+    );
     const blocked = randomUUID();
     const before = one.calls.length;
     await rpc(one.id, '/threads/shared/messages', 'POST', {
@@ -764,7 +787,7 @@ try {
     session.close();
   }
   console.log(
-    'Rust DSH: isolated instances, live sync, model/permission/preset/plan controls, configured creation, queue, replay, uncertain restart recovery and migrated read-only policy passed.',
+    'Rust DSH: isolated instances and staged attachments, live sync, model/permission/preset/plan controls, configured creation, queue, replay, uncertain restart recovery and migrated read-only policy passed.',
   );
 } finally {
   await stop();

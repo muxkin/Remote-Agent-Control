@@ -3,7 +3,7 @@ use crate::{
     codex::History,
     codex_live::{Action, Desktop, Outcome, Thread},
     conversations,
-    files::{Attachment, Download},
+    files::{Attachment, Download, Scope},
     gateway::{Database, Packet, reply, reply_packet},
     history_media,
     plugins::{Adapter, Control, CreationSettings, Delivery, ModelSettings, Subscription, Write},
@@ -205,15 +205,16 @@ impl DeviceSession {
                     let Some(Packet { value: request, bytes }) = request else { return Ok(()) };
                     self.ensure_device()?;
                     let Some(id) = request["id"].as_str().and_then(|value| Uuid::parse_str(value).ok()) else { continue };
-                    if request["type"] == "file" && codex(&request) && bytes.is_empty()
+                    if request["type"] == "file" && bytes.is_empty()
                         && matches!(request["action"].as_str(), Some("storage-plan" | "storage-import" | "storage-done"))
                     {
                         if let Some(storage) = self.backends.storage.clone().filter(|_| storage_jobs.len() < 2) {
                             let db = self.db.clone();
                             let device = self.device.id.clone();
+                            let scope = self.file_scope(&request);
                             storage_jobs.spawn(async move {
                                 let result = async {
-                                    storage.handle(db, device, thread_id(&request["threadId"])?,
+                                    storage.handle(db, device, scope?,
                                         thread_id(&request["fileId"])?, request["action"].as_str().unwrap(), &request).await
                                 }.await;
                                 (id, result)
@@ -226,7 +227,7 @@ impl DeviceSession {
                     let mut reply_bytes = Vec::new();
                     let result = match request["type"].as_str() {
                         Some("rpc") if !self.bulk && bytes.is_empty() => self.rpc(request["call"].clone()).await,
-                        Some("file") if codex(&request) => self.file(request.clone(), bytes).await.map(|(value, bytes)| {
+                        Some("file") => self.file(request.clone(), bytes).await.map(|(value, bytes)| {
                             reply_bytes = bytes;
                             Some(value)
                         }),
@@ -468,9 +469,43 @@ impl DeviceSession {
         Ok(())
     }
 
+    fn file_scope(&self, request: &Value) -> Result<Scope> {
+        if codex(request) {
+            return Ok(Scope::codex(thread_id(&request["threadId"])?));
+        }
+        let plugin = request["backendId"]
+            .as_str()
+            .and_then(|id| self.backends.plugins.get(id))
+            .context("附件所属实例不可用")?;
+        let thread = plugin_thread(&request["threadId"])?;
+        ensure!(
+            plugin.uploads_enabled()
+                || matches!(request["action"].as_str(), Some("read" | "missing")),
+            "附件写入不可用"
+        );
+        Ok(Scope::plugin(plugin.id(), thread))
+    }
+
+    async fn begin_upload(&self, scope: Scope, body: Value) -> Result<Option<Value>> {
+        let db = self.db.clone();
+        let device = self.device.id.clone();
+        let batch = self
+            .backends
+            .storage
+            .as_ref()
+            .map(crate::storage::Storage::batch);
+        tokio::task::spawn_blocking(move || {
+            db.lock()
+                .expect("database mutex poisoned")
+                .begin_upload(&device, &scope, body, batch)
+                .map(Some)
+        })
+        .await?
+    }
+
     async fn file(&self, request: Value, bytes: Vec<u8>) -> Result<(Value, Vec<u8>)> {
         let id = thread_id(&request["fileId"])?;
-        let thread = thread_id(&request["threadId"])?;
+        let scope = self.file_scope(&request)?;
         let db = self.db.clone();
         let device = self.device.id.clone();
         tokio::task::spawn_blocking(move || {
@@ -481,13 +516,13 @@ impl DeviceSession {
                 let index = request["index"].as_u64().context("附件块不存在")?;
                 return Ok((
                     json!({"index":index}),
-                    store.read_upload(&device, thread, id, index)?,
+                    store.read_upload(&device, &scope, id, index)?,
                 ));
             }
             Ok((
                 store.file_request(
                     &device,
-                    thread,
+                    &scope,
                     id,
                     action,
                     request["index"].as_u64(),
@@ -690,6 +725,17 @@ impl DeviceSession {
                         .recent_operations_for(plugin.id(), &self.device.id, thread)?;
                     Ok(Some(json!(operations)))
                 }
+                "upload.begin" => {
+                    let thread = plugin_thread(&call["params"]["id"])?;
+                    let writable = self
+                        .plugin_watches
+                        .get(&(plugin.id().to_owned(), thread.to_owned()))
+                        .and_then(|watch| watch.live.0.borrow().clone())
+                        .is_some_and(|view| view.thread["synchronized"] == true);
+                    ensure!(writable && plugin.uploads_enabled(), "请先同步可写会话");
+                    self.begin_upload(Scope::plugin(plugin.id(), thread), call["body"].clone())
+                        .await
+                }
                 "message.send" | "turn.steer" | "turn.interrupt" | "thread.rename"
                 | "thread.create" | "queue.add" | "queue.remove" | "settings.update"
                 | "control.execute" => self.plugin_write(plugin, method, &call).map(Some),
@@ -763,9 +809,10 @@ impl DeviceSession {
                     .as_ref()
                     .map(crate::storage::Storage::batch);
                 tokio::task::spawn_blocking(move || {
+                    let scope = Scope::codex(thread);
                     let native = db.lock().expect("database mutex poisoned").describe_upload(
                         &device,
-                        thread,
+                        &scope,
                         std::path::Path::new(&path),
                     );
                     if let Ok(mut manifest) = native {
@@ -782,7 +829,7 @@ impl DeviceSession {
                         &path,
                         view.as_deref(),
                     )?;
-                    let download = Download::prepare(source, device, thread, batch)?;
+                    let download = Download::prepare(source, device, scope, batch)?;
                     db.lock()
                         .expect("database mutex poisoned")
                         .register_download(download)
@@ -793,20 +840,8 @@ impl DeviceSession {
             "upload.begin" if self.backends.desktop.is_some() => {
                 let thread = thread_id(&call["params"]["id"])?;
                 ensure!(self.watches.contains_key(&thread), "请先打开会话");
-                let db = self.db.clone();
-                let device = self.device.id.clone();
-                let batch = self
-                    .backends
-                    .storage
-                    .as_ref()
-                    .map(crate::storage::Storage::batch);
-                tokio::task::spawn_blocking(move || {
-                    db.lock()
-                        .expect("database mutex poisoned")
-                        .begin_upload(&device, thread, call["body"].clone(), batch)
-                        .map(Some)
-                })
-                .await?
+                self.begin_upload(Scope::codex(thread), call["body"].clone())
+                    .await
             }
             "operation.read" => {
                 let id = thread_id(&call["params"]["id"])?;
@@ -1000,8 +1035,9 @@ impl DeviceSession {
         let thread_id = thread_id(&call["params"]["id"])?;
         let (request, mut action, skills, plugins) = action(method, &call["body"], |ids| {
             let store = self.db.lock().expect("database mutex poisoned");
+            let scope = Scope::codex(thread_id);
             ids.iter()
-                .map(|id| store.attachment(&self.device.id, thread_id, *id))
+                .map(|id| store.attachment(&self.device.id, &scope, *id))
                 .collect()
         })?;
         if let Action::Send { tools, .. } = &mut action

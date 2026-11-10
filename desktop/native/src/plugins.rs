@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[async_trait]
 pub(crate) trait Adapter: Send + Sync {
     fn id(&self) -> &str;
+    fn uploads_enabled(&self) -> bool;
     async fn info(&self) -> Value;
     async fn status(&self) -> Value;
     async fn read(&self, method: &str, params: &Value, query: &Value) -> Result<Option<Value>>;
