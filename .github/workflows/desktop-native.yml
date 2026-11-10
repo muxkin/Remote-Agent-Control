@@ -133,10 +133,12 @@ jobs:
       - name: Verify the signed HTTPS update through the installed adapter
         shell: bash
         run: node scripts/desktop/native-rust-update-smoke.mjs dist/desktop-native-preview desktop/native/target/release/${{ matrix.binary }}
-      - name: Build the console binary for protocol verification
+      - name: Build the console binary and check Windows update rollback
         if: runner.os == 'Windows'
         working-directory: desktop/native
-        run: cargo build --release --locked --no-default-features
+        run: |
+          cargo build --release --locked --no-default-features
+          cargo test --release --locked --no-default-features --lib windows_update_recovers_the_old_executable_and_bundle_after_a_partial_install
       - name: Verify the Rust gateway and Named Pipe on Windows
         if: runner.os == 'Windows'
         env:

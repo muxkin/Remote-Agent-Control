@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.34 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.35 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 混合版安装包附带 Node 和 Python。纯 Rust 安装器的发布验收覆盖 Linux x64、Windows x64、macOS Apple Silicon 和 macOS Intel。
 
@@ -97,6 +97,8 @@ DSH 技能选择使用会话的原生目录，发送前会重新验证。会话�
 偏好保存在原生状态目录。首次使用时可从旧 Electron 的 `settings.json` 导入更新开关和独立来源，独立来源自动补上 `native/rust/`。自定义状态目录可用 `POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS` 显式指定旧文件。尚未保存偏好时，`POCKET_NATIVE_UPDATE_BASE_URL` 可指定初始来源。`POCKET_NATIVE_UPDATES=0` 在进程启动时关闭更新。
 
 更新会验证签名清单的运行时、平台、架构和版本，再下载并校验长度与 SHA-512。手机会话、直连和正在分发的写操作结束后，适配器才交接给独立的 Rust 安装进程。Linux DEB 由 apt 和 PolicyKit 授权。Windows 和 macOS 可使用发布密钥验签的安装器，macOS 同时验证应用代码签名并由系统打开更新后的应用。
+
+Windows 更新失败时会一起恢复旧主程序和随包插件。用户的私有实例配置和插件注册表位于独立状态目录。
 
 跨平台 CI 在隔离的运行器中使用一次性发布密钥和本地 HTTPS 源，验证旧版适配器可下载并应用真实安装包。验收覆盖拒绝无效证书、错误签名、损坏下载和重定向，等待活动连接退出，以及保留主机身份、已配对设备和插件配置。一次性密钥只用于验收构建。
 

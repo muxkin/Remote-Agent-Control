@@ -85,27 +85,49 @@ fn replace_windows(executable: &Path, artifact: &Path, release_key: bool) -> Res
             .status()?;
         ensure!(status.success(), "Windows 发布者签名无效");
     }
+    replace_windows_files(executable, || command(artifact, &["/S".as_ref()]))
+}
+
+fn replace_windows_files(executable: &Path, install: impl FnOnce() -> Result<()>) -> Result<()> {
+    const FILES: [&str; 2] = ["official-plugins", "agent-space-native.exe"];
     let directory = executable.parent().context("安装位置无效")?;
+    ensure!(executable.is_file(), "安装位置缺少适配器");
     let backup = tempfile::Builder::new()
         .prefix(".previous-")
         .tempdir_in(directory)?;
-    let previous = backup.path().join("agent-space-native.exe");
-    fs::rename(executable, &previous)?;
-    let result = command(artifact, &["/S".as_ref()]).and_then(|_| {
+    let mut moved = [false; FILES.len()];
+    let mut installing = false;
+    let result = (|| -> Result<()> {
+        for (index, name) in FILES.iter().enumerate() {
+            let path = directory.join(name);
+            if path.try_exists()? {
+                fs::rename(path, backup.path().join(name))?;
+                moved[index] = true;
+            }
+        }
+        installing = true;
+        install()?;
         ensure!(executable.is_file(), "安装后缺少适配器");
         Ok(())
-    });
+    })();
     if result.is_err() {
-        let restore = (|| -> std::io::Result<()> {
-            if executable.exists() {
-                fs::remove_file(executable)?;
+        let restore = (|| -> Result<()> {
+            for (index, name) in FILES.iter().enumerate() {
+                let path = directory.join(name);
+                if installing && path.try_exists()? {
+                    fs::rename(&path, backup.path().join(format!("failed-{name}")))?;
+                }
+                if moved[index] {
+                    fs::rename(backup.path().join(name), path)?;
+                }
             }
-            fs::rename(previous, executable)
+            Ok(())
         })();
-        if restore.is_err() {
-            let _ = backup.keep();
+        if let Err(error) = restore {
+            let recovery = backup.keep();
+            return Err(error)
+                .with_context(|| format!("恢复旧安装失败，文件保留在 {}", recovery.display()));
         }
-        restore?;
     }
     result
 }
@@ -202,4 +224,43 @@ pub(crate) fn restart(executable: &Path, directory: &Path) -> Result<()> {
     }
     child.spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_update_recovers_the_old_executable_and_bundle_after_a_partial_install() -> Result<()>
+    {
+        for had_bundle in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let executable = directory.path().join("agent-space-native.exe");
+            let bundle = directory.path().join("official-plugins");
+            let unrelated = directory.path().join("unrelated.txt");
+            fs::write(&executable, b"old executable")?;
+            fs::write(&unrelated, b"keep this")?;
+            if had_bundle {
+                fs::create_dir(&bundle)?;
+                fs::write(bundle.join("old-plugin"), b"previous bundle")?;
+            }
+
+            let failed = replace_windows_files(&executable, || {
+                fs::write(&executable, b"new executable")?;
+                fs::create_dir(&bundle)?;
+                fs::write(bundle.join("new-plugin"), b"partial new bundle")?;
+                anyhow::bail!("fixture installer failed")
+            });
+
+            assert!(failed.is_err());
+            assert_eq!(fs::read(&executable)?, b"old executable");
+            assert_eq!(fs::read(&unrelated)?, b"keep this");
+            assert_eq!(bundle.exists(), had_bundle);
+            assert!(!bundle.join("new-plugin").exists());
+            if had_bundle {
+                assert_eq!(fs::read(bundle.join("old-plugin"))?, b"previous bundle");
+            }
+        }
+        Ok(())
+    }
 }
