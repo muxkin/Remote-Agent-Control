@@ -1,6 +1,7 @@
 use crate::{
     files::BLOCK,
     gateway::Database,
+    history_media::legacy_upload_receipt,
     state::{now, private_file},
 };
 use anyhow::{Context, Result, ensure};
@@ -183,6 +184,16 @@ impl Storage {
             .jobs
             .try_acquire()
             .context("对象存储正在处理其他附件")?;
+        if matches!(action, "storage-plan" | "storage-import") {
+            let (db, device, scope) = (db.clone(), device.clone(), scope.clone());
+            let batch = self.batch();
+            tokio::task::spawn_blocking(move || {
+                db.lock()
+                    .expect("database mutex poisoned")
+                    .import_pending_upload(&device, &scope, id, Some(batch))
+            })
+            .await??;
+        }
         if action == "storage-plan" {
             let indices: Vec<usize> = serde_json::from_value(request["indices"].clone())?;
             ensure!(
@@ -256,15 +267,37 @@ impl Storage {
         }
 
         let object = Uuid::parse_str(request["objectId"].as_str().context("对象编号无效")?)?;
-        let (indices, download) = db.lock().expect("database mutex poisoned").db.query_row(
+        let native = db.lock().expect("database mutex poisoned").db.query_row(
             "SELECT indices,download FROM native_storage_objects WHERE id=?1 AND device=?2 AND thread=?3 AND transfer=?4 AND expires>?5",
             params![object.to_string(), device, scope.key(), id.to_string(), now()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
-        ).optional()?.context("对象不属于此附件或已过期")?;
+        ).optional()?;
         let key = self.inner.key(object);
+        let (indices, download) = match &native {
+            Some((indices, download)) => (serde_json::from_str(indices)?, *download),
+            None if action == "storage-import" => {
+                let indices = legacy_object_indices(&device, &scope, id, object, &key)?;
+                let missing = db.lock().expect("database mutex poisoned").file_request(
+                    &device,
+                    &scope,
+                    id,
+                    "missing",
+                    None,
+                    &[],
+                )?;
+                for &index in &indices {
+                    block_length(&missing["manifest"], index)?;
+                }
+                let missing: Vec<usize> = serde_json::from_value(missing["missing"].clone())?;
+                if indices.iter().all(|index| !missing.contains(index)) {
+                    return Ok(json!({"ok":true}));
+                }
+                (indices, false)
+            }
+            None => anyhow::bail!("对象不属于此附件或已过期"),
+        };
         match action {
             "storage-import" if !download => {
-                let indices: Vec<usize> = serde_json::from_str(&indices)?;
                 let (manifest, _) = db
                     .lock()
                     .expect("database mutex poisoned")
@@ -316,7 +349,7 @@ impl Storage {
             _ => anyhow::bail!("对象方向无效"),
         }
         // The bucket policy expires unfinished ciphertext even if the desktop is offline.
-        if self.inner.remove(&key).await.is_ok() {
+        if self.inner.remove(&key).await.is_ok() && native.is_some() {
             db.lock().expect("database mutex poisoned").db.execute(
                 "DELETE FROM native_storage_objects WHERE id=?1",
                 [object.to_string()],
@@ -324,6 +357,37 @@ impl Storage {
         }
         Ok(json!({"ok":true}))
     }
+}
+
+fn legacy_object_indices(
+    device: &str,
+    scope: &crate::files::Scope,
+    transfer: Uuid,
+    object: Uuid,
+    key: &str,
+) -> Result<Vec<usize>> {
+    let (backend, thread) = scope.backend_and_thread();
+    let record = legacy_upload_receipt(backend, thread, device, transfer)?
+        .context("旧对象不属于此附件或已过期")?
+        .storage_object(object)?
+        .context("旧对象不存在")?;
+    ensure!(
+        record["id"] == object.to_string()
+            && record["transfer"] == transfer.to_string()
+            && record["key"] == key
+            && record["expires"]
+                .as_i64()
+                .is_some_and(|expires| expires > now()),
+        "旧对象不属于此附件或已过期"
+    );
+    let indices: Vec<usize> = serde_json::from_value(record["indices"].clone())?;
+    ensure!(
+        (1..=15).contains(&indices.len())
+            && indices.iter().all(|&index| index < 256)
+            && indices.windows(2).all(|pair| pair[0] + 1 == pair[1]),
+        "旧对象的分块清单无效"
+    );
+    Ok(indices)
 }
 
 fn origin(raw: &str) -> Result<Url> {
@@ -461,3 +525,6 @@ fn decrypt(manifest: &Value, index: usize, mut bytes: Vec<u8>) -> Result<Vec<u8>
     bytes.truncate(length);
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod tests;

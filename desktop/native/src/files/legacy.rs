@@ -76,7 +76,12 @@ impl Store {
         destination.set_len(0)?;
         let mut present = BTreeSet::new();
         if !candidates.is_empty() {
-            match receipt.open(!receipt.complete) {
+            let source = if receipt.complete {
+                receipt.open(false)
+            } else {
+                receipt.open_pending()
+            };
+            match source {
                 Ok(mut source) => {
                     let mut buffer = vec![0; BLOCK];
                     for index in candidates {
@@ -211,7 +216,7 @@ impl Store {
             ensure!(offset == file.size, "旧附件尚未传完");
             (private_file(&path, false)?, None)
         } else {
-            let source = receipt.open(true)?;
+            let source = receipt.open_pending()?;
             ensure!(source.metadata()?.len() == file.size, "旧附件尚未传完");
             self.reserve_upload(file.size as i64)?;
             let target = self.open_upload_file(id, &file.name)?;

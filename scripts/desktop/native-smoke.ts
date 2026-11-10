@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { zstdCompressSync } from 'node:zlib';
 import { once } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -125,15 +125,23 @@ const legacyRawUpload = await legacyUploads.begin({
 }, old.deviceId, THREAD);
 await legacyUploads.chunk(legacyRawUpload.id, old.deviceId, THREAD, 0, legacyRawBytes.subarray(0, 4));
 const legacyRawPart = (await legacyUploads.get(legacyRawUpload.id, old.deviceId, THREAD)).file + '.part';
+const legacyRenamedUpload = await legacyUploads.begin({
+  name: 'old-renamed.txt', size: legacyRawBytes.length, sha256: digest(legacyRawBytes),
+}, old.deviceId, THREAD);
+await legacyUploads.chunk(legacyRenamedUpload.id, old.deviceId, THREAD, 0, legacyRawBytes);
+const legacyRenamedPath = (await legacyUploads.get(legacyRenamedUpload.id, old.deviceId, THREAD)).file;
+await rename(legacyRenamedPath + '.part', legacyRenamedPath);
 const transfersDir = join(legacyState, 'transfers-v2');
 const legacyUploadSources = [
-  legacyBlockPart, legacyRawPart, join(transfersDir, legacyManifest.id + '.json'),
-  ...[legacyManifest.id, legacyRawUpload.id].map((id) => join(legacyState, 'uploads', id + '.json')),
+  legacyBlockPart, legacyRawPart, legacyRenamedPath, join(transfersDir, legacyManifest.id + '.json'),
+  ...[legacyManifest.id, legacyRawUpload.id, legacyRenamedUpload.id]
+    .map((id) => join(legacyState, 'uploads', id + '.json')),
 ];
 if (process.platform === 'win32') {
   const runtime = platformRuntime();
-  for (const dir of [transfersDir, join(legacyBlockPart, '..'), join(legacyRawPart, '..')])
-    runtime.privateDirectory(dir);
+  runtime.privateDirectory(transfersDir);
+  for (const path of [legacyBlockPart, legacyRawPart, legacyRenamedPath])
+    runtime.privateDirectory(join(path, '..'));
   for (const path of legacyUploadSources) runtime.privateFile(path);
 }
 const legacyUploadSnapshots = await Promise.all(legacyUploadSources.map((path) => readFile(path)));
@@ -1859,6 +1867,10 @@ try {
     const rawResult = await resumedLegacy.rpc<{ path: string }>(rawFinish);
     assert.deepEqual(await readFile(rawResult.path), legacyRawBytes);
     assert.deepEqual(await resumedLegacy.rpc(rawFinish), rawResult);
+    const recovered = await resumedLegacy.rpc<{ path: string }>(
+      apiCall(`/threads/${THREAD}/uploads/${legacyRenamedUpload.id}/complete`, 'POST'),
+    );
+    assert.deepEqual(await readFile(recovered.path), legacyRawBytes);
     assert.deepEqual(await Promise.all(legacyUploadSources.map((path) => readFile(path))), legacyUploadSnapshots);
     resumedLegacy.close();
     const resumed = await reconnect(phone, ready.ticket);

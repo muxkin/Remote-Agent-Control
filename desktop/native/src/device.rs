@@ -138,14 +138,6 @@ impl DeviceSession {
                                     let scope = scope?;
                                     let transfer = thread_id(&request["fileId"])?;
                                     let action = request["action"].as_str().unwrap();
-                                    if action == "storage-plan" {
-                                        let (db, device, scope) = (db.clone(), device.clone(), scope.clone());
-                                        let batch = storage.batch();
-                                        tokio::task::spawn_blocking(move || {
-                                            db.lock().expect("database mutex poisoned")
-                                                .import_pending_upload(&device, &scope, transfer, Some(batch))
-                                        }).await??;
-                                    }
                                     storage.handle(db, device, scope, transfer, action, &request).await
                                 }.await;
                                 (id, result)

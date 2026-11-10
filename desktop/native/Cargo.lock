@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "agent-space-native"
-version = "0.3.23"
+version = "0.3.24"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -80,7 +80,7 @@ jobs:
           node --import tsx scripts/desktop/native-smoke.ts /usr/bin/agent-space-native
           node --import tsx scripts/desktop/native-dsh-smoke.ts /usr/bin/agent-space-native
           cd desktop/native
-          cargo test --release --locked update::tests
+          cargo test --release --locked
       - name: Mount and verify the macOS installer
         if: runner.os == 'macOS'
         env:

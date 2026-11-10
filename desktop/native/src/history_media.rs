@@ -465,13 +465,29 @@ impl LegacyUpload {
         private_file(&path, false)
     }
 
+    pub(crate) fn open_pending(&self) -> Result<File> {
+        match self.open(true) {
+            // The old uploader renamed the file before committing the completed receipt.
+            Err(error) if error.is::<MissingAttachment>() => self.open(false),
+            result => result,
+        }
+    }
+
     pub(crate) fn transfer(&self, id: Uuid) -> Result<Option<Value>> {
+        self.transfer_record(id, "json")
+    }
+
+    pub(crate) fn storage_object(&self, id: Uuid) -> Result<Option<Value>> {
+        self.transfer_record(id, "object")
+    }
+
+    fn transfer_record(&self, id: Uuid, extension: &str) -> Result<Option<Value>> {
         let directory = self
             .root
             .parent()
             .context("旧附件目录无效")?
             .join("transfers-v2");
-        legacy_upload_json(&directory.join(format!("{id}.json")))
+        legacy_upload_json(&directory.join(format!("{id}.{extension}")))
     }
 }
 
