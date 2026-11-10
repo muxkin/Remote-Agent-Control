@@ -2,13 +2,16 @@ use crate::{
     gateway::{ManagedAgent, Snapshot},
     im_attachments::{Download, Upload},
     im_calls,
-    im_client::{Client, MessageConflict, MessageUpdate, NewMessage, required},
+    im_client::{
+        Client, MAX_CURSOR, MessageConflict, MessageUpdate, NewMessage, required, segment,
+    },
     im_interactions,
     state::{private_directory, private_file},
     update::UpdateGate,
 };
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
+use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -28,7 +31,6 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
 
-const MAX_CURSOR: u64 = (1 << 53) - 1;
 const MAX_REPLY: u64 = 1024 * 1024;
 
 #[derive(Clone, Default)]
@@ -265,9 +267,7 @@ async fn listen(
         Err(error) => return Err(error),
     };
     loop {
-        let batch = client
-            .get(&format!("/sync?cursor={cursor}&wait=25000"))
-            .await?;
+        let batch = client.sync_raw(cursor, 25_000).await?;
         let events = batch["events"]
             .as_array()
             .context("独立 Agent 消息批次无效")?;
@@ -382,6 +382,41 @@ struct MessageFrame {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "params")]
 enum MessageRequest {
+    #[serde(rename = "account.me")]
+    Account,
+    #[serde(rename = "account.bootstrap")]
+    Bootstrap,
+    #[serde(rename = "account.profile.update")]
+    ProfileUpdate {
+        #[serde(rename = "displayName")]
+        display_name: String,
+    },
+    #[serde(rename = "contacts.list")]
+    Contacts,
+    #[serde(rename = "contact.add")]
+    ContactAdd { identifier: String },
+    #[serde(rename = "contact.update")]
+    ContactUpdate(ContactUpdate),
+    #[serde(rename = "contact.remove")]
+    ContactRemove(UserRef),
+    #[serde(rename = "conversations.list")]
+    Conversations,
+    #[serde(rename = "conversation.read")]
+    Conversation,
+    #[serde(rename = "conversation.direct")]
+    Direct(UserRef),
+    #[serde(rename = "group.create")]
+    Group {
+        name: String,
+        #[serde(rename = "userIds")]
+        user_ids: Vec<String>,
+    },
+    #[serde(rename = "group.update")]
+    GroupUpdate(GroupUpdate),
+    #[serde(rename = "conversation.markRead")]
+    MarkRead { sequence: u64 },
+    #[serde(rename = "events.sync")]
+    Sync { cursor: u64, wait: Option<u64> },
     #[serde(rename = "message.send")]
     Send(NewMessage),
     #[serde(rename = "message.update")]
@@ -390,6 +425,8 @@ enum MessageRequest {
     Read(MessageRef),
     #[serde(rename = "message.history")]
     History { before: Option<u64> },
+    #[serde(rename = "message.search")]
+    Search { query: String, before: Option<u64> },
     #[serde(rename = "message.cancel")]
     Cancel(MessageRef),
     #[serde(rename = "interaction.cancel")]
@@ -402,6 +439,35 @@ enum MessageRequest {
     Remove(AttachmentRef),
     #[serde(rename = "done")]
     Done,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UserRef {
+    user_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContactUpdate {
+    user_id: String,
+    remark: Option<String>,
+    blocked: Option<bool>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GroupUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    add: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remove: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -419,16 +485,113 @@ struct AttachmentRef {
 impl MessageRequest {
     async fn execute(self, client: &Client, cid: &str) -> Result<Value> {
         match self {
+            Self::Account => client.get("/me").await,
+            Self::Bootstrap => {
+                client
+                    .conversation_request(Method::GET, "/bootstrap", None)
+                    .await
+            }
+            Self::ProfileUpdate { display_name } => {
+                client
+                    .request(
+                        Method::PATCH,
+                        "/me",
+                        Some(&json!({"displayName":display_name})),
+                    )
+                    .await
+            }
+            Self::Contacts => client.get("/contacts").await,
+            Self::ContactAdd { identifier } => {
+                client
+                    .request(
+                        Method::POST,
+                        "/contacts",
+                        Some(&json!({"identifier":identifier})),
+                    )
+                    .await
+            }
+            Self::ContactUpdate(input) => {
+                let mut body = json!({});
+                if let Some(remark) = input.remark {
+                    body["remark"] = json!(remark);
+                }
+                if let Some(blocked) = input.blocked {
+                    body["blocked"] = json!(blocked);
+                }
+                client
+                    .request(
+                        Method::PATCH,
+                        &format!("/contacts/{}", segment(&input.user_id)),
+                        Some(&body),
+                    )
+                    .await
+            }
+            Self::ContactRemove(input) => {
+                client
+                    .request(
+                        Method::DELETE,
+                        &format!("/contacts/{}", segment(&input.user_id)),
+                        None,
+                    )
+                    .await
+            }
+            Self::Conversations => {
+                client
+                    .conversation_request(Method::GET, "/conversations", None)
+                    .await
+            }
+            Self::Conversation => {
+                client
+                    .conversation_request(
+                        Method::GET,
+                        &format!("/conversations/{}", segment(cid)),
+                        None,
+                    )
+                    .await
+            }
+            Self::Direct(input) => {
+                client
+                    .conversation_request(
+                        Method::POST,
+                        "/conversations",
+                        Some(&json!({"userId":input.user_id})),
+                    )
+                    .await
+            }
+            Self::Group { name, user_ids } => {
+                client
+                    .conversation_request(
+                        Method::POST,
+                        "/groups",
+                        Some(&json!({"name":name,"userIds":user_ids})),
+                    )
+                    .await
+            }
+            Self::GroupUpdate(input) => {
+                client
+                    .request(
+                        Method::PATCH,
+                        &format!("/groups/{}", segment(cid)),
+                        Some(&serde_json::to_value(input)?),
+                    )
+                    .await
+            }
+            Self::MarkRead { sequence } => {
+                ensure!(sequence <= MAX_CURSOR, "已读位置无效");
+                client
+                    .request(
+                        Method::POST,
+                        &format!("/conversations/{}/read", segment(cid)),
+                        Some(&json!({"sequence":sequence})),
+                    )
+                    .await
+            }
+            Self::Sync { cursor, wait } => client.sync_events(cursor, wait.unwrap_or(25_000)).await,
             Self::Send(input) => client.send(cid, &input).await,
             Self::Update(input) => client.update(cid, &input).await,
             Self::Read(input) => client.read_message(cid, &input.message_id).await,
-            Self::History { before } => {
-                ensure!(
-                    before.is_none_or(|value| value <= MAX_CURSOR),
-                    "历史游标无效"
-                );
-                client.history(cid, before).await
-            }
+            Self::History { before } => client.history(cid, before).await,
+            Self::Search { query, before } => client.search(cid, &query, before).await,
             Self::Cancel(input) => client.cancel(cid, &input.message_id).await,
             Self::CancelInteraction(input) => {
                 client.cancel_interaction(cid, &input.message_id).await

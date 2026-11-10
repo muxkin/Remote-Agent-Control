@@ -53,14 +53,17 @@ async fn main() -> Result<()> {
 
 async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Value) -> Result<()> {
     let mut sequence = 0;
-    let mut call = |method: &str, params: Value| -> Result<Value> {
+    let mut frame = |method: &str, params: Value, conversation: Option<&Value>| -> Result<Value> {
         sequence += 1;
         let id = sequence.to_string();
-        let request = if method == "done" {
+        let mut request = if params.is_null() {
             json!({"id":id,"method":method})
         } else {
             json!({"id":id,"method":method,"params":params})
         };
+        if let Some(conversation) = conversation {
+            request["conversationId"] = conversation.clone();
+        }
         serde_json::to_writer(&mut output, &request)?;
         writeln!(output)?;
         output.flush()?;
@@ -74,6 +77,12 @@ async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Val
         Ok(reply)
     };
     let scenario = message["text"].as_str().unwrap_or_default();
+    if let Some(parameters) = scenario.strip_prefix("验证会话目录 ") {
+        directory(&mut frame, message, serde_json::from_str(parameters)?)?;
+        assert_eq!(frame("done", Value::Null, None)?["result"]["ok"], true);
+        return Ok(());
+    }
+    let mut call = |method: &str, params: Value| frame(method, params, None);
     match scenario {
         "验证加密交互" | "验证旧版卡片" => send_cards(&mut call, message, scenario)?,
         "Rust 交互卡片" => receive_card(&mut call, message)?,
@@ -269,6 +278,205 @@ async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Val
         assert_eq!(call("message.send", different)?["error"]["status"], 409);
     }
     assert_eq!(call("done", Value::Null)?["result"]["ok"], true);
+    Ok(())
+}
+
+fn directory(
+    call: &mut impl FnMut(&str, Value, Option<&Value>) -> Result<Value>,
+    message: &Value,
+    parameters: Value,
+) -> Result<()> {
+    let owner = &message["senderId"];
+    let peer = &parameters["peer"];
+    let search_room = &parameters["search"];
+    let me = call("account.me", Value::Null, None)?;
+    let agent = &me["result"]["user"]["id"];
+    assert!(agent.is_string(), "{me}");
+    let bootstrap = call("account.bootstrap", Value::Null, None)?;
+    let cursor = bootstrap["result"]["cursor"].as_u64().unwrap();
+    assert_eq!(&bootstrap["result"]["user"]["id"], agent);
+    let inbound = call(
+        "events.sync",
+        json!({"cursor":parameters["cursor"],"wait":0}),
+        None,
+    )?;
+    let events = inbound["result"]["events"].as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["message"]["id"] == message["id"]
+                && event["message"]["text"] == message["text"])
+    );
+    assert!(
+        bootstrap["result"]["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contact| &contact["id"] == owner)
+    );
+    let list = call("conversations.list", Value::Null, None)?;
+    let current = list["result"]["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|conversation| conversation["id"] == message["conversationId"])
+        .unwrap();
+    assert_eq!(current["lastMessage"]["text"], message["text"]);
+    let direct = call("conversation.direct", json!({"userId":owner}), None)?;
+    assert_eq!(
+        direct["result"]["conversation"]["id"],
+        message["conversationId"]
+    );
+    assert_eq!(
+        direct["result"]["conversation"]["lastMessage"]["text"],
+        message["text"]
+    );
+    let read = call(
+        "conversation.markRead",
+        json!({"sequence":message["sequence"]}),
+        None,
+    )?;
+    assert_eq!(read["result"]["ok"], true, "{read}");
+    let current = call("conversation.read", Value::Null, None)?;
+    assert_eq!(
+        current["result"]["conversation"]["readSequence"],
+        message["sequence"]
+    );
+
+    let hits = call(
+        "message.search",
+        json!({"query":"ÅNGSTRÖM"}),
+        Some(search_room),
+    )?;
+    let first = &hits["result"];
+    let messages = first["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 50);
+    assert_eq!(messages[0]["text"], "Ångström 51");
+    assert_eq!(messages[49]["text"], "Ångström 2");
+    let hits = call(
+        "message.search",
+        json!({"query":"ångström","before":first["before"]}),
+        Some(search_room),
+    )?;
+    let remaining: Vec<_> = hits["result"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(remaining, ["Ångström 1", "Ångström 0"]);
+    assert!(hits["result"]["before"].is_null());
+
+    let added = call("contact.add", json!({"identifier":peer}), None)?;
+    assert_eq!(&added["result"]["user"]["id"], peer, "{added}");
+    let edited = call(
+        "contact.update",
+        json!({"userId":peer,"remark":"新联系人","blocked":true}),
+        None,
+    )?;
+    assert_eq!(edited["result"]["ok"], true);
+    let contacts = call("contacts.list", Value::Null, None)?;
+    let contact = contacts["result"]["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| &entry["id"] == peer)
+        .unwrap();
+    assert_eq!(contact["remark"], "新联系人");
+    assert_eq!(contact["blocked"], true);
+    assert_eq!(
+        call("contact.remove", json!({"userId":peer}), None)?["error"]["status"],
+        409
+    );
+    assert_eq!(
+        call(
+            "contact.update",
+            json!({"userId":peer,"blocked":false}),
+            None
+        )?["result"]["ok"],
+        true
+    );
+    let peer_chat = call("conversation.direct", json!({"userId":peer}), None)?;
+    assert_eq!(&peer_chat["result"]["conversation"]["peer"]["id"], peer);
+
+    let group = call(
+        "group.create",
+        json!({"name":"原生测试群","userIds":[owner]}),
+        None,
+    )?;
+    let group_id = &group["result"]["conversation"]["id"];
+    assert_eq!(
+        &group["result"]["conversation"]["ownerId"], agent,
+        "{group}"
+    );
+    let update = call(
+        "group.update",
+        json!({"name":"改名后的测试群","add":[peer]}),
+        Some(group_id),
+    )?;
+    assert_eq!(update["result"]["ok"], true, "{update}");
+    let group = call("conversation.read", Value::Null, Some(group_id))?;
+    assert_eq!(group["result"]["conversation"]["name"], "改名后的测试群");
+    assert_eq!(
+        group["result"]["conversation"]["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        call("group.update", json!({"remove":peer}), Some(group_id))?["result"]["ok"],
+        true
+    );
+    assert_eq!(
+        call("group.update", json!({"closed":true}), Some(group_id))?["result"]["ok"],
+        true
+    );
+    let transfer = call(
+        "group.create",
+        json!({"name":"群主转让测试","userIds":[owner]}),
+        None,
+    )?;
+    let transfer_id = &transfer["result"]["conversation"]["id"];
+    assert_eq!(
+        call("group.update", json!({"ownerId":owner}), Some(transfer_id))?["result"]["ok"],
+        true
+    );
+    assert_eq!(
+        call(
+            "group.update",
+            json!({"name":"无权改名"}),
+            Some(transfer_id)
+        )?["error"]["status"],
+        403
+    );
+
+    assert_eq!(
+        call("contact.remove", json!({"userId":peer}), None)?["result"]["ok"],
+        true
+    );
+    let profile = call(
+        "account.profile.update",
+        json!({"displayName":"Rust 原生 Agent"}),
+        None,
+    )?;
+    assert_eq!(profile["result"]["user"]["displayName"], "Rust 原生 Agent");
+    let updates = call("events.sync", json!({"cursor":cursor,"wait":0}), None)?;
+    let types = updates["result"]["events"].as_array().unwrap();
+    for kind in ["contacts", "read", "conversation", "profile"] {
+        assert!(types.iter().any(|event| event["type"] == kind), "{updates}");
+    }
+    assert_eq!(
+        call(
+            "message.send",
+            json!({
+                "clientId":format!("fixture-directory-{}",message["id"].as_str().unwrap()),
+                "text":"目录接口已验证","options":{"replyTo":message["id"]}
+            }),
+            None
+        )?["result"]["text"],
+        "目录接口已验证"
+    );
     Ok(())
 }
 

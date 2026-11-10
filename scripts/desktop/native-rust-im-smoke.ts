@@ -21,7 +21,7 @@ import { AgentCallsClient } from '../../src/client/calls.js';
 import { EncryptedMessagingClient } from '../../src/client/encrypted-messaging.js';
 import { platformRuntime } from '../../src/server/platform.js';
 import { buildRelay } from '../../src/server/relay.js';
-import type { ChatMessage } from '../../src/shared/messaging.js';
+import type { ChatConversation, ChatMessage } from '../../src/shared/messaging.js';
 import { registerAgentFixture } from '../lib/messaging-smoke.js';
 
 const [binary, handler] = process.argv.slice(2).map((path) => resolve(path));
@@ -365,12 +365,50 @@ try {
   await until(async () => (await readCursor()) >= finalCardEvent.sequence);
   await stop();
   await privateJson(progress, { ...original, cursor: cardsCursor });
-  await privateJson(manifest, [{ ...rpcProfile, callHandler: handler }]);
+  await privateJson(manifest, [rpcProfile]);
   start();
   await until(async () => (await readCursor()) >= finalCardEvent.sequence);
   assert.deepEqual((await cardsFor(oldCardPrompt.message.id)).map(({ id }) => id), [oldCard.id]);
   assert.deepEqual(new Set((await cardsFor(cardPrompt.message.id)).map(({ id }) => id)), new Set(cards.map(({ id }) => id)));
   assert.equal((await acknowledgements()).length, outcomes.size, 'Replaying signed answers duplicated the acknowledgements');
+
+  await stop();
+  const { invitation: secondaryInvite } = await human.raw<{ invitation: string }>('/agent-invitations', 'POST');
+  const secondary = await registerAgentFixture(origin, {
+    invitation: secondaryInvite, username: 'rustfixturesecondary', displayName: 'Secondary Agent',
+  });
+  const { conversation: searchRoom } = await human.group('加密搜索测试', [agent.user.id]);
+  for (let index = 0; index < 52; index++)
+    await human.send(searchRoom.id, 'Ångström ' + index, 'rust-search-fixture-' + index);
+  const oldSearch = await human.search(searchRoom.id, 'ÅNGSTRÖM');
+  assert.equal(oldSearch.messages.length, 50);
+  assert.deepEqual((await human.search(searchRoom.id, 'ångström', oldSearch.before)).messages.map(({ text }) => text),
+    ['Ångström 1', 'Ångström 0']);
+  const rawSearch = await human.raw<{ messages: ChatMessage[] }>(
+    `/conversations/${searchRoom.id}/search?q=${encodeURIComponent('Ångström')}`,
+  );
+  assert.equal(rawSearch.messages.length, 0, 'Encrypted search fixture leaked plaintext to the service');
+  const { cursor: directoryCursor } = await legacy.raw<{ cursor: number }>('/bootstrap');
+  await privateJson(progress, { ...original, cursor: directoryCursor });
+  await privateJson(manifest, [{ ...rpcProfile, callHandler: handler }]);
+  const directoryCheck = await prompt(
+    '验证会话目录 ' + JSON.stringify({ peer: secondary.user.id, search: searchRoom.id, cursor: directoryCursor }),
+    'rust-directory',
+  );
+  start();
+  await until(async () => (await streamFor(directoryCheck.message.id))?.text === '目录接口已验证');
+  const verifiedChats = (await human.conversations()).conversations;
+  assert.equal(verifiedChats.find(({ id }) => id === conversation.id)?.peerReadSequence, directoryCheck.message.sequence);
+  assert.equal(verifiedChats.find(({ id }) => id === conversation.id)?.peer?.displayName, 'Rust 原生 Agent');
+  const closed = verifiedChats.find(({ name }) => name === '改名后的测试群');
+  assert(closed?.closed);
+  assert.deepEqual(closed.members.map(({ id }) => id).sort(), [agent.user.id, account.user!.id].sort());
+  assert.equal(verifiedChats.find(({ name }) => name === '群主转让测试')?.ownerId, account.user!.id);
+  assert(!(await legacy.contacts()).users.some(({ id }) => id === secondary.user.id));
+  const { conversation: secondaryChat } = await secondary.client.raw<{ conversation: ChatConversation }>(
+    '/conversations', 'POST', { userId: agent.user.id },
+  );
+  assert.equal(secondaryChat.kind, 'direct');
 
   const calls = new AgentCallsClient(human);
   await until(async () => (await calls.capabilities(conversation.id)).video);
@@ -450,7 +488,7 @@ try {
     await until(async () => !(await calls.capabilities(conversation.id)).audio);
   }
   console.log(
-    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messages, streaming, attachments, approval and question cards, replay, and bidirectional audio/video RTP passed.`,
+    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): encrypted messaging, streaming, attachments, interactions, contacts, groups, local search, read receipts, replay, and bidirectional audio/video RTP passed.`,
   );
 } finally {
   await stop();

@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.15 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.16 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
@@ -51,6 +51,18 @@ DSH 技能选择使用会话的原生目录，发送前会重新验证。会话�
 
 - `message.send` 的 `options.interaction` 可发送 `approval` 或 `question`。填写 `recipientId`、`title` 和 `description`，提问还需填写 `questions`，可选 `expiresAt` 使用 Unix 毫秒。卡片正文和选项随消息加密。
 - `interaction.cancel` 接收 `messageId`，用于撤销尚待回答的卡片。卡片被指定用户回答、被撤销或过期后，RPC 处理器会收到 `message.updated`。回答通过验签后才会出现在 `message.interaction.response` 中。
+
+目录接口复用现有账号和群聊权限。
+
+| 方法 | 参数 |
+| --- | --- |
+| `account.me`、`account.bootstrap`、`contacts.list`、`conversations.list`、`conversation.read` | 省略 `params`。启动快照和会话列表中的最后一条消息会解密。 |
+| `account.profile.update` | `displayName` |
+| `contact.add`、`contact.update`、`contact.remove` | 添加使用 `identifier`，编辑和移除使用 `userId`。编辑可传 `remark`、`blocked`。 |
+| `conversation.direct`、`group.create`、`group.update` | 私聊使用 `userId`，建群使用 `name`、`userIds`。群管理可传 `name`、`add`、`remove`、`ownerId` 或 `closed: true`。 |
+| `conversation.markRead` | `sequence`，使用目标会话的消息序号。 |
+| `events.sync` | `cursor` 和可选的毫秒数 `wait`。事件中的消息会验签并解密。 |
+| `message.search` | `query` 和可选的分页游标 `before`。适配器在本机搜索已验签的历史，每次最多扫描 20 页，返回最多 50 条匹配和续页游标。 |
 
 通话处理程序负责 WebRTC 对端、编解码和模型接入。适配器负责接听状态、心跳、加密 SDP/ICE 信令和挂断。更新交接会等待正在处理的消息和通话。 [原生通话处理程序接口](AGENT_CALLS.md#原生通话处理程序)
 

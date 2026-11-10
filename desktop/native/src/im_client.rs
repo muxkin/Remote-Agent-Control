@@ -12,6 +12,8 @@ use std::{collections::BTreeMap, io::Read, path::Path, time::Duration};
 use tokio::sync::Mutex;
 use url::Url;
 
+pub(crate) const MAX_CURSOR: u64 = (1 << 53) - 1;
+
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MessageState {
@@ -497,17 +499,113 @@ impl Client {
         Ok(self.decode_or_redact(&response["message"]).await)
     }
 
-    pub(crate) async fn history(&self, id: &str, before: Option<u64>) -> Result<Value> {
+    async fn history_page(&self, id: &str, before: Option<u64>) -> Result<Value> {
+        ensure!(
+            before.is_none_or(|value| value <= MAX_CURSOR),
+            "历史游标无效"
+        );
         let mut path = format!("/conversations/{}/messages", segment(id));
         if let Some(before) = before {
             path.push_str(&format!("?before={before}"));
         }
-        let mut result = self.get(&path).await?;
+        self.get(&path).await
+    }
+
+    pub(crate) async fn history(&self, id: &str, before: Option<u64>) -> Result<Value> {
+        let mut result = self.history_page(id, before).await?;
         let messages = result["messages"].as_array_mut().context("消息记录无效")?;
         for message in messages {
             *message = self.decode_or_redact(message).await;
         }
         Ok(result)
+    }
+
+    pub(crate) async fn search(
+        &self,
+        id: &str,
+        query: &str,
+        mut before: Option<u64>,
+    ) -> Result<Value> {
+        let query = query.to_lowercase();
+        let mut found: Vec<Value> = Vec::new();
+        for _ in 0..20 {
+            let page = self.history_page(id, before).await?;
+            let rows = page["messages"].as_array().context("消息记录无效")?;
+            for row in rows.iter().rev() {
+                if let Ok(message) = self.decode_message(row).await
+                    && message["text"]
+                        .as_str()
+                        .is_some_and(|text| text.to_lowercase().contains(&query))
+                {
+                    if found.len() == 50 {
+                        return Ok(json!({"before":found[49]["sequence"],"messages":found}));
+                    }
+                    found.push(message);
+                }
+            }
+            let next = page["before"].as_u64();
+            ensure!(
+                next.is_none_or(|next| (1..=MAX_CURSOR).contains(&next)
+                    && before.is_none_or(|before| next < before)),
+                "消息分页游标无效"
+            );
+            before = next;
+            if before.is_none() || found.len() == 50 {
+                break;
+            }
+        }
+        let mut result = json!({"messages":found});
+        if let Some(before) = before {
+            result["before"] = json!(before);
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn sync_raw(&self, cursor: u64, wait: u64) -> Result<Value> {
+        ensure!(
+            cursor <= MAX_CURSOR && wait <= 25_000,
+            "消息游标或等待时间无效"
+        );
+        self.get(&format!("/sync?cursor={cursor}&wait={wait}"))
+            .await
+    }
+
+    pub(crate) async fn sync_events(&self, cursor: u64, wait: u64) -> Result<Value> {
+        let mut result = self.sync_raw(cursor, wait).await?;
+        let events = result["events"].as_array_mut().context("消息事件无效")?;
+        for event in events {
+            if !event["message"].is_null() {
+                event["message"] = self.decode_or_redact(&event["message"]).await;
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn conversation_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value> {
+        let mut result = self.request(method, path, body).await?;
+        if let Some(conversations) = result
+            .get_mut("conversations")
+            .and_then(Value::as_array_mut)
+        {
+            for conversation in conversations {
+                self.decode_conversation(conversation).await;
+            }
+        }
+        if let Some(conversation) = result.get_mut("conversation") {
+            self.decode_conversation(conversation).await;
+        }
+        Ok(result)
+    }
+
+    async fn decode_conversation(&self, conversation: &mut Value) {
+        if !conversation["lastMessage"].is_null() {
+            conversation["lastMessage"] = self.decode_or_redact(&conversation["lastMessage"]).await;
+        }
     }
 
     pub(crate) async fn cancel(&self, id: &str, message_id: &str) -> Result<Value> {
