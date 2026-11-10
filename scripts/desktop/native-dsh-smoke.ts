@@ -84,7 +84,7 @@ const dsh = createServer(async (request, response) => {
     assert.equal(Number(request.headers['content-length']), body.length);
     assert.equal(path.searchParams.get('sessionId'), 'shared');
     const name = path.searchParams.get('name')!;
-    const file = { attachmentId: hash(body), name, bytes: body.length };
+    const file = { attachmentId: 'sha256:' + hash(body), name, bytes: body.length };
     const receiptId = randomUUID();
     instance.receipts.set(receiptId, file);
     if (name === 'race.txt') {
@@ -240,7 +240,7 @@ const dsh = createServer(async (request, response) => {
             assert.equal(part.mediaType, 'image/png');
             assert.deepEqual(Buffer.from(part.data, 'base64'), png);
             const attachment = {
-              attachmentId: hash(png),
+              attachmentId: 'sha256:' + hash(png),
               mediaType: 'image/png',
               bytes: png.length,
               name: part.name,
@@ -677,8 +677,8 @@ try {
       const reply = await session.request('file', { ...file, fileId: manifest.id, action: 'read', index: 0 });
       return Buffer.from(reply.bytes!);
     };
-    const fileRef = 'dsh-file:' + digest;
-    const imageRef = 'dsh-image:' + hash(png);
+    const fileRef = 'dsh-file:sha256:' + digest;
+    const imageRef = 'dsh-image:sha256:' + hash(png);
     await assert.rejects(describe(one.id, fileRef), { status: 404 });
     await assert.rejects(describe(two.id, imageRef), { status: 404 });
     const imageUpload = await stage('image.png', png);
@@ -715,7 +715,7 @@ try {
     assert.equal(one.calls.filter(({ method }) => method === '/api/file').length, 1);
 
     const legacyData = Buffer.from('original DSH file from the Node adapter');
-    const legacyDigest = hash(legacyData);
+    const legacyDigest = 'sha256:' + hash(legacyData);
     const oldPath = join(legacy, 'uploads', randomUUID(), 'old.txt');
     const receiptDir = join(legacy, 'backends', one.id, 'receipts');
     await mkdir(join(oldPath, '..'), { recursive: true, mode: 0o700 });

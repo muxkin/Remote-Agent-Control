@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.3 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.4 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 

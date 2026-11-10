@@ -31,6 +31,7 @@ pub(crate) enum Media {
     VerifiedFile {
         name: String,
         size: u64,
+        attachment_id: String,
         sha256: String,
     },
 }

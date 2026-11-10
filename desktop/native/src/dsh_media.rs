@@ -34,7 +34,9 @@ struct Reference {
 pub(crate) fn attachments(message: &Value) -> Vec<Value> {
     content_attachments(message)
         .filter_map(|(kind, data)| {
-            let id = data["attachmentId"].as_str().filter(|id| valid_id(id))?;
+            let id = data["attachmentId"].as_str().filter(|id| {
+                attachment_digest(id).is_some() || (kind == "image" && valid_id(id))
+            })?;
             let fallback = if kind == "image" { "图片" } else { "附件" };
             Some(json!({
                 "name":data["name"].as_str().filter(|name| valid_name(name)).unwrap_or(fallback),
@@ -129,7 +131,8 @@ impl Dsh {
             let file = &value["value"]["file"];
             ensure!(
                 value["ok"] == true
-                    && file["attachmentId"] == upload.sha256
+                    && file["attachmentId"].as_str().and_then(attachment_digest)
+                        == Some(upload.sha256.as_str())
                     && file["bytes"] == upload.size,
                 "DSH 未确认附件"
             );
@@ -141,7 +144,7 @@ impl Dsh {
     pub(crate) async fn attachment(&self, thread: &str, reference: &str) -> Result<Media> {
         if let Some(id) = reference
             .strip_prefix("dsh-image:")
-            .filter(|id| valid_id(id))
+            .filter(|id| attachment_digest(id).is_some() || valid_id(id))
         {
             let mut result = self
                 .call(
@@ -191,9 +194,8 @@ impl Dsh {
                 expected: None,
             }));
         }
-        if let Some(id) = reference
-            .strip_prefix("dsh-file:")
-            .filter(|id| sha256_id(id))
+        if let Some(id) = reference.strip_prefix("dsh-file:")
+            && let Some(sha256) = attachment_digest(id)
         {
             let attachment =
                 tokio::time::timeout(Duration::from_secs(12), self.find_file(thread, id)).await??;
@@ -203,7 +205,8 @@ impl Dsh {
                     .filter(|name| valid_name(name))
                     .unwrap_or_else(|| "DSH 附件".to_owned()),
                 size: attachment.bytes,
-                sha256: attachment.attachment_id,
+                attachment_id: attachment.attachment_id,
+                sha256: sha256.to_owned(),
             });
         }
         if reference.starts_with("dsh-file:") || reference.starts_with("dsh-image:") {
@@ -403,9 +406,9 @@ fn workspace_path(cwd: &str, reference: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn legacy_file(backend: &str, thread: &str, sha256: &str) -> Result<File> {
+pub(crate) fn legacy_file(backend: &str, thread: &str, attachment_id: &str) -> Result<File> {
     let root = legacy_root().context(MissingAttachment)?;
-    let receipt_name = format!("{}.json", hash(&json!([thread, sha256]).to_string()));
+    let receipt_name = format!("{}.json", hash(&json!([thread, attachment_id]).to_string()));
     let receipt = root
         .join("backends")
         .join(backend)
@@ -438,11 +441,13 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn sha256_id(id: &str) -> bool {
-    id.len() == 64
-        && id
+fn attachment_digest(id: &str) -> Option<&str> {
+    let digest = id.strip_prefix("sha256:").unwrap_or(id);
+    (digest.len() == 64
+        && digest
             .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(digest)
 }
 
 fn valid_name(name: &str) -> bool {

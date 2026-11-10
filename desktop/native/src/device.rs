@@ -769,16 +769,23 @@ impl DeviceSession {
                     tokio::task::spawn_blocking(move || {
                         let source = match media {
                             Media::Download(source) => source,
-                            Media::VerifiedFile { name, size, sha256 } => {
+                            Media::VerifiedFile {
+                                name,
+                                size,
+                                attachment_id,
+                                sha256,
+                            } => {
                                 let retained = db
                                     .lock()
                                     .expect("database mutex poisoned")
                                     .retained_attachment(&scope, &sha256)?;
                                 let file = match retained {
                                     Some(file) => file,
-                                    None => {
-                                        crate::dsh_media::legacy_file(&backend, &thread, &sha256)?
-                                    }
+                                    None => crate::dsh_media::legacy_file(
+                                        &backend,
+                                        &thread,
+                                        &attachment_id,
+                                    )?,
                                 };
                                 history_media::Source {
                                     file,
