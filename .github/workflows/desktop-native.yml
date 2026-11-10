@@ -68,6 +68,12 @@ jobs:
           npm run desktop:prepare
           node --import tsx scripts/desktop/payload-smoke.ts
           node -e 'console.log("POCKET_NATIVE_GATEWAY_PAYLOAD=" + require("node:path").resolve("dist/desktop-payload"))' >> "$GITHUB_ENV"
+      - name: Select Rust with stable map_or_default for the macOS UI
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          echo 'RUSTUP_TOOLCHAIN=1.99.1' >> "$GITHUB_ENV"
       - name: Build the Ely desktop app
         working-directory: desktop/native
         env:
