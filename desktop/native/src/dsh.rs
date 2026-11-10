@@ -15,7 +15,7 @@ use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
-use url::Url;
+use url::{Host, Url};
 use uuid::Uuid;
 
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
@@ -60,11 +60,19 @@ impl Dsh {
             .map_err(|_| anyhow::anyhow!("DSH 服务地址无效"))?
             .pop_if_empty()
             .push("");
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
-            .build()?;
+            .timeout(Duration::from_secs(10));
+        if match base.host() {
+            Some(Host::Domain("localhost")) => true,
+            Some(Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        } {
+            http = http.no_proxy();
+        }
+        let http = http.build()?;
         Ok(Self {
             id,
             name,
