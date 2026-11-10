@@ -1,5 +1,5 @@
 use crate::{
-    history_media::Source,
+    history_media::{MissingAttachment, Source},
     plugin_catalog::{Catalog, Package, Switch},
     plugins::{Adapter, Delivery, Media, Observation, RecordCreated, Subscription, View, Write},
     state::{private_directory, private_file},
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    env,
+    env, fs,
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -119,7 +119,16 @@ impl Process {
         })
     }
 
-    pub(crate) async fn request(&mut self, method: &str, mut params: Value) -> Result<Value> {
+    pub(crate) async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.request_with_progress(method, params, None).await
+    }
+
+    async fn request_with_progress(
+        &mut self,
+        method: &str,
+        mut params: Value,
+        created: Option<&RecordCreated<'_>>,
+    ) -> Result<Value> {
         let id = Uuid::new_v4().to_string();
         params["generation"] = json!(self.generation);
         let body =
@@ -131,6 +140,35 @@ impl Process {
             .await?;
         input.write_all(&body).await?;
         input.flush().await?;
+        let mut response = self.read_reply().await?;
+        if let Some(created) = created
+            && response["method"] == "adapter/threadCreated"
+        {
+            ensure!(
+                response["params"]["requestId"] == id,
+                "原生插件进度标识无效"
+            );
+            let thread = response["params"]["threadId"]
+                .as_str()
+                .filter(|thread| valid_id(thread))
+                .context("原生插件新会话标识无效")?;
+            created(thread)?;
+            response = self.read_reply().await?;
+        }
+        ensure!(response["id"] == id, "原生插件响应标识无效");
+        if response.get("error").is_some() {
+            if response["error"]["code"] == -32004 {
+                return Err(MissingAttachment.into());
+            }
+            return Err(Refused.into());
+        }
+        Ok(response
+            .get_mut("result")
+            .context("原生插件响应缺少结果")?
+            .take())
+    }
+
+    async fn read_reply(&mut self) -> Result<Value> {
         let mut header = Vec::new();
         (&mut self.output)
             .take(128)
@@ -149,20 +187,12 @@ impl Process {
         ensure!(&separator == b"\r\n", "原生插件响应帧无效");
         let mut body = vec![0; length];
         self.output.read_exact(&mut body).await?;
-        let mut response: Value = serde_json::from_slice(&body)?;
+        let response: Value = serde_json::from_slice(&body)?;
         ensure!(
-            response["jsonrpc"] == "2.0"
-                && response["id"] == id
-                && response["generation"] == self.generation.to_string(),
+            response["jsonrpc"] == "2.0" && response["generation"] == self.generation.to_string(),
             "原生插件响应标识无效"
         );
-        if response.get("error").is_some() {
-            return Err(Refused.into());
-        }
-        Ok(response
-            .get_mut("result")
-            .context("原生插件响应缺少结果")?
-            .take())
+        Ok(response)
     }
 }
 
@@ -199,6 +229,7 @@ pub(crate) struct Host {
     quiesced: AtomicBool,
     epochs: watch::Sender<u64>,
     upload: AtomicBool,
+    watch_lifecycle: AtomicBool,
     subscriptions: SyncMutex<HashMap<String, Weak<Subscription>>>,
 }
 
@@ -252,6 +283,7 @@ impl Host {
             quiesced: AtomicBool::new(false),
             epochs: watch::channel(0).0,
             upload: AtomicBool::new(false),
+            watch_lifecycle: AtomicBool::new(false),
             subscriptions: SyncMutex::new(HashMap::new()),
         }
     }
@@ -335,7 +367,7 @@ impl Host {
         tokio::task::spawn_blocking(move || private_directory(&directory)).await??;
         let process = timeout(Duration::from_secs(4), Process::start(package.clone())).await??;
         let process = slot.process.insert(process);
-        timeout(Duration::from_secs(5), async {
+        let lifecycle = timeout(Duration::from_secs(5), async {
             let result = process
                 .request(
                     "adapter/initialize",
@@ -352,14 +384,25 @@ impl Host {
                 state["info"].is_object() && state["status"].is_object(),
                 "原生插件状态无效"
             );
-            Ok::<(), anyhow::Error>(())
+            Ok::<bool, anyhow::Error>(result["watchLifecycle"] == true)
         })
         .await??;
+        self.watch_lifecycle.store(lifecycle, Ordering::Release);
         process.ready = true;
         Ok(())
     }
 
     async fn call(&self, method: &'static str, args: Value, limit: Duration) -> Result<Value> {
+        self.call_with_progress(method, args, limit, None).await
+    }
+
+    async fn call_with_progress(
+        &self,
+        method: &'static str,
+        args: Value,
+        limit: Duration,
+        created: Option<&RecordCreated<'_>>,
+    ) -> Result<Value> {
         let reply = timeout(limit, async {
             let allowed = || !self.quiesced.load(Ordering::Acquire);
             ensure!(allowed(), "原生插件正在切换版本");
@@ -374,11 +417,11 @@ impl Host {
             let process = slot.process.as_mut().expect("initialized native plugin");
             // Cancelling a frame leaves its stream unusable. Keep the child until it is reaped.
             process.ready = false;
-            let mut reply = process.request(method, args).await;
+            let mut reply = process.request_with_progress(method, args, created).await;
             process.ready = reply
                 .as_ref()
                 .err()
-                .is_none_or(|error| error.is::<Refused>());
+                .is_none_or(|error| error.is::<Refused>() || error.is::<MissingAttachment>());
             if !process.ready {
                 self.upload.store(false, Ordering::Relaxed);
                 let _ = slot.stop().await;
@@ -388,7 +431,10 @@ impl Host {
                 && value["info"].is_object()
             {
                 value["info"]["product"] = json!(package.manifest.product);
-                value["info"]["version"] = json!(package.manifest.version);
+                value["info"]["adapterVersion"] = json!(package.manifest.version);
+                if !value["info"]["version"].is_string() {
+                    value["info"]["version"] = json!(package.manifest.version);
+                }
             }
             reply
         })
@@ -437,27 +483,30 @@ impl Host {
         Ok(reply)
     }
 
-    async fn source(&self, method: &'static str, args: Value) -> Result<Source> {
-        let reply = self.call(method, args, Duration::from_secs(25)).await?;
+    async fn source(&self, reply: Value) -> Result<Source> {
         let raw = reply["path"].as_str().context("原生插件没有返回附件")?;
-        let name = reply["name"]
-            .as_str()
-            .filter(|name| {
-                (1..=200).contains(&name.encode_utf16().count())
-                    && !name
-                        .chars()
-                        .any(|c| c.is_control() || matches!(c, '/' | '\\'))
-            })
-            .context("原生插件附件名无效")?
-            .to_owned();
+        let name = attachment_name(&reply)?;
+        let temporary = reply["temporary"] == true;
         let root = self.directory.clone();
         let file = root.join(raw);
         tokio::task::spawn_blocking(move || {
             let root = root.canonicalize()?;
             let file = file.canonicalize()?;
-            ensure!(file.starts_with(root), "原生插件附件不在实例状态目录");
+            ensure!(file.starts_with(&root), "原生插件附件不在实例状态目录");
+            let input = private_file(&file, false)?;
+            if temporary {
+                ensure!(
+                    file.parent() == Some(root.join("transfers").as_path())
+                        && file
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| Uuid::parse_str(name).is_ok()),
+                    "原生插件临时附件路径无效"
+                );
+                let _ = fs::remove_file(&file);
+            }
             Ok(Source {
-                file: private_file(&file, false)?,
+                file: input,
                 name,
                 expected: None,
             })
@@ -469,12 +518,19 @@ impl Host {
         let mut revision = 0;
         let mut last = None;
         let mut epochs = self.epochs.subscribe();
+        let watch_id = Uuid::new_v4();
         loop {
+            if publish.is_closed() {
+                break;
+            }
             let epoch = *epochs.borrow_and_update();
-            let value = tokio::select! {
-                _ = publish.closed() => return,
-                value = self.call("adapter/view", json!({"thread":id}), Duration::from_secs(5)) => value,
-            };
+            let value = self
+                .call(
+                    "adapter/view",
+                    json!({"thread":id,"watchId":watch_id}),
+                    Duration::from_secs(5),
+                )
+                .await;
             match value {
                 Ok(_) if *epochs.borrow() != epoch => {
                     mark_offline(&publish, &mut revision);
@@ -498,13 +554,22 @@ impl Host {
                 }
             }
             tokio::select! {
-                _ = publish.closed() => return,
+                _ = publish.closed() => break,
                 _ = epochs.changed() => {
                     mark_offline(&publish, &mut revision);
                     last = None;
                 }
                 _ = sleep(Duration::from_millis(if last.is_some() { 350 } else { 900 })) => {}
             }
+        }
+        if self.watch_lifecycle.load(Ordering::Acquire) {
+            let _ = self
+                .call(
+                    "adapter/unwatch",
+                    json!({"thread":id,"watchId":watch_id}),
+                    Duration::from_secs(4),
+                )
+                .await;
         }
     }
 }
@@ -564,16 +629,46 @@ impl Adapter for Host {
         .map(|value| (!value.is_null()).then_some(value))
     }
     async fn media(&self, thread: &str, reference: &str) -> Result<Media> {
-        self.source(
-            "adapter/media",
-            json!({"thread":thread,"reference":reference}),
-        )
-        .await
-        .map(Media::Download)
+        let reply = self
+            .call(
+                "adapter/media",
+                json!({"thread":thread,"reference":reference}),
+                Duration::from_secs(25),
+            )
+            .await?;
+        if reply["kind"] != "verified-file" {
+            return self.source(reply).await.map(Media::Download);
+        }
+        let id = reply["attachmentId"]
+            .as_str()
+            .context("原生插件附件标识无效")?;
+        let sha256 = crate::dsh_media::attachment_digest(id)
+            .filter(|digest| reply["sha256"] == *digest)
+            .context("原生插件附件摘要无效")?;
+        ensure!(
+            reference.strip_prefix("dsh-file:") == Some(id),
+            "原生插件附件引用不符"
+        );
+        let size = reply["size"]
+            .as_u64()
+            .filter(|size| (1..=256 * crate::files::BLOCK as u64).contains(size))
+            .context("原生插件附件大小无效")?;
+        Ok(Media::VerifiedFile {
+            name: attachment_name(&reply)?,
+            size,
+            attachment_id: id.to_owned(),
+            sha256: sha256.to_owned(),
+        })
     }
     async fn export_log(&self, thread: &str) -> Result<Source> {
-        self.source("adapter/export", json!({"thread":thread}))
-            .await
+        let reply = self
+            .call(
+                "adapter/export",
+                json!({"thread":thread}),
+                Duration::from_secs(25),
+            )
+            .await?;
+        self.source(reply).await
     }
     fn subscribe(self: Arc<Self>, thread: &str) -> Result<Arc<Subscription>> {
         let mut subscriptions = self
@@ -616,13 +711,20 @@ impl Adapter for Host {
         }) {
             return Delivery::Rejected("原生插件会话尚未同步");
         }
+        let acknowledged = AtomicBool::new(false);
+        let record = |id: &str| {
+            created(id)?;
+            acknowledged.store(true, Ordering::Relaxed);
+            Ok(())
+        };
         let reply = self
-            .call(
+            .call_with_progress(
                 "adapter/write",
                 json!({"thread":thread,"requestId":request,"action":action}),
                 action
                     .dispatch_timeout()
                     .saturating_sub(Duration::from_secs(1)),
+                creates.then_some(&record),
             )
             .await;
         match reply {
@@ -644,7 +746,21 @@ impl Adapter for Host {
                             .filter(|id| valid_id(id))
                             .map(str::to_owned),
                     ),
-                    Some("rejected") if result.is_none() => Delivery::Rejected("原生插件拒绝请求"),
+                    Some("command") if !creates => match (
+                        value["commandId"].as_str().filter(|id| valid_id(id)),
+                        value["succeeded"].as_bool(),
+                    ) {
+                        (Some(id), Some(succeeded)) => Delivery::Command {
+                            id: id.to_owned(),
+                            succeeded,
+                        },
+                        _ => Delivery::Uncertain,
+                    },
+                    Some("rejected")
+                        if result.is_none() && !acknowledged.load(Ordering::Relaxed) =>
+                    {
+                        Delivery::Rejected("原生插件拒绝请求")
+                    }
                     _ => Delivery::Uncertain,
                 }
             }
@@ -658,6 +774,14 @@ fn valid_id(id: &str) -> bool {
         && !id
             .chars()
             .any(|c| c.is_control() || matches!(c, '/' | '\\'))
+}
+
+fn attachment_name(value: &Value) -> Result<String> {
+    Ok(value["name"]
+        .as_str()
+        .filter(|name| valid_id(name) && !matches!(*name, "." | ".."))
+        .context("原生插件附件名无效")?
+        .to_owned())
 }
 
 fn view(value: &Value, id: &str, revision: u64, read_only: bool, epoch: u64) -> Result<View> {
@@ -713,10 +837,12 @@ fn view(value: &Value, id: &str, revision: u64, read_only: bool, epoch: u64) -> 
     Ok(View {
         thread,
         messages: messages.clone().into(),
-        streamed: None,
+        streamed: value["streamed"]
+            .is_object()
+            .then(|| value["streamed"].clone()),
         observations: observations.into(),
-        image_limits: Value::Null,
-        continued_questions: Value::Null,
+        image_limits: value["imageLimits"].clone(),
+        continued_questions: value["continuedQuestions"].clone(),
         plugin_epoch: Some(epoch),
     })
 }

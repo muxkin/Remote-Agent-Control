@@ -62,7 +62,7 @@ pub struct Attachment {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct VerifiedUpload {
     pub name: String,
     pub path: PathBuf,

@@ -463,7 +463,7 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn attachment_digest(id: &str) -> Option<&str> {
+pub(crate) fn attachment_digest(id: &str) -> Option<&str> {
     let digest = id.strip_prefix("sha256:").unwrap_or(id);
     (digest.len() == 64
         && digest

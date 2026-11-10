@@ -2,7 +2,7 @@
 
 网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口；产品协议和系统连接器分别位于 `packages/adapter-codex`、`packages/adapter-dsh`。默认附带两款官方插件。每个配置实例有独立 Node 宿主、配置、状态目录与订阅；宿主只连接已有 Agent。
 
-纯 Rust Ely 适配器复用 `instances.json` 和设备配对。第三方插件使用原生进程，官方 Codex 与 DSH 目前由内建连接器提供。 [原生安装与更新](DESKTOP_ADAPTER.md)
+纯 Rust Ely 适配器复用 `instances.json` 和设备配对。第三方插件与官方 DSH 可使用原生独立进程。Codex 目前由内建连接器提供。 [原生安装与更新](DESKTOP_ADAPTER.md)
 
 ## Rust 原生插件
 
@@ -21,6 +21,16 @@ agent-space-native --adapter result REQUEST_ID
 网关在线时，切换会暂缓实例的新写入，等已接收的操作写回数据库，再停止旧进程并启动目标版本。目标版本完成初始化和状态握手后，网关才更新版本绑定并恢复订阅。启动失败时保留旧绑定并尝试恢复旧进程。网关离线时，请求留在本机队列，启动后处理。命令输出排队请求的 ID，可用 `result` 查询。
 
 原生 SDK 使用标准 `Content-Length` 帧传递 JSON-RPC 2.0。请求在 `params.generation` 中带进程代次，响应在顶层回显代次与请求 ID。`adapter/check` 和 `adapter/initialize` 返回 `{ "sdk": 1 }`。初始化包含 `id`、`name`、`config`、`stateDirectory`、`readOnly`、`packageVersion`，只有该实例的凭据进入其 `config`。`adapter/status` 返回 `{info,status}`。`adapter/read` 接收共享只读方法和参数。`adapter/view` 返回 `{thread,messages,observations}`，网关在已订阅时读取快照。`adapter/write` 接收会话、请求 ID 和操作，返回 `{state,turnId?,resultThreadId?}`。`adapter/media` 与 `adapter/export` 可返回实例目录内的 `{path,name}`，文件由网关加密传输。进程退出后重建连接与快照，已发出的写操作保留原请求 ID。插件以本机受信任代码运行。完整示例见 `desktop/native/examples/native-plugin-fixture.rs`。
+
+`adapter/view` 还可以附带 `streamed`、`imageLimits` 和 `continuedQuestions`。创建会话时，插件可在最终响应前发送一次 `adapter/threadCreated` JSON-RPC 通知。通知顶层回显 `generation`，`params` 包含原 JSON-RPC 请求的 `requestId` 及新会话的 `threadId`。网关收到后立即保存会话 ID。如果后续首条消息的结果未知，仍可用已保存的 ID 找回会话。
+
+初始化返回 `watchLifecycle: true` 的插件会收到带 `watchId` 的视图请求和 `adapter/unwatch`，可据此释放同一订阅的本机资源。临时下载文件可写入实例目录的 `transfers/<UUID>` 并在响应中标记 `temporary: true`，网关打开文件后清理路径。
+
+### 官方 DSH
+
+从桌面验收 CI 下载当前系统与架构的 `agent-space-adapter-dsh-*` 产物，解压后将目录传给 `agent-space-native --adapter install`，再重启适配器。沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。已有版本绑定优先，新实例会尝试绑定配置中的版本和当前适配器版本。尚未安装独立包的实例会使用内建 DSH。实例建立版本绑定后可使用 `upgrade` 和 `rollback` 在线切换。
+
+源码构建使用 `cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-dsh`。运行 `scripts/desktop/native-plugin-package.mjs` 生成插件目录后，可用 `scripts/desktop/native-dsh-smoke.ts ADAPTER PLUGIN_DIRECTORY` 验证独立进程。
 
 下面的安装、npm 发布和在线监督器说明适用于旧 Node 网关。
 

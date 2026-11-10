@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, readdir, mkdir, mkdtemp, rm, writeFile, copyFile, chmod } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { zipSync } from 'fflate';
 import { buildInstaller } from './native-installer.mjs';
+import { nativeNotices } from './native-notices.mjs';
 import { windowsSign } from './native-signing.mjs';
 
 const args = process.argv.slice(2);
@@ -76,7 +77,7 @@ ${platform === 'darwin' ? '将 Agent Space Adapter 拖到 Applications 后打开
 ${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境的 XCB 和 XKB 运行库。\n' : ''}详见仓库 docs/DESKTOP_ADAPTER.md。
 `,
   );
-  let thirdParty = await notices();
+  let thirdParty = await nativeNotices(native, target);
   if (target === 'x86_64-pc-windows-gnullvm') {
     const toolchainNotice = process.env.POCKET_NATIVE_LLVM_MINGW_LICENSE;
     assert(toolchainNotice, 'Set POCKET_NATIVE_LLVM_MINGW_LICENSE to the llvm-mingw LICENSE.TXT');
@@ -115,42 +116,4 @@ async function checksum(path) {
     `${createHash('sha256').update(data).digest('hex')}  ${basename(path)}\n`,
   );
   console.log(`${path} · ${(data.length / 2 ** 20).toFixed(2)} MiB`);
-}
-
-async function notices() {
-  const graph = execFileSync(
-    'cargo',
-    ['tree', '--locked', '--target', target, '--edges', 'normal', '--prefix', 'none', '--format', '{p}'],
-    { cwd: native, encoding: 'utf8' },
-  );
-  const registry = join(process.env.CARGO_HOME ?? join(homedir(), '.cargo'), 'registry', 'src');
-  const registries = (await readdir(registry)).map((entry) => join(registry, entry));
-  const packages = new Set(
-    [...graph.matchAll(/^([A-Za-z0-9_-]+) v(\S+)/gm)].map(([, name, version]) => `${name}-${version}`),
-  );
-  const texts = [];
-  for (const pkg of [...packages].sort()) {
-    for (const root of registries) {
-      const dir = join(root, pkg);
-      const entries = await readdir(dir, { withFileTypes: true }).catch((error) => {
-        if (error.code === 'ENOENT') return [];
-        throw error;
-      });
-      if (!entries.length) continue;
-      for (const entry of entries) {
-        if (entry.isFile() && /^(licen[cs]e|copying|notice|ofl)/i.test(entry.name))
-          texts.push(`\n${pkg} · ${entry.name}\n\n${await readFile(join(dir, entry.name), 'utf8')}`);
-      }
-      if (pkg.startsWith('ely-core-')) {
-        const assets = join(dir, 'assets');
-        for (const file of await readdir(assets, { recursive: true }).catch(() => [])) {
-          if (/^(licen[cs]e|copying|notice|ofl)/i.test(basename(file)))
-            texts.push(`\n${pkg} · ${file}\n\n${await readFile(join(assets, file), 'utf8')}`);
-        }
-      }
-      break;
-    }
-  }
-  assert(texts.length > 0, 'Cannot locate any dependency notices');
-  return texts.join('\n');
 }

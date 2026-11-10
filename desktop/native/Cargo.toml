@@ -1,14 +1,21 @@
 [package]
 name = "agent-space-native"
-version = "0.3.9"
+version = "0.3.10"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 publish = false
+default-run = "agent-space-native"
 
 [features]
 default = ["ely"]
 ely = ["dep:ely-core", "dep:gpui", "dep:gpui-platform", "dep:tray-icon", "dep:auto-launch", "dep:image", "dep:zbus"]
+official-plugins = []
+
+[[bin]]
+name = "agent-space-adapter-dsh"
+path = "src/bin/agent-space-adapter-dsh.rs"
+required-features = ["official-plugins"]
 
 [dependencies]
 anyhow = "1"

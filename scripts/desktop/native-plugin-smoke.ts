@@ -208,6 +208,14 @@ try {
   await version('1.0.0');
   assert.equal((await rpc<{ threads: { id: string }[] }>('/threads')).threads[0].id, thread);
   await watch();
+  const create = { requestId: randomUUID(), title: 'Durable creation', prompt: 'First prompt' };
+  await rpc('/threads/new/create', 'POST', create);
+  const operation = () => rpc<{ state: string; resultThreadId?: string }>('/operations/' + create.requestId);
+  await until(async () => (await operation()).state === 'uncertain');
+  assert.equal((await operation()).resultThreadId, 'created-before-exit');
+  await rpc('/threads/new/create', 'POST', create);
+  assert.equal((await operation()).resultThreadId, 'created-before-exit');
+  await watch();
   for (const text of ['first message', 'crash-after-write']) {
     const send = { requestId: randomUUID(), text };
     await rpc(`/threads/${thread}/messages`, 'POST', send);
@@ -285,7 +293,7 @@ try {
   await version('1.1.0');
   assert.deepEqual(await texts(), expected);
   console.log(
-    'Native plugin: pinned installs, isolated state, crash recovery, online drain and cutover, failed upgrade recovery, rollback and offline queue passed.',
+    'Native plugin: pinned installs, isolated state, crash and partial-create recovery, online cutover, failed upgrade recovery, rollback and offline queue passed.',
   );
 } finally {
   await stop();

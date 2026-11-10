@@ -87,6 +87,16 @@ fn main() -> anyhow::Result<()> {
                 json!({"thread":thread,"messages":messages,"observations":observations})
             }
             "adapter/write" => {
+                if params["action"].get("Create").is_some() {
+                    let progress = serde_json::to_vec(&json!({
+                        "jsonrpc":"2.0","method":"adapter/threadCreated","generation":params["generation"],
+                        "params":{"requestId":request["id"],"threadId":"created-before-exit"},
+                    }))?;
+                    write!(output, "Content-Length: {}\r\n\r\n", progress.len())?;
+                    output.write_all(&progress)?;
+                    output.flush()?;
+                    std::process::exit(5);
+                }
                 assert_eq!(params["thread"], "demo-thread");
                 let text = params["action"]["Send"]["text"].as_str().unwrap();
                 messages.push(json!({"id":params["requestId"],"role":"user","text":text}));

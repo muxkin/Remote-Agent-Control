@@ -180,7 +180,8 @@ impl Store {
     ) -> Result<()> {
         let changed = self.db.execute(
             "UPDATE operations SET result_thread_id=?1,updated=?2
-             WHERE backend_id=?3 AND id=?4 AND kind='create' AND state='dispatching'",
+             WHERE backend_id=?3 AND id=?4 AND kind='create' AND state='dispatching'
+               AND (result_thread_id IS NULL OR result_thread_id=?1)",
             params![thread, now(), backend, id.to_string()],
         )?;
         ensure!(changed == 1, "无法保存新会话标识");

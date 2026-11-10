@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rename as renameFile, rm, writeFile } from 'node:fs/promises';
@@ -15,6 +15,8 @@ import { apiCall } from '../../src/shared/rpc.js';
 import { createIdentity } from '../../src/shared/secure-channel.js';
 
 const state = await mkdtemp(join(tmpdir(), 'native-dsh-smoke-'));
+const executable = resolve(process.argv[2]);
+const plugin = process.argv[3] ? resolve(process.argv[3]) : undefined;
 const legacy = join(state, 'legacy');
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const png = await readFile('src/web/public/app-icon-32.png');
@@ -621,7 +623,7 @@ const phone = await createIdentity();
 let child: ReturnType<typeof spawn> | undefined;
 
 async function launch() {
-  child = spawn(resolve(process.argv[2]), ['--headless', '--print-pair'], {
+  child = spawn(executable, ['--headless', '--print-pair'], {
     env: {
       ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(POCKET_|CODEX_)/i.test(key))),
       CODEX_HOME: join(state, 'no-codex'),
@@ -655,6 +657,12 @@ async function stop() {
 }
 
 try {
+  if (plugin) {
+    execFileSync(executable, ['--adapter', 'install', plugin], {
+      env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+  }
   dsh.listen(0, '127.0.0.1');
   await once(dsh, 'listening');
   const carrier = dsh.address();
@@ -722,13 +730,18 @@ try {
     await wait(() => views.get(backendId)?.thread.synchronized === true);
   };
   try {
-    const { backends } = await session.rpc<{ backends: { id: string; connected: boolean }[] }>(
-      apiCall('/backends'),
-    );
+    const { backends } = await session.rpc<{
+      backends: { id: string; connected: boolean; adapterVersion?: string }[];
+    }>(apiCall('/backends'));
     assert.deepEqual(
       backends.map(({ id, connected }) => [id, connected]),
       instances.map(({ id }) => [id, true]),
     );
+    if (plugin)
+      assert(
+        backends.every((entry) => entry.adapterVersion),
+        'Expected the independent DSH plugin',
+      );
     const open = randomUUID();
     await rpc(one.id, '/threads/shared/open', 'POST', { requestId: open });
     await operation(open, 'completed');

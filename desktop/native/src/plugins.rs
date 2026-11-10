@@ -72,21 +72,21 @@ pub(crate) struct Observation {
     pub state: &'static str,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum Write {
     Send {
         text: String,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<VerifiedUpload>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skills: Vec<String>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         plugin_ids: Vec<String>,
     },
     Steer {
         expected: String,
         text: String,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<VerifiedUpload>,
     },
     Interrupt {
@@ -107,7 +107,7 @@ pub(crate) enum Write {
         title: Option<String>,
         prompt: String,
         project: Option<String>,
-        #[serde(skip_serializing_if = "CreationSettings::is_empty")]
+        #[serde(default, skip_serializing_if = "CreationSettings::is_empty")]
         settings: CreationSettings,
     },
     Settings(ModelSettings),
@@ -116,7 +116,7 @@ pub(crate) enum Write {
     Open,
 }
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct CreationSettings {
     pub model: Option<String>,
     pub thinking: Option<String>,
@@ -365,31 +365,45 @@ impl Registry {
                     && (1..=160).contains(&row.name.len()),
                 "插件实例标识无效"
             );
-            if row.plugin != "@agent-remote/adapter-dsh" {
-                let package = crate::plugin_catalog::Catalog::open(directory)
-                    .and_then(|catalog| catalog.bind(&row.id, &row.plugin, row.version.as_deref()))
+            let is_dsh = row.plugin == "@agent-remote/adapter-dsh";
+            let package = crate::plugin_catalog::Catalog::open(directory)
+                .and_then(|catalog| {
+                    let installed = catalog.bind(&row.id, &row.plugin, row.version.as_deref())?;
+                    if is_dsh && installed.is_none() {
+                        return catalog.bind(&row.id, &row.plugin, Some(env!("CARGO_PKG_VERSION")));
+                    }
+                    Ok(installed)
+                })
+                .ok()
+                .flatten();
+            ensure!(
+                !is_dsh
+                    || package
+                        .as_ref()
+                        .is_none_or(|package| package.manifest.product == "dsh"),
+                "官方 DSH 插件产品标识无效"
+            );
+            let mut config = row.config.as_object().cloned().unwrap_or_default();
+            for (key, variable) in row.secrets {
+                ensure!(
+                    !variable.is_empty()
+                        && variable
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+                    "插件凭据变量无效"
+                );
+                let value = env::var(&variable)
                     .ok()
-                    .flatten();
-                let mut config = row.config.as_object().cloned().unwrap_or_default();
-                for (key, variable) in row.secrets {
-                    ensure!(
-                        !variable.is_empty()
-                            && variable
-                                .bytes()
-                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
-                        "插件凭据变量无效"
-                    );
-                    let value = env::var(&variable)
-                        .ok()
-                        .or_else(|| secrets.get(&variable).cloned())
-                        .unwrap_or_default();
-                    config.insert(key, json!(value));
-                }
+                    .or_else(|| secrets.get(&variable).cloned())
+                    .unwrap_or_default();
+                config.insert(key, json!(value));
+            }
+            let instance_read_only = read_only || config.get("readOnly") == Some(&json!(true));
+            if !is_dsh || package.is_some() {
                 let private = directory
                     .join("native-plugins")
                     .join("instances")
                     .join(&row.id);
-                let instance_read_only = read_only || config.get("readOnly") == Some(&json!(true));
                 let id = row.id;
                 let host = Arc::new(crate::plugin_host::Host::new(
                     id.clone(),
@@ -406,31 +420,24 @@ impl Registry {
                 hosts.push(host);
                 continue;
             }
-            let token = if let Some(variable) = row.secrets.get("token") {
-                ensure!(
-                    !variable.is_empty()
-                        && variable
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
-                    "DSH 凭据变量无效"
-                );
-                env::var(variable)
-                    .ok()
-                    .or_else(|| secrets.get(variable).cloned())
-                    .unwrap_or_default()
-            } else {
-                row.config["token"].as_str().unwrap_or_default().to_owned()
-            };
             let dsh = Dsh::new(
                 row.id,
                 row.name,
-                row.config["url"].as_str().context("DSH 缺少服务地址")?,
-                row.config["version"]
-                    .as_str()
+                config
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .context("DSH 缺少服务地址")?,
+                config
+                    .get("version")
+                    .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_owned(),
-                token,
-                read_only || row.config["readOnly"] == true,
+                config
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                instance_read_only,
             )?;
             let id = dsh.id().to_owned();
             ensure!(
