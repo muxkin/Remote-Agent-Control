@@ -2,7 +2,6 @@ use anyhow::Result;
 #[cfg(unix)]
 use anyhow::{Context, bail, ensure};
 use std::{
-    env,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -16,46 +15,61 @@ pub type Stream = Box<dyn Transport>;
 pub struct Endpoint {
     socket: PathBuf,
     executable: Option<PathBuf>,
+    app_tools: Option<PathBuf>,
 }
 
 impl Endpoint {
-    pub fn discover(home: &Path) -> Option<Self> {
-        let socket = env::var_os("POCKET_NATIVE_CODEX_SOCKET")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                if cfg!(windows) {
-                    PathBuf::from(r"\\.\pipe\codex-ipc")
+    pub fn discover(home: &Path, options: &crate::codex_service::Options) -> Option<Self> {
+        let socket = options.socket.clone().unwrap_or_else(|| {
+            if cfg!(windows) {
+                PathBuf::from(r"\\.\pipe\codex-ipc")
+            } else {
+                home.join("ipc/ipc.sock")
+            }
+        });
+        let executable = options.executable.clone().or_else(|| {
+            if let Some(root) = &options.root {
+                let candidates = if cfg!(target_os = "macos") {
+                    ["Contents/MacOS/Codex", "Contents/MacOS/ChatGPT"]
+                } else if cfg!(windows) {
+                    ["Codex.exe", "ChatGPT.exe"]
                 } else {
-                    home.join("ipc/ipc.sock")
-                }
-            });
-        let executable = env::var_os("POCKET_NATIVE_CODEX_EXECUTABLE")
-            .map(PathBuf::from)
-            .or_else(|| {
-                if cfg!(target_os = "linux") {
-                    Some(PathBuf::from("/usr/lib/chatgpt/ChatGPT"))
-                } else if cfg!(target_os = "macos") {
-                    let candidates = [
-                        Some(PathBuf::from(
-                            "/Applications/Codex.app/Contents/MacOS/Codex",
-                        )),
-                        Some(PathBuf::from(
-                            "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
-                        )),
-                        dirs::home_dir()
-                            .map(|home| home.join("Applications/Codex.app/Contents/MacOS/Codex")),
-                    ]
+                    ["ChatGPT", "Codex"]
+                };
+                return candidates
                     .into_iter()
-                    .flatten()
-                    .filter_map(|path| path.canonicalize().ok())
-                    .filter(|path| path.is_file())
-                    .collect::<std::collections::BTreeSet<_>>();
-                    (candidates.len() == 1).then(|| candidates.into_iter().next().unwrap())
-                } else {
-                    None
-                }
-            });
-        Some(Self { socket, executable })
+                    .map(|name| root.join(name))
+                    .find(|path| path.is_file())
+                    .or_else(|| Some(root.join(candidates[0])));
+            }
+            if cfg!(target_os = "linux") {
+                Some(PathBuf::from("/usr/lib/chatgpt/ChatGPT"))
+            } else if cfg!(target_os = "macos") {
+                let candidates = [
+                    Some(PathBuf::from(
+                        "/Applications/Codex.app/Contents/MacOS/Codex",
+                    )),
+                    Some(PathBuf::from(
+                        "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+                    )),
+                    dirs::home_dir()
+                        .map(|home| home.join("Applications/Codex.app/Contents/MacOS/Codex")),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|path| path.canonicalize().ok())
+                .filter(|path| path.is_file())
+                .collect::<std::collections::BTreeSet<_>>();
+                (candidates.len() == 1).then(|| candidates.into_iter().next().unwrap())
+            } else {
+                None
+            }
+        });
+        Some(Self {
+            socket,
+            executable,
+            app_tools: options.app_tools.clone(),
+        })
     }
 
     pub fn executable(&self) -> Option<&Path> {
@@ -67,13 +81,13 @@ impl Endpoint {
     }
 
     pub async fn open_app_tools(&self) -> Result<Stream> {
-        let socket = env::var_os("POCKET_NATIVE_CODEX_APP_TOOLS").map(PathBuf::from);
+        let socket = self.app_tools.clone();
         #[cfg(unix)]
         let socket = socket.or_else(|| {
             let root = if cfg!(target_os = "linux") {
                 PathBuf::from("/tmp")
             } else {
-                env::temp_dir()
+                std::env::temp_dir()
             };
             let uid = rustix::process::geteuid().as_raw();
             let candidates: Vec<_> = [
@@ -99,6 +113,7 @@ impl Endpoint {
             socket: socket
                 .ok_or_else(|| anyhow::anyhow!("本机桌面应用工具不可用或存在多个端点"))?,
             executable: self.executable.clone(),
+            app_tools: None,
         };
         tokio::time::timeout(Duration::from_secs(5), endpoint.connect(true)).await?
     }

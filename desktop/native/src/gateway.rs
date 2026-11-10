@@ -1,6 +1,5 @@
 use crate::{
-    codex::History,
-    codex_live::Desktop,
+    codex_backend::Backend,
     device::{Backends, DeviceSession},
     state::{Device, Pairing, Route, Store, hash, now},
     update::{Client, UpdateGate},
@@ -93,8 +92,7 @@ pub struct DisplayPairing {
 pub struct RelayConfig {
     pub origin: Url,
     pub enrollment: String,
-    pub history: Option<History>,
-    pub desktop: Option<Desktop>,
+    pub codex: Backend,
     pub direct: Option<crate::direct::Direct>,
     pub storage: Option<crate::storage::Storage>,
     pub plugins: crate::plugins::Registry,
@@ -118,8 +116,7 @@ impl RelayConfig {
         Ok(Self {
             origin,
             enrollment,
-            history: None,
-            desktop: None,
+            codex: Backend::default(),
             direct: None,
             storage: None,
             plugins: Default::default(),
@@ -181,7 +178,7 @@ async fn run_lane(
     loop {
         state.send_modify(|current| {
             current.phase = Phase::Connecting;
-            current.history = config.history.is_some();
+            current.history = config.codex.has_history();
         });
         let result = run_connection(
             config,
@@ -342,7 +339,7 @@ async fn run_connection(
                             if let Some(route) = route.filter(|_| wires.len() < 32 && !wires.contains_key(&id))
                                 && let Some(client) = gate.admit()
                             {
-                                wires.insert(id, spawn_wire(id, route.clone(), db.clone(), identity.clone(), lane, Backends { history: config.history.clone(), desktop: config.desktop.clone(), direct: config.direct.clone(), storage: config.storage.clone(), update_gate: gate.clone(), plugins: config.plugins.clone() }, outgoing.clone(), client));
+                                wires.insert(id, spawn_wire(id, route.clone(), db.clone(), identity.clone(), lane, Backends { codex: config.codex.clone(), direct: config.direct.clone(), storage: config.storage.clone(), update_gate: gate.clone(), plugins: config.plugins.clone() }, outgoing.clone(), client));
                             } else if !wires.contains_key(&id) {
                                 send(&mut socket, text(json!({"type": "close", "id": id}))).await?;
                             }
@@ -485,10 +482,8 @@ async fn serve(
         );
     }
     let (session, device) = authenticate(&db, peer, &route, auth)?;
-    if lane == Lane::Control
-        && let Some(desktop) = &backends.desktop
-    {
-        tokio::join!(desktop.tools.refresh(), desktop.reply_fork.probe());
+    if lane == Lane::Control {
+        backends.codex.refresh().await;
     }
     let stun = backends
         .direct
@@ -499,7 +494,7 @@ async fn serve(
         json!({
             "type": "ready", "protocol": 2, "sessionId": session,
             "device": {"id": device.id, "name": device.name}, "ticket": device.ticket,
-            "hostName": "Agent 空间 · 原生", "status": backends.status(false),
+            "hostName": "Agent 空间 · 原生", "status": backends.codex.status(false),
             "p2p": {"enabled": backends.direct.is_some(), "stunUrls": stun},
         }),
     )

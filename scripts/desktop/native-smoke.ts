@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { zstdCompressSync } from 'node:zlib';
 import { once } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { Store } from '../../src/server/store.js';
 import { hostIdentity } from '../../src/server/device-identity.js';
 import { buildRelay } from '../../src/server/relay.js';
@@ -25,10 +26,15 @@ import { historyFixture, THREAD } from '../../test/helpers.js';
 import { FrameReader, encodeFrame } from '../../packages/adapter-codex/src/framing.js';
 
 const executable = resolve(process.argv[2] ?? 'desktop/native/target/release/agent-space-native');
+const codexPackage = process.argv[3] && resolve(process.argv[3]);
 const directory = await mkdtemp(
   join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'native-adapter-smoke-'),
 );
 const state = join(directory, 'state');
+const adapter = (...args: string[]) =>
+  promisify(execFile)(executable, ['--adapter', ...args], {
+    env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
+  });
 const codexHome = join(directory, 'codex');
 await mkdir(state, { mode: 0o700 });
 const host = await hostIdentity(state);
@@ -270,16 +276,19 @@ async function launch(useSaved = false) {
       if (existsSync(file)) runtime.privateFile(file);
     }
   }
+  const inherited = codexPackage
+    ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^POCKET_NATIVE_CODEX_/i.test(key)))
+    : process.env;
   const child = spawn(executable, ['--headless', '--print-pair'], {
     env: {
-      ...process.env,
+      ...inherited,
       POCKET_NATIVE_ORIGIN: useSaved ? '' : origin,
       POCKET_NATIVE_ENROLLMENT: useSaved ? '' : enrollment,
       POCKET_NATIVE_STATE_DIR: state,
-      POCKET_NATIVE_CODEX_HOME: codexHome,
+      ...(!codexPackage ? { POCKET_NATIVE_CODEX_HOME: codexHome } : {}),
       POCKET_NATIVE_LEGACY_STATE: legacyState,
       POCKET_NATIVE_READ_ONLY: ipc ? '0' : '1',
-      ...(ipc
+      ...(ipc && !codexPackage
         ? {
             POCKET_NATIVE_CODEX_SOCKET: ipc.path,
             POCKET_NATIVE_CODEX_APP_TOOLS: ipc.path,
@@ -333,6 +342,8 @@ async function desktopFixture() {
   const expected = { send: 0, steer: 0, interrupt: 0 };
   const turn = crypto.randomUUID();
   let publishTurn = () => {};
+  let holdStart = false;
+  let heldStart: (() => void) | undefined;
   let opened = false;
   const tools = [
     'navigate_to_codex_page',
@@ -599,7 +610,9 @@ async function desktopFixture() {
               params: value.params.turnStart.request,
               items: [],
             });
-            response({ result: { turn: { id: turn } } });
+            const acknowledge = () => response({ result: { turn: { id: turn } } });
+            if (holdStart) heldStart = acknowledge;
+            else acknowledge();
             publishTurn = snapshot;
             break;
           }
@@ -628,6 +641,14 @@ async function desktopFixture() {
     turn,
     expected,
     actions,
+    holdStart: () => {
+      holdStart = true;
+      return () => {
+        holdStart = false;
+        heldStart?.();
+        heldStart = undefined;
+      };
+    },
     setRequest: (id: string | number, method: string, params: Record<string, unknown>) => {
       pending = [{ id, method, params }];
       publish();
@@ -795,7 +816,17 @@ async function testLive(
       skillIds: [skills[0].id],
       pluginIds: [plugins[0].id],
     });
-    await session.rpc(call);
+    const releaseStart = codexPackage ? ipc.holdStart() : undefined;
+    try {
+      await session.rpc(call);
+      if (releaseStart) {
+        await wait(() => ipc.expected.send === 1);
+        ipc.publishTurn();
+        await wait(() => view?.activeTurnId === ipc.turn);
+      }
+    } finally {
+      releaseStart?.();
+    }
     await wait(async () => (await operation(id)).state === 'accepted');
     const early = crypto.randomUUID();
     await session.rpc(
@@ -1229,7 +1260,81 @@ async function verifyTlsClient() {
   }
 }
 
+async function installCodexVariants(folder: string) {
+  const manifest: { name: string; version: string; entry: string } = JSON.parse(
+    await readFile(join(folder, 'adapter.json'), 'utf8'),
+  );
+  assert.equal(manifest.name, '@agent-remote/adapter-codex');
+  await adapter('install', folder);
+  const replacement = join(directory, 'codex-plugin-replacement');
+  await mkdir(replacement);
+  await copyFile(join(folder, manifest.entry), join(replacement, manifest.entry));
+  const next = { ...manifest, version: manifest.version + '-qa.1' };
+  await writeFile(join(replacement, 'adapter.json'), JSON.stringify(next));
+  await adapter('install', replacement);
+  const configPath = join(state, 'instances.json');
+  await writeFile(
+    configPath,
+    JSON.stringify([
+      {
+        id: 'codex-local',
+        name: 'Codex fixture',
+        plugin: manifest.name,
+        version: manifest.version,
+        config: {
+          home: codexHome,
+          socket: ipc?.path,
+          appTools: ipc?.path,
+          executable: ipc ? process.execPath : undefined,
+          cli: forkCli,
+        },
+      },
+    ]),
+    { mode: 0o600 },
+  );
+  if (process.platform === 'win32') platformRuntime().privateFile(configPath);
+  return { initial: manifest.version, next: next.version, name: manifest.name };
+}
+
+async function verifyCodexSwitch(
+  session: Awaited<ReturnType<typeof nodeSession>>,
+  versions: Awaited<ReturnType<typeof installCodexVariants>>,
+) {
+  let current: { epoch: string; synchronized: boolean } | undefined;
+  const remove = session.onEvent((event) => {
+    if (event.type === 'sync' && event.backendId === 'codex-local') {
+      const view = event.updates.find((update: { kind: string }) => update.kind === 'manifest');
+      if (view) current = { epoch: view.epoch, synchronized: view.thread.synchronized === true };
+    }
+  });
+  const waitFor = async (check: () => boolean) => {
+    for (let i = 0; i < 120 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 80));
+    assert(check(), 'Codex did not recover its live subscription after a plugin switch');
+  };
+  try {
+    await session.request('watch', { threadId: THREAD, backendId: 'codex-local' });
+    await waitFor(() => current?.synchronized === true);
+    for (const [command, version] of [
+      ['upgrade', versions.next],
+      ['rollback', versions.initial],
+    ] as const) {
+      const previous = current!.epoch;
+      const target = `${versions.name}@${version}`;
+      await adapter(command, 'codex-local', ...(command === 'upgrade' ? [target] : []));
+      const { stdout } = await adapter('list');
+      const rows = JSON.parse(stdout).instances as { instance: string; current: string }[];
+      assert.equal(rows.find(({ instance }) => instance === 'codex-local')?.current, target);
+      await waitFor(() => current?.synchronized === true && current.epoch !== previous);
+      const result = await session.rpc<{ threads: { id: string }[] }>(apiCall('/threads'));
+      assert.equal(result.threads[0].id, THREAD);
+    }
+  } finally {
+    remove();
+  }
+}
+
 try {
+  const versions = codexPackage ? await installCodexVariants(codexPackage) : undefined;
   await verifyTlsClient();
   await relay.listen();
   let gateway = await launch();
@@ -1260,6 +1365,15 @@ try {
     const ready = await session.ready;
     assert.equal(ready.status.writesEnabled, !!ipc);
     assert.equal(ready.status.capabilities.openThread, !!ipc);
+    if (versions) {
+      const { backends } = await session.rpc<{
+        backends: { id: string; name: string; profile: string; adapterVersion?: string }[];
+      }>(apiCall('/backends'));
+      const codex = backends.find(({ id }) => id === 'codex-local');
+      assert.equal(codex?.profile, 'rust-native-plugin');
+      assert.equal(codex?.name, 'Codex fixture');
+      assert.equal(codex?.adapterVersion, versions.initial);
+    }
     const list = await session.rpc<{ threads: { id: string; title: string }[] }>(apiCall('/threads'));
     assert.deepEqual(
       list.threads.map(({ id, title }) => [id, title]),
@@ -1358,7 +1472,10 @@ try {
     }
     await assert.rejects(describe(unrelatedFile));
     await assert.rejects(session.rpc(apiCall(`/threads/${THREAD}/messages`, 'POST', { text: 'blocked' })));
-    if (ipc) await testLive(session, ipc, phone);
+    if (ipc) {
+      await testLive(session, ipc, phone);
+      if (versions) await verifyCodexSwitch(session, versions);
+    }
     session.close();
     await assert.rejects(pair(), 'Pairing code was not single-use');
 
@@ -1371,7 +1488,7 @@ try {
     await gateway.stop();
   }
   console.log(
-    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, replay rejection and restart passed${ipc ? ', including native Codex live controls' : ''}.`,
+    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, replay rejection and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with the independently installed Codex plugin' : ''}.`,
   );
 } finally {
   await relay.close();

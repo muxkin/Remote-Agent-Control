@@ -11,9 +11,12 @@ const [
   output,
   target = execFileSync('rustc', ['--print', 'host-tuple'], { encoding: 'utf8' }).trim(),
 ] = process.argv.slice(2);
-assert(product === 'dsh' && binary && output, 'Usage: native-plugin-package.mjs dsh BINARY OUTPUT');
+assert(
+  (product === 'dsh' || product === 'codex') && binary && output,
+  'Usage: native-plugin-package.mjs <dsh|codex> BINARY OUTPUT',
+);
 const entry = basename(binary);
-assert.match(entry, /^agent-space-adapter-dsh(?:\.exe)?$/);
+assert([`agent-space-adapter-${product}`, `agent-space-adapter-${product}.exe`].includes(entry));
 const cargo = await readFile(new URL('../../desktop/native/Cargo.toml', import.meta.url), 'utf8');
 const version = cargo.match(/^version = "(\d+\.\d+\.\d+)"$/m)?.[1];
 assert(version, 'Cannot read native plugin version');
@@ -36,7 +39,7 @@ await writeFile(
 await writeFile(
   join(output, 'adapter.json'),
   JSON.stringify(
-    { sdk: 1, name: '@agent-remote/adapter-dsh', version, product, stateVersion: 1, entry, sha256 },
+    { sdk: 1, name: `@agent-remote/adapter-${product}`, version, product, stateVersion: 1, entry, sha256 },
     null,
     2,
   ) + '\n',

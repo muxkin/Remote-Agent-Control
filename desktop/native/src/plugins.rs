@@ -1,4 +1,10 @@
-use crate::{dsh::Dsh, files::VerifiedUpload, history_media::Source, state::private_file};
+use crate::{
+    codex_backend::{self, Selection},
+    dsh::Dsh,
+    files::VerifiedUpload,
+    history_media::Source,
+    state::private_file,
+};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -298,7 +304,10 @@ impl ConfigRow {
 }
 
 impl Registry {
-    pub(crate) fn load(directory: &Path, runtime: &tokio::runtime::Handle) -> Result<Self> {
+    pub(crate) fn load(
+        directory: &Path,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<(Self, Selection)> {
         let legacy = env::var_os("POCKET_NATIVE_LEGACY_STATE")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && path != directory);
@@ -333,15 +342,16 @@ impl Registry {
                     .filter(|file| file.exists())
             })
             .or_else(|| path("POCKET_NATIVE_DEFAULT_INSTANCES"));
-        let Some(file) = file else {
-            return Ok(Self::default());
+        let rows: Vec<ConfigRow> = if let Some(file) = file {
+            let mut bytes = Vec::new();
+            private_file(&file, false)?
+                .take(128 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(bytes.len() <= 128 * 1024, "插件实例配置过大");
+            serde_json::from_slice(&bytes).context("插件实例配置无效")?
+        } else {
+            Vec::new()
         };
-        let mut bytes = Vec::new();
-        private_file(&file, false)?
-            .take(128 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= 128 * 1024, "插件实例配置过大");
-        let rows: Vec<ConfigRow> = serde_json::from_slice(&bytes).context("插件实例配置无效")?;
         ensure!(rows.len() <= 33, "插件实例配置过多");
         let read_only = ["POCKET_NATIVE_READ_ONLY", "POCKET_READ_ONLY"]
             .iter()
@@ -351,37 +361,16 @@ impl Registry {
             });
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
         let mut hosts = Vec::new();
+        let mut codex = None;
         for row in rows.into_iter().filter_map(ConfigRow::into_instance) {
-            if row.id == "codex-local" && row.plugin == "@agent-remote/adapter-codex" {
-                continue;
-            }
             ensure!(
                 (1..=80).contains(&row.id.len())
-                    && row.id != "codex-local"
                     && row
                         .id
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
                     && (1..=160).contains(&row.name.len()),
                 "插件实例标识无效"
-            );
-            let is_dsh = row.plugin == "@agent-remote/adapter-dsh";
-            let package = crate::plugin_catalog::Catalog::open(directory)
-                .and_then(|catalog| {
-                    let installed = catalog.bind(&row.id, &row.plugin, row.version.as_deref())?;
-                    if is_dsh && installed.is_none() {
-                        return catalog.bind(&row.id, &row.plugin, Some(env!("CARGO_PKG_VERSION")));
-                    }
-                    Ok(installed)
-                })
-                .ok()
-                .flatten();
-            ensure!(
-                !is_dsh
-                    || package
-                        .as_ref()
-                        .is_none_or(|package| package.manifest.product == "dsh"),
-                "官方 DSH 插件产品标识无效"
             );
             let mut config = row.config.as_object().cloned().unwrap_or_default();
             for (key, variable) in row.secrets {
@@ -399,6 +388,39 @@ impl Registry {
                 config.insert(key, json!(value));
             }
             let instance_read_only = read_only || config.get("readOnly") == Some(&json!(true));
+            if row.id == codex_backend::ID {
+                ensure!(
+                    row.plugin == codex_backend::PACKAGE,
+                    "默认 Codex 实例只能使用官方 Codex 插件"
+                );
+                ensure!(codex.is_none(), "默认 Codex 实例标识重复");
+                codex = Some(Selection::resolve(
+                    row.name,
+                    row.version,
+                    &config,
+                    &secrets,
+                    instance_read_only,
+                )?);
+                continue;
+            }
+            let is_dsh = row.plugin == "@agent-remote/adapter-dsh";
+            let package = crate::plugin_catalog::Catalog::open(directory)
+                .and_then(|catalog| {
+                    if is_dsh {
+                        catalog.bind_official(&row.id, &row.plugin, row.version.as_deref())
+                    } else {
+                        catalog.bind(&row.id, &row.plugin, row.version.as_deref())
+                    }
+                })
+                .ok()
+                .flatten();
+            ensure!(
+                !is_dsh
+                    || package
+                        .as_ref()
+                        .is_none_or(|package| package.manifest.product == "dsh"),
+                "官方 DSH 插件产品标识无效"
+            );
             if !is_dsh || package.is_some() {
                 let private = directory
                     .join("native-plugins")
@@ -448,7 +470,17 @@ impl Registry {
         for host in hosts {
             runtime.spawn(host.supervise(directory.to_owned()));
         }
-        Ok(Self(Arc::new(plugins)))
+        let codex = match codex {
+            Some(selection) => selection,
+            None => Selection::resolve(
+                "Codex".into(),
+                None,
+                &Default::default(),
+                &secrets,
+                read_only,
+            )?,
+        };
+        Ok((Self(Arc::new(plugins)), codex))
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<Arc<dyn Adapter>> {

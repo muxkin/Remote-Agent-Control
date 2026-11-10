@@ -243,6 +243,34 @@ impl Catalog {
         Ok(package)
     }
 
+    pub(crate) fn bind_official(
+        &self,
+        id: &str,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<Option<Package>> {
+        if let Some(package) = self.bind(id, name, version)? {
+            return Ok(Some(package));
+        }
+        if let Some(package) = self.bind(id, name, Some(env!("CARGO_PKG_VERSION")))? {
+            return Ok(Some(package));
+        }
+        let key: Option<String> = self.db.query_row(
+            "SELECT key FROM packages WHERE substr(key,1,length(?1)+1)=?1||'@' ORDER BY rowid DESC LIMIT 1",
+            [name],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(package) = key
+            .as_deref()
+            .map(|key| self.package(key))
+            .transpose()?
+            .flatten()
+        {
+            return self.bind(id, name, Some(&package.manifest.version));
+        }
+        Ok(None)
+    }
+
     fn queue(&mut self, id: &str, target: Option<&str>) -> Result<(String, String)> {
         let tx = self
             .db

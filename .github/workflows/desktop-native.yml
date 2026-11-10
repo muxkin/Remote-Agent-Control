@@ -131,14 +131,27 @@ jobs:
         run: cargo build --release --locked --no-default-features --example native-im-fixture
       - name: Verify existing Agent identity, encrypted messaging and WebRTC calls
         run: node --import tsx scripts/desktop/native-rust-im-smoke.ts desktop/native/target/release/${{ matrix.binary }} desktop/native/target/release/examples/native-im-fixture${{ runner.os == 'Windows' && '.exe' || '' }}
-      - name: Build the official DSH plugin
+      - name: Build the official Codex and DSH plugins
         working-directory: desktop/native
-        run: cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-dsh
-      - name: Package the official DSH plugin
-        run: node scripts/desktop/native-plugin-package.mjs dsh desktop/native/target/release/agent-space-adapter-dsh${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-adapter-dsh ${{ matrix.target }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-codex --bin agent-space-adapter-dsh
+      - name: Package the official Codex and DSH plugins
+        run: |
+          node scripts/desktop/native-plugin-package.mjs codex desktop/native/target/release/agent-space-adapter-codex${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-adapter-codex ${{ matrix.target }}
+          node scripts/desktop/native-plugin-package.mjs dsh desktop/native/target/release/agent-space-adapter-dsh${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-adapter-dsh ${{ matrix.target }}
+      - name: Verify the external Codex plugin and online version switches
+        env:
+          POCKET_NATIVE_TEST_IPC: '1'
+        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }} dist/native-adapter-codex
       - name: Verify the external DSH plugin through the installed Rust gateway
         if: runner.os == 'Linux'
         run: node --import tsx scripts/desktop/native-dsh-smoke.ts /usr/bin/agent-space-native dist/native-adapter-dsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-space-adapter-codex-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/native-adapter-codex/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: agent-space-adapter-dsh-${{ matrix.platform }}-${{ matrix.arch }}

@@ -1,7 +1,6 @@
 use crate::{
-    app_tools::{Catalog, Tool},
-    codex::History,
-    codex_live::{Action, Desktop, Outcome, Thread},
+    codex_backend::{Backend, ID as CODEX, Live},
+    codex_live::Action,
     conversations,
     files::{Attachment, Download, Scope, VerifiedUpload},
     gateway::{Database, Packet, reply, reply_packet},
@@ -26,92 +25,13 @@ use tokio::{
 };
 use uuid::Uuid;
 
-const CODEX: &str = "codex-local";
-
 #[derive(Clone)]
 pub struct Backends {
-    pub history: Option<History>,
-    pub desktop: Option<Desktop>,
+    pub codex: Backend,
     pub direct: Option<crate::direct::Direct>,
     pub storage: Option<crate::storage::Storage>,
     pub update_gate: crate::update::UpdateGate,
     pub plugins: crate::plugins::Registry,
-}
-
-impl Backends {
-    fn catalog(&self) -> Catalog {
-        self.desktop
-            .as_ref()
-            .map(|desktop| desktop.tools.catalog())
-            .unwrap_or_default()
-    }
-
-    pub fn status(&self, online: bool) -> Value {
-        let catalog = self.catalog();
-        let connected = online
-            || catalog.has(Tool::Open)
-            || catalog.can_create()
-            || catalog.has(Tool::Rename)
-            || catalog.has(Tool::Fork);
-        let reason = match (connected, self.history.is_some()) {
-            (true, _) => None,
-            (_, true) => Some("请先在本机 Codex 打开此会话。仍可查看已有历史。"),
-            _ => Some("尚未配置 Codex 历史"),
-        };
-        json!({
-            "connected": connected, "desktopVersion": null, "supportedVersion": connected,
-            "writesEnabled": connected, "reason": reason,
-            "capabilities": {
-                "send": online, "steer": online, "interrupt": online, "modelSettings": online,
-                "questions": online, "approvals": online, "permissionRequests": online,
-                "openThread": catalog.has(Tool::Open), "elicitationForms": online,
-                "newThread": catalog.can_create(), "queue": online,
-                "renameThread": catalog.has(Tool::Rename), "forkThread": catalog.has(Tool::Fork),
-                "forkFromTurn": self.desktop.as_ref().is_some_and(|desktop| desktop.reply_fork.supported()),
-            }
-        })
-    }
-
-    fn info(&self, online: bool) -> Option<Value> {
-        self.history.as_ref()?;
-        let status = self.status(online);
-        let mut capabilities = serde_json::Map::new();
-        capabilities.insert("history".into(), json!({"state": "supported"}));
-        for name in [
-            "send",
-            "steer",
-            "interrupt",
-            "respond",
-            "settings",
-            "queue",
-            "create",
-            "open",
-            "attachments",
-            "skills",
-            "plugins",
-        ] {
-            let available = match name {
-                "open" => status["capabilities"]["openThread"] == true,
-                "create" => status["capabilities"]["newThread"] == true,
-                "skills" | "plugins" => true,
-                "send" | "steer" | "interrupt" | "attachments" | "settings" | "respond"
-                | "queue" => online,
-                _ => false,
-            };
-            capabilities.insert(
-                name.into(),
-                json!({"state": if available { "supported" } else { "unavailable" }}),
-            );
-        }
-        Some(json!({
-            "id": CODEX, "product": "codex", "name": "Codex",
-            "connected": status["connected"], "version": null, "profile": "rust-native",
-            "presentation": {"description":"Codex 桌面",
-                "creation":{"empty":true,"permission":"native","preset":false,"plan":false,"notice":"沿用 Codex 创建权限"},
-                "plan":"settings","fileReferences":false,"exportLog":false,"nativeCommands":false},
-            "capabilities": capabilities,
-        }))
-    }
 }
 
 pub struct DeviceSession {
@@ -128,7 +48,7 @@ pub struct DeviceSession {
 }
 
 struct Watch {
-    live: Option<Arc<Thread>>,
+    live: Option<Live>,
     fallback: Value,
     fallback_epoch: Uuid,
     fallback_after: Instant,
@@ -158,7 +78,7 @@ impl DeviceSession {
             db,
             peer,
             device,
-            last_status: backends.status(false),
+            last_status: backends.codex.status(false),
             backends,
             watches: HashMap::new(),
             plugin_watches: HashMap::new(),
@@ -188,11 +108,9 @@ impl DeviceSession {
                         reply(io, response).await?;
                     }
                 }
-                _ = desktop_probe.tick(), if !self.bulk && probing.is_empty() && self.backends.desktop.is_some() => {
-                    let desktop = self.backends.desktop.as_ref().unwrap().clone();
-                    probing.spawn(async move {
-                        tokio::join!(desktop.tools.refresh(), desktop.reply_fork.probe());
-                    });
+                _ = desktop_probe.tick(), if !self.bulk && probing.is_empty() && self.backends.codex.configured() => {
+                    let backend = self.backends.codex.clone();
+                    probing.spawn(async move { backend.refresh().await; });
                 }
                 Some(_) = probing.join_next(), if !probing.is_empty() => {
                     self.ensure_device()?;
@@ -315,12 +233,9 @@ impl DeviceSession {
     }
 
     fn online(&self) -> bool {
-        self.watches.values().any(|watch| {
-            watch
-                .live
-                .as_ref()
-                .is_some_and(|thread| thread.view.borrow().is_some())
-        })
+        self.watches
+            .values()
+            .any(|watch| watch.live.as_ref().and_then(Live::view).is_some())
     }
 
     async fn watch(&mut self, request: &Value) -> Result<Value> {
@@ -334,27 +249,23 @@ impl DeviceSession {
             self.watches.len() + self.plugin_watches.len() < 8,
             "订阅数量过多"
         );
-        let history = self.backends.history.clone().context("尚未配置 Codex")?;
-        let fallback = tokio::task::spawn_blocking(move || {
-            let params = json!({"id": id});
-            let summary = history
-                .rpc("thread.read", &params, &Value::Null)?
-                .context("找不到此会话")?;
-            let page = history
-                .rpc("history.read", &params, &Value::Null)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            Ok::<_, anyhow::Error>(
-                json!({"thread": summary["thread"], "messages": page["messages"]}),
-            )
-        })
-        .await??;
-        let live = self
+        let params = json!({"id": id});
+        let summary = self
             .backends
-            .desktop
-            .as_ref()
-            .and_then(|desktop| desktop.subscribe(id));
+            .codex
+            .read("thread.read", &params, &Value::Null, None)
+            .await?
+            .context("找不到此会话")?;
+        let page = self
+            .backends
+            .codex
+            .read("history.read", &params, &Value::Null, None)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let fallback = json!({"thread": summary["thread"], "messages": page["messages"]});
+        let live = self.backends.codex.watch(id);
         self.watches.insert(
             id,
             Watch {
@@ -371,7 +282,7 @@ impl DeviceSession {
     }
 
     async fn publish(&mut self, io: &mut (impl AsyncWrite + Unpin)) -> Result<()> {
-        let status = self.backends.status(self.online());
+        let status = self.backends.codex.status(self.online());
         if status != self.last_status {
             self.last_status = status.clone();
             reply(
@@ -383,17 +294,9 @@ impl DeviceSession {
             .await?;
         }
         for (id, watch) in &mut self.watches {
-            let live = watch
-                .live
-                .as_ref()
-                .and_then(|thread| thread.view.borrow().clone());
+            let live = watch.live.as_ref().and_then(Live::view);
             let changed = if let Some(view) = live {
-                let revision = view.thread["revision"].as_u64().unwrap_or_default();
-                let mark = (
-                    view.epoch,
-                    revision,
-                    view.thread["queueFingerprint"].as_str().map(str::to_owned),
-                );
+                let mark = view.mark();
                 if watch.published.as_ref() == Some(&mark) {
                     None
                 } else {
@@ -725,7 +628,7 @@ impl DeviceSession {
         let method = call["method"].as_str().unwrap_or_default();
         let online = self.online();
         if method == "backends.list" {
-            let mut backends: Vec<_> = self.backends.info(online).into_iter().collect();
+            let mut backends: Vec<_> = self.backends.codex.info(online).into_iter().collect();
             backends.extend(self.backends.plugins.infos().await);
             return Ok(Some(json!({"backends":backends})));
         }
@@ -835,10 +738,10 @@ impl DeviceSession {
             };
         }
         match method {
-            "status.read" => Ok(Some(self.backends.status(online))),
+            "status.read" => Ok(Some(self.backends.codex.status(online))),
             "session.read" => Ok(Some(json!({
                 "device": {"id": self.device.id,"name":self.device.name},
-                "status":self.backends.status(online),"backend":self.backends.info(online),
+                "status":self.backends.codex.status(online),"backend":self.backends.codex.info(online),
             }))),
             "device.revoke" => {
                 self.db
@@ -847,39 +750,6 @@ impl DeviceSession {
                     .revoke_device(&self.device.id)?;
                 Ok(Some(json!({"ok":true})))
             }
-            "content.read" => {
-                let id = thread_id(&call["params"]["id"])?;
-                let message_id = call["query"]["messageId"]
-                    .as_str()
-                    .filter(|value| !value.is_empty() && value.encode_utf16().count() <= 500)
-                    .context("消息 ID 无效")?;
-                let view = self
-                    .watches
-                    .get(&id)
-                    .and_then(|watch| watch.live.as_ref())
-                    .and_then(|thread| thread.view.borrow().clone());
-                if let Some(view) = view
-                    && let Some(mut message) = view
-                        .messages
-                        .iter()
-                        .find(|message| message["id"] == message_id)
-                        .cloned()
-                {
-                    if let Some(text) = view.expanded.get(message_id) {
-                        message["text"] = json!(text);
-                        message["truncated"] = json!(false);
-                    }
-                    if let Some(details) = view.activities.get(message_id) {
-                        crate::tool_activity::apply_details(&mut message, details);
-                    }
-                    return Ok(Some(json!({"message":message})));
-                }
-                let Some(history) = self.backends.history.clone() else {
-                    return Ok(None);
-                };
-                let message_id = message_id.to_owned();
-                tokio::task::spawn_blocking(move || history.content(id, &message_id)).await?
-            }
             "media.describe" => {
                 let thread = thread_id(&call["params"]["id"])?;
                 let path = call["body"]["path"]
@@ -887,12 +757,6 @@ impl DeviceSession {
                     .filter(|path| (1..=4096).contains(&path.encode_utf16().count()))
                     .context("附件地址无效")?
                     .to_owned();
-                let history = self.backends.history.clone().context("尚未配置 Codex")?;
-                let view = self
-                    .watches
-                    .get(&thread)
-                    .and_then(|watch| watch.live.as_ref())
-                    .and_then(|live| live.view.borrow().clone());
                 let db = self.db.clone();
                 let device = self.device.id.clone();
                 let batch = self
@@ -900,27 +764,36 @@ impl DeviceSession {
                     .storage
                     .as_ref()
                     .map(crate::storage::Storage::batch);
-                tokio::task::spawn_blocking(move || {
-                    let scope = Scope::codex(thread);
-                    let native = db.lock().expect("database mutex poisoned").describe_upload(
-                        &device,
-                        &scope,
-                        std::path::Path::new(&path),
-                    );
-                    if let Ok(mut manifest) = native {
-                        manifest["storage"] = json!(batch.is_some());
-                        if let Some(batch) = batch {
-                            manifest["storageBatchBlocks"] = json!(batch);
-                        }
-                        return Ok(Some(manifest));
+                let scope = Scope::codex(thread);
+                let native = tokio::task::spawn_blocking({
+                    let (db, device, scope, path) =
+                        (db.clone(), device.clone(), scope.clone(), path.clone());
+                    move || {
+                        db.lock().expect("database mutex poisoned").describe_upload(
+                            &device,
+                            &scope,
+                            std::path::Path::new(&path),
+                        )
                     }
-                    let source = history_media::description(
-                        &history,
-                        thread,
-                        &device,
-                        &path,
-                        view.as_deref(),
-                    )?;
+                })
+                .await?;
+                if let Ok(mut manifest) = native {
+                    manifest["storage"] = json!(batch.is_some());
+                    if let Some(batch) = batch {
+                        manifest["storageBatchBlocks"] = json!(batch);
+                    }
+                    return Ok(Some(manifest));
+                }
+                let live = self
+                    .watches
+                    .get(&thread)
+                    .and_then(|watch| watch.live.as_ref());
+                let source = self
+                    .backends
+                    .codex
+                    .media(thread, device.clone(), path, live)
+                    .await?;
+                tokio::task::spawn_blocking(move || {
                     let download = Download::prepare(source, device, scope, batch)?;
                     db.lock()
                         .expect("database mutex poisoned")
@@ -929,7 +802,7 @@ impl DeviceSession {
                 })
                 .await?
             }
-            "upload.begin" if self.backends.desktop.is_some() => {
+            "upload.begin" if self.backends.codex.has_desktop() => {
                 let thread = thread_id(&call["params"]["id"])?;
                 ensure!(self.watches.contains_key(&thread), "请先打开会话");
                 self.begin_upload(Scope::codex(thread), call["body"].clone())
@@ -956,28 +829,10 @@ impl DeviceSession {
                     .recent_operations(&self.device.id, &id)?;
                 Ok(Some(json!(values)))
             }
-            "message.send" | "turn.steer" | "turn.interrupt" if self.backends.desktop.is_some() => {
+            "message.send" | "turn.steer" | "turn.interrupt"
+                if self.backends.codex.has_desktop() =>
+            {
                 self.execute(method, &call).await.map(Some)
-            }
-            "skills.list" | "plugins.list" => {
-                let thread = thread_id(&call["params"]["id"])?;
-                let catalog = self.tools_catalog(thread).await?;
-                let skills = method == "skills.list";
-                let name = if skills { "skills" } else { "plugins" };
-                Ok(Some(json!({name:catalog.list(skills)})))
-            }
-            "controls.read" => {
-                let id = call["params"]["id"].as_str().context("会话 ID 无效")?;
-                let live = Uuid::parse_str(id)
-                    .ok()
-                    .and_then(|id| self.watches.get(&id))
-                    .and_then(|watch| watch.live.as_ref())
-                    .and_then(|live| live.view.borrow().clone());
-                let state = live.as_ref().map_or_else(
-                    || settings::permission(&Value::Null),
-                    |view| view.thread["controls"].clone(),
-                );
-                Ok(Some(settings::controls(state, live.is_some())))
             }
             "queue.add" | "queue.remove" => {
                 let thread = thread_id(&call["params"]["id"])?;
@@ -1004,8 +859,12 @@ impl DeviceSession {
                         .context("设置参数无效")?,
                 )?;
                 let action = if method == "settings.update" {
-                    let history = self.backends.history.clone().context("尚未配置 Codex")?;
-                    let models = tokio::task::spawn_blocking(move || history.models()).await??;
+                    let models = self
+                        .backends
+                        .codex
+                        .read("models.list", &Value::Null, &Value::Null, None)
+                        .await?
+                        .context("尚未配置 Codex")?;
                     Action::Settings {
                         input: settings::model_change(&body, &models)?,
                     }
@@ -1020,59 +879,31 @@ impl DeviceSession {
                 };
                 self.dispatch(thread, request, action).map(Some)
             }
-            "creation.projects" => {
-                let history = self.backends.history.clone().context("尚未配置 Codex")?;
-                let desktop = self.backends.desktop.as_ref().context("尚未连接 Codex")?;
-                let id = call["params"]["id"]
-                    .as_str()
-                    .context("会话 ID 无效")?
-                    .to_owned();
-                let lookup = history.clone();
-                let anchor = tokio::task::spawn_blocking(move || lookup.anchor(&id)).await??;
-                let projects = conversations::projects(&desktop.tools, history, &anchor).await?;
-                Ok(Some(json!({"projects":projects})))
-            }
             "thread.open" | "thread.create" | "thread.rename" | "thread.fork" => {
                 self.manage(method, &call).map(Some)
             }
             "usage.read" => {
-                let value = if let (Some(desktop), Some(history)) =
-                    (&self.backends.desktop, self.backends.history.clone())
-                {
-                    let anchor = match self.watches.keys().next().copied() {
-                        Some(id) => Some(id),
-                        None => {
-                            tokio::task::spawn_blocking(move || history.latest_thread()).await??
-                        }
-                    };
-                    match anchor {
-                        Some(id) => desktop.usage.read(id).await,
-                        None => crate::usage::unavailable("暂无可用于查询用量的 Codex 会话"),
-                    }
-                } else {
-                    crate::usage::unavailable("本机桌面用量暂不可用")
-                };
-                Ok(Some(value))
+                let params = json!({"id":self.watches.keys().next()});
+                self.backends
+                    .codex
+                    .read(method, &params, &call["query"], None)
+                    .await
             }
             _ => {
-                let Some(history) = self.backends.history.clone() else {
-                    return Ok(None);
-                };
-                tokio::task::spawn_blocking(move || {
-                    history.rpc(
-                        call["method"].as_str().unwrap_or_default(),
-                        &call["params"],
-                        &call["query"],
-                    )
-                })
-                .await?
+                let live = thread_id(&call["params"]["id"])
+                    .ok()
+                    .and_then(|id| self.watches.get(&id))
+                    .and_then(|watch| watch.live.as_ref());
+                self.backends
+                    .codex
+                    .read(method, &call["params"], &call["query"], live)
+                    .await
             }
         }
     }
 
     fn manage(&self, method: &str, call: &Value) -> Result<Value> {
-        let desktop = self.backends.desktop.as_ref().context("尚未连接 Codex")?;
-        let history = self.backends.history.clone().context("尚未配置 Codex")?;
+        ensure!(self.backends.codex.has_desktop(), "尚未连接 Codex");
         let (request, change) =
             serde_json::from_value::<conversations::Request>(call["body"].clone())?
                 .parse(method)?;
@@ -1085,6 +916,7 @@ impl DeviceSession {
                 self.watches.get(&id).and_then(|watch| watch.live.clone()),
             )
         };
+        let admission = self.backends.codex.admit_write()?;
         let (operation, fresh) = self
             .db
             .lock()
@@ -1093,11 +925,10 @@ impl DeviceSession {
             .map_err(|_| Conflict)?;
         if fresh {
             let db = self.db.clone();
-            let desktop = desktop.clone();
+            let backend = self.backends.codex.clone();
             tokio::spawn(async move {
-                let outcome = change
-                    .execute(desktop, history, thread, live, request)
-                    .await;
+                let _admission = admission;
+                let outcome = backend.manage(thread, live.as_ref(), request, change).await;
                 let _ = db
                     .lock()
                     .expect("database mutex poisoned")
@@ -1105,22 +936,6 @@ impl DeviceSession {
             });
         }
         Ok(operation)
-    }
-
-    async fn tools_catalog(&self, id: Uuid) -> Result<crate::tools_catalog::Catalog> {
-        let history = self.backends.history.clone().context("尚未配置 Codex")?;
-        let disabled = self
-            .watches
-            .get(&id)
-            .and_then(|watch| watch.live.as_ref())
-            .and_then(|live| {
-                live.view
-                    .borrow()
-                    .as_ref()
-                    .map(|view| view.disabled_plugins.clone())
-            })
-            .unwrap_or_default();
-        tokio::task::spawn_blocking(move || history.tools(id, &disabled)).await?
     }
 
     async fn execute(&self, method: &str, call: &Value) -> Result<Value> {
@@ -1135,10 +950,15 @@ impl DeviceSession {
         if let Action::Send { tools, .. } = &mut action
             && (!skills.is_empty() || !plugins.is_empty())
         {
+            let live = self
+                .watches
+                .get(&thread_id)
+                .and_then(|watch| watch.live.as_ref());
             *tools = self
-                .tools_catalog(thread_id)
-                .await?
-                .select(&skills, &plugins)?;
+                .backends
+                .codex
+                .select_tools(thread_id, live, &skills, &plugins)
+                .await?;
         }
         self.dispatch(thread_id, request, action)
     }
@@ -1149,6 +969,7 @@ impl DeviceSession {
             .get(&thread_id)
             .and_then(|watch| watch.live.clone())
             .context("请先打开会话")?;
+        let admission = self.backends.codex.admit_write()?;
         let (operation, fresh) = self
             .db
             .lock()
@@ -1157,12 +978,10 @@ impl DeviceSession {
             .map_err(|_| Conflict)?;
         if fresh {
             let db = self.db.clone();
+            let backend = self.backends.codex.clone();
             tokio::spawn(async move {
-                let outcome =
-                    match timeout(Duration::from_secs(35), thread.execute(action, request)).await {
-                        Ok(outcome) => outcome,
-                        Err(_) => Outcome::Uncertain,
-                    };
+                let _admission = admission;
+                let outcome = backend.execute(thread_id, &thread, request, action).await;
                 let _ = db
                     .lock()
                     .expect("database mutex poisoned")

@@ -30,9 +30,9 @@ pub struct ReplyFork {
 }
 
 impl ReplyFork {
-    pub fn new(desktop: Option<&Path>) -> Self {
-        let executable = std::env::var_os("POCKET_NATIVE_CODEX_CLI")
-            .map(PathBuf::from)
+    pub fn new(desktop: Option<&Path>, cli: Option<&Path>) -> Self {
+        let executable = cli
+            .map(Path::to_path_buf)
             .or_else(|| desktop.and_then(cli_for_desktop))
             .filter(|path| path.is_absolute());
         Self {
@@ -87,7 +87,7 @@ impl ReplyFork {
 
     pub async fn fork(&self, home: &Path, thread: &str, turn: &str) -> Outcome {
         if !self.supported() {
-            return Outcome::Rejected("此桌面版本尚未验证指定回复分支接口");
+            return Outcome::Rejected("此桌面版本尚未验证指定回复分支接口".into());
         }
         let mut dispatched = false;
         let result = timeout(
@@ -98,7 +98,7 @@ impl ReplyFork {
         match result {
             Ok(Ok(outcome)) => outcome,
             _ if dispatched => Outcome::Uncertain,
-            _ => Outcome::Rejected("本机分支接口暂不可用"),
+            _ => Outcome::Rejected("本机分支接口暂不可用".into()),
         }
     }
 
@@ -145,7 +145,9 @@ impl ReplyFork {
         .await?;
         let result = read(&mut output, 2).await?;
         if result["error"]["code"] == -32600 {
-            return Ok(Outcome::Rejected("无法从所选回复创建分支，请刷新后重试"));
+            return Ok(Outcome::Rejected(
+                "无法从所选回复创建分支，请刷新后重试".into(),
+            ));
         }
         let fork = &result["result"]["thread"];
         ensure!(fork["forkedFromId"] == thread, "分支来源未经确认");

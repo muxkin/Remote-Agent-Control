@@ -2,8 +2,10 @@ mod app_tools;
 mod conversations;
 
 mod codex;
+mod codex_backend;
 mod codex_live;
 mod codex_peer;
+mod codex_service;
 mod device;
 mod direct;
 mod dsh;
@@ -111,30 +113,11 @@ pub fn start() -> Result<()> {
     let im_runtime = im_workers.clone();
     let mut connect = move |origin: &str, enrollment: String| -> Result<String> {
         let mut config = RelayConfig::new(origin, enrollment)?;
-        let explicit = env::var_os("POCKET_NATIVE_CODEX_HOME");
-        let home = explicit
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("CODEX_HOME").map(PathBuf::from))
-            .or_else(|| dirs::home_dir().map(|path| path.join(".codex")));
-        if let Some(home) = home {
-            match codex::History::open(&home) {
-                Ok(history) => {
-                    config.history = Some(history.clone());
-                    if env::var("POCKET_NATIVE_READ_ONLY").as_deref() != Ok("1") {
-                        config.desktop = codex_peer::Endpoint::discover(&home)
-                            .map(|endpoint| codex_live::Desktop::new(endpoint, history));
-                    }
-                }
-                Err(error) if explicit.is_some() => {
-                    return Err(error).context("无法读取 Codex 会话索引");
-                }
-                Err(_) => {}
-            }
-        }
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
+        let (plugins, codex) = plugins::Registry::load(&directory, &handle)?;
+        config.codex = codex_backend::Backend::load(&directory, &handle, codex)?;
         let transports = storage::Transports::load(&directory)?;
-        config.plugins = plugins::Registry::load(&directory, &handle)?;
+        config.plugins = plugins;
         config.direct = transports.direct;
         config.storage = transports.storage;
         let origin = config.origin.origin().ascii_serialization();
@@ -201,6 +184,12 @@ pub fn start() -> Result<()> {
 pub fn run_dsh_plugin() -> Result<()> {
     install_tls()?;
     Runtime::new()?.block_on(plugin_server::run_dsh())
+}
+
+#[cfg(feature = "official-plugins")]
+pub fn run_codex_plugin() -> Result<()> {
+    install_tls()?;
+    Runtime::new()?.block_on(plugin_server::run_codex())
 }
 
 fn install_tls() -> Result<()> {

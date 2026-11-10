@@ -63,6 +63,8 @@ impl Process {
     }
 
     async fn start(package: Package) -> Result<Self> {
+        let official_codex = package.manifest.name == "@agent-remote/adapter-codex"
+            && package.manifest.product == "codex";
         let executable = tokio::task::spawn_blocking(move || package.executable()).await??;
         let mut command = Command::new(&executable);
         command
@@ -95,6 +97,9 @@ impl Process {
             if let Some(value) = env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        if official_codex && let Some(path) = env::var_os("POCKET_NATIVE_LEGACY_STATE") {
+            command.env("POCKET_NATIVE_LEGACY_STATE", path);
         }
         #[cfg(windows)]
         command.creation_flags(0x08000000);
@@ -392,7 +397,16 @@ impl Host {
         Ok(())
     }
 
-    async fn call(&self, method: &'static str, args: Value, limit: Duration) -> Result<Value> {
+    pub(crate) fn epochs(&self) -> watch::Receiver<u64> {
+        self.epochs.subscribe()
+    }
+
+    pub(crate) async fn call(
+        &self,
+        method: &'static str,
+        args: Value,
+        limit: Duration,
+    ) -> Result<Value> {
         self.call_with_progress(method, args, limit, None).await
     }
 
@@ -426,14 +440,15 @@ impl Host {
                 self.upload.store(false, Ordering::Relaxed);
                 let _ = slot.stop().await;
             }
-            if method == "adapter/status"
-                && let (Ok(value), Some(package)) = (&mut reply, &slot.package)
-                && value["info"].is_object()
-            {
-                value["info"]["product"] = json!(package.manifest.product);
-                value["info"]["adapterVersion"] = json!(package.manifest.version);
-                if !value["info"]["version"].is_string() {
-                    value["info"]["version"] = json!(package.manifest.version);
+            if let (Ok(value), Some(package)) = (&mut reply, &slot.package) {
+                if method == "adapter/status" && value["info"].is_object() {
+                    value["info"]["product"] = json!(package.manifest.product);
+                    value["info"]["adapterVersion"] = json!(package.manifest.version);
+                    if !value["info"]["version"].is_string() {
+                        value["info"]["version"] = json!(package.manifest.version);
+                    }
+                } else if method == "codex/refresh" && value.is_object() {
+                    value["adapterVersion"] = json!(package.manifest.version);
                 }
             }
             reply
@@ -483,10 +498,24 @@ impl Host {
         Ok(reply)
     }
 
-    async fn source(&self, reply: Value) -> Result<Source> {
+    pub(crate) async fn source(&self, reply: Value) -> Result<Source> {
         let raw = reply["path"].as_str().context("原生插件没有返回附件")?;
         let name = attachment_name(&reply)?;
         let temporary = reply["temporary"] == true;
+        let expected = reply
+            .get("integrity")
+            .filter(|value| !value.is_null())
+            .map(|value| -> Result<_> {
+                let size = value["size"].as_u64().context("原生插件附件大小无效")?;
+                let digest = value["sha256"]
+                    .as_str()
+                    .filter(|value| {
+                        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .context("原生插件附件摘要无效")?;
+                Ok((size, digest.to_owned()))
+            })
+            .transpose()?;
         let root = self.directory.clone();
         let file = root.join(raw);
         tokio::task::spawn_blocking(move || {
@@ -508,7 +537,7 @@ impl Host {
             Ok(Source {
                 file: input,
                 name,
-                expected: None,
+                expected,
             })
         })
         .await?

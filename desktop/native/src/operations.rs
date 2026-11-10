@@ -125,7 +125,7 @@ impl Store {
             Outcome::Uncertain => (
                 "uncertain",
                 None,
-                Some("结果待确认，请在 Codex 会话中核对"),
+                Some("结果待确认，请在 Codex 会话中核对".to_owned()),
                 None,
             ),
             Outcome::Accepted(turn) => ("accepted", Some(turn), None, None),
@@ -228,6 +228,12 @@ impl Store {
                AND (state<>?1 OR turn_id IS NULL)",
         )?;
         for turn in &view.turns {
+            if !matches!(
+                turn.state.as_str(),
+                "accepted" | "completed" | "interrupted" | "failed"
+            ) {
+                continue;
+            }
             update.execute(params![
                 turn.state,
                 turn.id,

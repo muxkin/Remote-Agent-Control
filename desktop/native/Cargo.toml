@@ -1,6 +1,6 @@
 [package]
 name = "agent-space-native"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -15,6 +15,11 @@ official-plugins = []
 [[bin]]
 name = "agent-space-adapter-dsh"
 path = "src/bin/agent-space-adapter-dsh.rs"
+required-features = ["official-plugins"]
+
+[[bin]]
+name = "agent-space-adapter-codex"
+path = "src/bin/agent-space-adapter-codex.rs"
 required-features = ["official-plugins"]
 
 [dependencies]

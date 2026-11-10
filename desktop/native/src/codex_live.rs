@@ -34,11 +34,11 @@ pub struct Desktop {
 }
 
 impl Desktop {
-    pub fn new(endpoint: Endpoint, history: History) -> Self {
+    pub fn new(endpoint: Endpoint, history: History, cli: Option<&std::path::Path>) -> Self {
         let tools = AppTools::new(endpoint.clone());
         Self {
             usage: crate::usage::Usage::new(tools.clone()),
-            reply_fork: crate::reply_fork::ReplyFork::new(endpoint.executable()),
+            reply_fork: crate::reply_fork::ReplyFork::new(endpoint.executable(), cli),
             tools,
             endpoint,
             history,
@@ -106,7 +106,7 @@ impl Thread {
             })
             .is_err()
         {
-            return Outcome::Rejected("当前会话有另一个请求正在确认");
+            return Outcome::Rejected("当前会话有另一个请求正在确认".into());
         }
         result.await.unwrap_or(Outcome::Uncertain)
     }
@@ -223,7 +223,7 @@ impl Action {
         match self {
             Self::Settings { input } | Self::Permission { input } => {
                 if response["result"]["applied"] == false {
-                    return Outcome::Rejected("桌面设置已变化，请重新打开面板");
+                    return Outcome::Rejected("桌面设置已变化，请重新打开面板".into());
                 }
                 if response["result"]["applied"] != true {
                     return Outcome::Uncertain;
@@ -369,9 +369,10 @@ fn native_input(text: &str, files: &[Attachment]) -> Result<(Vec<Value>, Vec<Val
     Ok((input, attachments))
 }
 
+#[derive(Deserialize, serde::Serialize)]
 pub enum Outcome {
     Completed(Option<Uuid>),
-    Rejected(&'static str),
+    Rejected(String),
     Uncertain,
     Accepted(String),
     Interrupted(String),
@@ -383,24 +384,39 @@ struct Command {
     reply: oneshot::Sender<Outcome>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 pub struct View {
     pub thread: Value,
     pub messages: Vec<Value>,
+    #[serde(skip)]
     pub expanded: HashMap<String, String>,
+    #[serde(skip)]
     pub activities: HashMap<String, Value>,
+    #[serde(skip)]
     pub pending: Vec<Value>,
+    #[serde(skip)]
     pub inline: Arc<HashMap<String, String>>,
     pub turns: Vec<Turn>,
     pub epoch: Uuid,
+    #[serde(skip)]
     pub disabled_plugins: Vec<String>,
 }
 
-#[derive(Clone)]
+impl View {
+    pub(crate) fn mark(&self) -> (Uuid, u64, Option<String>) {
+        (
+            self.epoch,
+            self.thread["revision"].as_u64().unwrap_or_default(),
+            self.thread["queueFingerprint"].as_str().map(str::to_owned),
+        )
+    }
+}
+
+#[derive(Clone, Deserialize, serde::Serialize)]
 pub struct Turn {
     pub id: String,
     pub request: Option<String>,
-    pub state: &'static str,
+    pub state: String,
 }
 
 async fn run_thread(
@@ -423,7 +439,7 @@ async fn run_thread(
                 _ = &mut retry => break,
                 command = commands.recv() => {
                     let Some(command) = command else { return };
-                    let _ = command.reply.send(Outcome::Rejected("桌面会话暂未同步"));
+                    let _ = command.reply.send(Outcome::Rejected("桌面会话暂未同步".into()));
                 }
             }
         }
@@ -516,7 +532,7 @@ async fn follow(
                     Some(request)
                 });
                 let Some((method, version, params)) = request else {
-                    let _ = command.reply.send(Outcome::Rejected("会话尚未同步或目标任务已变化"));
+                    let _ = command.reply.send(Outcome::Rejected("会话尚未同步或目标任务已变化".into()));
                     continue;
                 };
                 let owner = follower.owner.clone();
@@ -538,7 +554,7 @@ async fn follow(
                         (outcome, lost)
                     }
                     Err(error) if error.downcast_ref::<RoutingFailure>().is_some() => (
-                        Outcome::Rejected("桌面未接收请求，请确认会话仍然打开"), true,
+                        Outcome::Rejected("桌面未接收请求，请确认会话仍然打开".into()), true,
                     ),
                     Err(_) => (Outcome::Uncertain, true),
                 };
@@ -954,7 +970,8 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
                 Some("failed") => "failed",
                 Some("interrupted" | "cancelled") => "interrupted",
                 _ => "accepted",
-            },
+            }
+            .to_owned(),
         });
         if !items.iter().any(|item| item["type"] == "userMessage") {
             let text = native_text(&turn["params"]["input"]);

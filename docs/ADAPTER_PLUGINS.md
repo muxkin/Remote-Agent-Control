@@ -2,7 +2,7 @@
 
 网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口；产品协议和系统连接器分别位于 `packages/adapter-codex`、`packages/adapter-dsh`。默认附带两款官方插件。每个配置实例有独立 Node 宿主、配置、状态目录与订阅；宿主只连接已有 Agent。
 
-纯 Rust Ely 适配器复用 `instances.json` 和设备配对。第三方插件与官方 DSH 可使用原生独立进程。Codex 目前由内建连接器提供。 [原生安装与更新](DESKTOP_ADAPTER.md)
+纯 Rust Ely 适配器复用 `instances.json` 和设备配对。第三方插件以及官方 Codex、DSH 都可使用原生独立进程。 [原生安装与更新](DESKTOP_ADAPTER.md)
 
 ## Rust 原生插件
 
@@ -26,11 +26,13 @@ agent-space-native --adapter result REQUEST_ID
 
 初始化返回 `watchLifecycle: true` 的插件会收到带 `watchId` 的视图请求和 `adapter/unwatch`，可据此释放同一订阅的本机资源。临时下载文件可写入实例目录的 `transfers/<UUID>` 并在响应中标记 `temporary: true`，网关打开文件后清理路径。
 
-### 官方 DSH
+### 官方 Codex 和 DSH
 
-从桌面验收 CI 下载当前系统与架构的 `agent-space-adapter-dsh-*` 产物，解压后将目录传给 `agent-space-native --adapter install`，再重启适配器。沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。已有版本绑定优先，新实例会尝试绑定配置中的版本和当前适配器版本。尚未安装独立包的实例会使用内建 DSH。实例建立版本绑定后可使用 `upgrade` 和 `rollback` 在线切换。
+从桌面验收 CI 下载当前系统与架构的 `agent-space-adapter-codex-*` 或 `agent-space-adapter-dsh-*` 产物。解压后将目录传给 `agent-space-native --adapter install`，再重启适配器。首次绑定依次采用已安装的配置版本、当前适配器版本和最近安装的官方包。已经绑定的实例继续使用该版本，可通过 `upgrade` 和 `rollback` 在线切换。已有安装可用内建连接器过渡到独立包。
 
-源码构建使用 `cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-dsh`。运行 `scripts/desktop/native-plugin-package.mjs` 生成插件目录后，可用 `scripts/desktop/native-dsh-smoke.ts ADAPTER PLUGIN_DIRECTORY` 验证独立进程。
+Codex 默认实例沿用 `codex-local`、原有会话、配对和上传索引。实例可保留旧配置的 `home`、`root`、`socket`、`executable` 和 `appTools`，也可继续用原生环境变量指定路径。DSH 沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。
+
+源码构建使用 `cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-codex --bin agent-space-adapter-dsh`。运行 `scripts/desktop/native-plugin-package.mjs` 生成插件目录后，可分别用 `scripts/desktop/native-smoke.ts` 和 `scripts/desktop/native-dsh-smoke.ts` 验证。两条命令均接收适配器可执行文件和插件目录作为参数。
 
 下面的安装、npm 发布和在线监督器说明适用于旧 Node 网关。
 
