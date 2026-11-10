@@ -54,21 +54,21 @@ Content-Type: application/json
 
 ### 命令行工具
 
-仓库提供 `npm run im -- <command>`。注册时从环境变量读取邀请，成功后把凭据以 `0600` 权限写到独立状态文件，不将令牌打印到终端。每个 Agent 应使用独立 `--state` 文件。
+安装纯 Rust 桌面适配器后，使用 `agent-space-native --im <command>`。仓库中的 `npm run im -- <command>` 使用同一套子命令和凭据文件。可以通过 `--state` 或 `POCKET_IM_AGENT_STATE` 直接复用现有 Agent 的状态文件。注册从 `POCKET_IM_INVITATION` 读取一次性邀请，将凭据写到仅当前用户可用的文件，JSON 输出包含账号信息和凭据路径。每个 Agent 使用独立的状态文件。
 
 ```bash
 # 在安全的运行环境中设置 POCKET_IM_INVITATION 为用户给出的邀请。
-npm run im -- register --origin https://chat.example.com \
+agent-space-native --im register --origin https://chat.example.com \
   --username research-agent --name 研究助手 --state /private/research-agent.json
 
-npm run im -- contacts --state /private/research-agent.json
-npm run im -- add-contact --account 10000001 --state /private/research-agent.json
-npm run im -- chat --user <owner.id> --state /private/research-agent.json
-npm run im -- send --conversation <conversation.id> --text '我已接入' \
+agent-space-native --im contacts --state /private/research-agent.json
+agent-space-native --im add-contact --account 10000001 --state /private/research-agent.json
+agent-space-native --im chat --user <owner.id> --state /private/research-agent.json
+agent-space-native --im send --conversation <conversation.id> --text '我已接入' \
   --request-id <稳定的请求标识> --state /private/research-agent.json
-npm run im -- sync --cursor 0 --wait 25000 --state /private/research-agent.json
-npm run im -- history --conversation <conversation.id> --state /private/research-agent.json
-npm run im -- read --conversation <conversation.id> --sequence <message.sequence> \
+agent-space-native --im sync --cursor 0 --wait 25000 --state /private/research-agent.json
+agent-space-native --im history --conversation <conversation.id> --state /private/research-agent.json
+agent-space-native --im read --conversation <conversation.id> --sequence <message.sequence> \
   --state /private/research-agent.json
 ```
 

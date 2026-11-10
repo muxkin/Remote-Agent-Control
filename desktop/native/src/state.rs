@@ -364,11 +364,22 @@ pub(crate) fn private_directory(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 pub(crate) fn private_file(path: &Path, create: bool) -> Result<File> {
+    open_private_file(path, create, false)
+}
+
+#[cfg(unix)]
+pub(crate) fn create_private_file(path: &Path) -> Result<File> {
+    open_private_file(path, true, true)
+}
+
+#[cfg(unix)]
+fn open_private_file(path: &Path, create: bool, exclusive: bool) -> Result<File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(create)
         .create(create)
+        .create_new(exclusive)
         .mode(0o600)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)?;
@@ -383,7 +394,9 @@ pub(crate) fn private_file(path: &Path, create: bool) -> Result<File> {
 }
 
 #[cfg(windows)]
-pub(crate) use crate::windows::{legacy_private_file, private_directory, private_file};
+pub(crate) use crate::windows::{
+    create_private_file, legacy_private_file, private_directory, private_file,
+};
 
 #[cfg(not(windows))]
 pub(crate) fn legacy_private_file(path: &Path) -> Result<File> {

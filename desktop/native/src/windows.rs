@@ -26,10 +26,10 @@ use windows_sys::Win32::{
         WinLocalSystemSid,
     },
     Storage::FileSystem::{
-        CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_ALWAYS, OPEN_EXISTING,
-        READ_CONTROL, SECURITY_IDENTIFICATION, WRITE_OWNER,
+        CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL, SECURITY_IDENTIFICATION, WRITE_OWNER,
     },
     System::{
         Pipes::GetNamedPipeServerProcessId,
@@ -180,17 +180,22 @@ pub fn private_directory(path: &Path) -> Result<()> {
 }
 
 pub fn private_file(path: &Path, create: bool) -> Result<File> {
-    open_private_file(path, create, OwnerPolicy::Current)
+    let disposition = if create { OPEN_ALWAYS } else { OPEN_EXISTING };
+    open_private_file(path, disposition, OwnerPolicy::Current)
+}
+
+pub(crate) fn create_private_file(path: &Path) -> Result<File> {
+    open_private_file(path, CREATE_NEW, OwnerPolicy::Current)
 }
 
 pub(crate) fn legacy_private_file(path: &Path) -> Result<File> {
-    open_private_file(path, false, OwnerPolicy::LegacyRead)
+    open_private_file(path, OPEN_EXISTING, OwnerPolicy::LegacyRead)
 }
 
-fn open_private_file(path: &Path, create: bool, owner: OwnerPolicy) -> Result<File> {
+fn open_private_file(path: &Path, disposition: u32, owner: OwnerPolicy) -> Result<File> {
     let user = User::current()?;
     let mut security = descriptor(&user, false)?;
-    let flags = if create {
+    let flags = if disposition != OPEN_EXISTING {
         GENERIC_READ | GENERIC_WRITE
     } else {
         GENERIC_READ
@@ -201,7 +206,7 @@ fn open_private_file(path: &Path, create: bool, owner: OwnerPolicy) -> Result<Fi
             flags | READ_CONTROL,
             SHARE,
             &attributes(&mut security),
-            if create { OPEN_ALWAYS } else { OPEN_EXISTING },
+            disposition,
             FILE_FLAG_OPEN_REPARSE_POINT,
             null_mut(),
         )

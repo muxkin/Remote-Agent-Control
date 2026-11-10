@@ -622,6 +622,12 @@ impl MessageRequest {
     }
 }
 
+pub(crate) async fn cli_request(client: &Client, cid: &str, request: Value) -> Result<Value> {
+    serde_json::from_value::<MessageRequest>(request)?
+        .execute(client, cid)
+        .await
+}
+
 fn message_error(error: &anyhow::Error) -> Value {
     let status = if error.is::<MessageConflict>() {
         409

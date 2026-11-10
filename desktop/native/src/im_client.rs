@@ -103,59 +103,55 @@ pub(crate) struct Client {
     pub(crate) id: String,
     pub(crate) origin: String,
     http: Http,
-    keys: AccountCrypto,
+    keys: Option<AccountCrypto>,
     pins: Mutex<BTreeMap<String, Value>>,
 }
 
 impl Client {
     pub(crate) fn load(state: &Path) -> Result<Self> {
+        let credentials = Self::read_credentials(state)?;
+        let origin = required(&credentials, "origin")?;
+        ensure!(origin_url(origin)? == origin, "独立 Agent 服务地址无效");
+        let token = required(&credentials, "token")?;
+        Self::with_credentials(origin, token, Some(&credentials))
+    }
+
+    pub(crate) fn read_credentials(state: &Path) -> Result<Value> {
         let file = private_file(state, false)?;
-        let credentials: Value =
-            serde_json::from_reader(file.take(256 * 1024)).context("独立 Agent 凭据文件无效")?;
-        let id = credentials["user"]["id"]
-            .as_str()
-            .filter(|id| is_uid(id))
-            .context("独立 Agent 身份无效")?;
-        ensure!(
-            credentials["user"]["kind"] == "agent",
-            "需要独立 Agent 账号"
-        );
-        let origin = credentials["origin"]
-            .as_str()
-            .context("缺少独立 Agent 服务地址")?;
-        let url = Url::parse(origin)?;
-        let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-        ensure!(
-            (url.scheme() == "https" || (url.scheme() == "http" && loopback))
-                && url.origin().ascii_serialization() == origin,
-            "独立 Agent 服务地址无效"
-        );
-        let token = credentials["token"]
-            .as_str()
-            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_graphic()))
-            .context("独立 Agent 凭据无效")?;
-        let mut bearer = header::HeaderValue::from_str(&format!("Bearer {token}"))?;
-        bearer.set_sensitive(true);
-        let mut headers = header::HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, bearer);
-        headers.insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-store"),
-        );
-        let mut http = Http::builder()
-            .default_headers(headers)
-            .redirect(redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10));
-        if loopback {
-            http = http.no_proxy();
-        }
+        serde_json::from_reader(file.take(256 * 1024)).context("独立 Agent 凭据文件无效")
+    }
+
+    pub(crate) fn with_credentials(
+        origin: &str,
+        token: &str,
+        credentials: Option<&Value>,
+    ) -> Result<Self> {
+        let (id, keys) = if let Some(credentials) = credentials {
+            let id = required(&credentials["user"], "id")?;
+            ensure!(
+                is_uid(id) && credentials["user"]["kind"] == "agent",
+                "需要独立 Agent 账号"
+            );
+            (
+                id.to_owned(),
+                Some(AccountCrypto::from_secrets(&credentials["secrets"])?),
+            )
+        } else {
+            (String::new(), None)
+        };
         Ok(Self {
-            id: id.to_owned(),
+            id,
             origin: origin.to_owned(),
-            http: http.build()?,
-            keys: AccountCrypto::from_secrets(&credentials["secrets"])?,
+            http: agent_http(origin, Some(token))?,
+            keys,
             pins: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    fn keys(&self) -> Result<&AccountCrypto> {
+        self.keys
+            .as_ref()
+            .context("请先提供独立 Agent 的加密凭据文件")
     }
 
     pub(crate) async fn get(&self, path: &str) -> Result<Value> {
@@ -208,16 +204,18 @@ impl Client {
         let revision = item["revision"]
             .as_u64()
             .context("联系人密钥记录版本无效")?;
+        let keys = self.keys()?;
         let pinned = (!item["ciphertext"].is_null())
-            .then(|| self.keys.open_record(context, &item["ciphertext"]))
+            .then(|| keys.open_record(context, &item["ciphertext"]))
             .transpose()?;
         Ok((revision, pinned))
     }
 
     pub(crate) async fn public_keys(&self, id: &str) -> Result<Value> {
+        let account = self.keys()?;
         ensure!(is_uid(id), "独立 Agent 联系人身份无效");
         if id == self.id {
-            return Ok(self.keys.public.clone());
+            return Ok(account.public.clone());
         }
         let mut pins = self.pins.lock().await;
         if let Some(keys) = pins.get(id) {
@@ -225,7 +223,7 @@ impl Client {
         }
         let response = self.get(&format!("/crypto/keys/{id}")).await?;
         let keys = &response["publicKeys"];
-        let item = self.keys.private_id(&format!("contact-key:{id}"))?;
+        let item = account.private_id(&format!("contact-key:{id}"))?;
         let context = format!("vault:{}:{item}", self.id);
         let (revision, pinned) = self.stored_pin(&item, &context).await?;
         if let Some(pinned) = pinned {
@@ -234,7 +232,7 @@ impl Client {
             same_public_keys(keys, keys)?;
             let record = json!({
                 "accountId":self.id,"revision":revision,
-                "ciphertext":self.keys.seal_record(&context, keys)?
+                "ciphertext":account.seal_record(&context, keys)?
             });
             if self
                 .request(Method::PUT, &format!("/crypto/items/{item}"), Some(&record))
@@ -264,7 +262,7 @@ impl Client {
         for &id in recipients {
             keys.insert(id.to_owned(), self.public_keys(id).await?);
         }
-        self.keys.encrypt(&self.id, &keys, context, value)
+        self.keys()?.encrypt(&self.id, &keys, context, value)
     }
 
     pub(crate) async fn decrypt(
@@ -274,7 +272,7 @@ impl Client {
         envelope: Envelope,
     ) -> Result<Value> {
         let keys = self.public_keys(sender).await?;
-        self.keys
+        self.keys()?
             .decrypt(&self.id, sender, &keys, context, envelope)
     }
 
@@ -380,6 +378,7 @@ impl Client {
     }
 
     pub(crate) async fn send(&self, id: &str, input: &NewMessage) -> Result<Value> {
+        self.keys()?;
         let NewMessage {
             client_id,
             text,
@@ -435,7 +434,7 @@ impl Client {
             );
             let mut recipients = self.recipients(&endpoint).await?;
             recipients.sort_unstable();
-            let digest = self.keys.private_id(&canonical(&json!([
+            let digest = self.keys()?.private_id(&canonical(&json!([
                 "sticker-upload",
                 id,
                 client_id,
@@ -664,6 +663,45 @@ impl Client {
             safe
         })
     }
+}
+
+pub(crate) fn origin_url(raw: &str) -> Result<String> {
+    let url = Url::parse(raw).context("独立 Agent 服务地址无效")?;
+    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+    ensure!(
+        url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && (url.scheme() == "https" || (url.scheme() == "http" && loopback)),
+        "独立 Agent 服务地址无效"
+    );
+    Ok(url.origin().ascii_serialization())
+}
+
+pub(crate) fn agent_http(origin: &str, token: Option<&str>) -> Result<Http> {
+    let mut headers = header::HeaderMap::new();
+    if let Some(token) = token {
+        ensure!(
+            !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()),
+            "独立 Agent 凭据无效"
+        );
+        let mut bearer = header::HeaderValue::from_str(&format!("Bearer {token}"))?;
+        bearer.set_sensitive(true);
+        headers.insert(header::AUTHORIZATION, bearer);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    let mut http = Http::builder()
+        .default_headers(headers)
+        .redirect(redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10));
+    let url = Url::parse(origin)?;
+    if matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) {
+        http = http.no_proxy();
+    }
+    Ok(http.build()?)
 }
 
 fn attachment_ids(value: &Value, objects: bool) -> Result<Vec<&str>> {

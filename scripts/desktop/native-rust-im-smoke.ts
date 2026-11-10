@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -87,6 +87,98 @@ const until = async (check: () => Promise<boolean>) => {
   assert.fail('Rust independent Agent did not reach the expected state');
 };
 
+async function imCli(state: string, args: string[], options: { variables?: Record<string, string>; fails?: boolean } = {}) {
+  const result = await new Promise<{ success: boolean; stdout: string; stderr: string }>((done) => {
+    execFile(binary, ['--im', '--state', state, ...args], {
+      cwd: directory, env: { ...env, ...options.variables }, timeout: 20000, windowsHide: true,
+    }, (error, stdout, stderr) => done({ success: error === null, stdout, stderr }));
+  });
+  assert.equal(result.success, !options.fails, `Unexpected native IM CLI status for ${args[0]}`);
+  return JSON.parse(options.fails ? result.stderr : result.stdout);
+}
+
+async function checkImCli(human: EncryptedMessagingClient, owner: string, oldState: string, oldAgent: string, oldRoom: string) {
+  const old = (command: string, ...args: string[]) => imCli(oldState, [command, ...args]);
+  const help = await old('help');
+  assert(help.usage.includes('agent-space-native --im'));
+  assert.equal((await old('me')).user.id, oldAgent);
+  assert((await old('contacts')).users.some(({ id }: { id: string }) => id === owner));
+  assert((await old('chats')).conversations.some(({ id }: { id: string }) => id === oldRoom));
+  assert.equal((await old('history', '--conversation', oldRoom)).messages.at(-1).text, '迁移前的旧消息');
+
+  const { invitation } = await human.raw<{ invitation: string }>('/agent-invitations', 'POST');
+  const variables = { POCKET_IM_INVITATION: invitation };
+  const register = ['register', '--origin', origin, '--username', 'rustfixturecli', '--name', 'Native CLI Fixture'];
+  assert((await imCli(oldState, register, { variables, fails: true })).error);
+  const state = join(directory, 'native-registered-agent.json');
+  const registration = await imCli(state, register, { variables });
+  assert.deepEqual(Object.keys(registration).sort(), ['credentialFile', 'expiresAt', 'owner', 'user']);
+  assert.equal(registration.credentialFile, state);
+  if (process.platform !== 'win32') assert.equal((await stat(state)).mode & 0o777, 0o600);
+  const created = JSON.parse(await readFile(state, 'utf8'));
+  const legacy = new EncryptedMessagingClient(origin, created.token);
+  legacy.account.activate(created.user, created.secrets);
+  const envFile = join(directory, 'im.env');
+  await writeFile(envFile, `POCKET_IM_ORIGIN=${origin}
+POCKET_IM_TOKEN=${created.token}
+`, { mode: 0o600 });
+  if (process.platform === 'win32') platformRuntime().privateFile(envFile);
+  const tokenOnly = await imCli(join(directory, 'no-credentials.json'), ['me'], {
+    variables: { POCKET_ENV_FILE: envFile },
+  });
+  assert.equal(tokenOnly.user.id, created.user.id);
+  const run = (command: string, ...args: string[]) => imCli(state, [command, ...args]);
+  assert.equal((await run('add-contact', '--account', owner)).user.id, owner);
+  const { conversation } = await run('chat', '--user', owner);
+  const room = (command: string, ...args: string[]) => run(command, '--conversation', conversation.id, ...args);
+  const { conversation: group } = await run('group', '--name', 'Native CLI Group', '--members', owner);
+  const groupUpdate = await run('group-update', '--conversation', group.id, '--name', 'Renamed CLI Group');
+  assert.equal(groupUpdate.ok, true);
+  assert((await run('chats')).conversations.some(
+    (room: ChatConversation) => room.id === group.id && room.name === 'Renamed CLI Group',
+  ));
+
+  const { message: sent } = await room('send', '--text', '原生 CLI 加密回复', '--request-id', 'cli-send');
+  assert.equal((await room('send', '--text', sent.text, '--request-id', 'cli-send')).message.id, sent.id);
+  const { message: stream } = await room('stream-start', '--request-id', 'cli-stream');
+  const progress = await room('stream-update', '--message', stream.id, '--revision', '1', '--text', '流式回复',
+    '--activities', JSON.stringify([{ kind: 'read', status: 'completed' }]));
+  assert.equal(progress.message.activities[0].status, 'completed');
+  assert.equal((await room('cancel', '--message', stream.id)).message.state, 'cancelled');
+
+  const { message: incoming } = await human.send(conversation.id, '旧客户端回复给 Rust 注册的账号', 'cli-web-reply');
+  const history = await room('history');
+  assert.equal(history.messages.at(-1).text, incoming.text);
+  assert((await room('search', '--query', '原生 CLI')).messages.some(({ id }: { id: string }) => id === sent.id));
+  assert((await run('sync', '--cursor', '0', '--wait', '0')).events.some(
+    ({ message }: { message?: ChatMessage }) => message?.id === incoming.id && message.text === incoming.text,
+  ));
+  assert.equal((await room('read', '--sequence', String(incoming.sequence))).ok, true);
+
+  await writeFile(join(directory, 'cli-request.json'), JSON.stringify({
+    kind: 'approval', recipientId: owner, title: 'Native CLI approval', description: 'Fixture action', expiresAt: Date.now() + 60000,
+  }));
+  const { message: card } = await room('request', '--file', 'cli-request.json', '--request-id', 'cli-request');
+  assert.equal(card.interaction.title, 'Native CLI approval');
+  assert.equal((await room('request-cancel', '--message', card.id)).message.interaction.status, 'cancelled');
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/Z7EAAAAASUVORK5CYII=', 'base64');
+  await writeFile(join(directory, 'cli-sticker.png'), png);
+  const { file } = await room('upload', '--file', 'cli-sticker.png');
+  assert.equal(file.name, 'cli-sticker.png');
+  const { stickers } = await room('sticker-save', '--attachments', file.id);
+  assert.equal((await run('stickers')).stickers[0].id, stickers[0].id);
+  const { message: sticker } = await room('send', '--sticker', stickers[0].id, '--request-id', 'cli-sticker');
+  assert.equal((await run('sticker-remove', '--sticker', stickers[0].id)).ok, true);
+  const fromLegacy = (await human.history(conversation.id)).messages;
+  assert.equal(fromLegacy.find(({ id }) => id === sent.id)?.text, sent.text);
+  const stickerFile = fromLegacy.find(({ id }) => id === sticker.id)?.attachments[0];
+  assert(stickerFile);
+  assert.deepEqual(Buffer.from((await human.download(stickerFile.url)).data), png);
+  assert.equal((await legacy.history(conversation.id)).messages.find(({ id }) => id === incoming.id)?.text, incoming.text);
+  console.log('Rust --im preserved Node CLI response shapes, reused an old identity, and registered a new identity interoperable with the legacy client.');
+}
+
 async function cloudflareRelay(port: number) {
   const { Miniflare, convertV4MiniflareOptions } = await import('miniflare');
   const worker = new Miniflare({
@@ -148,6 +240,7 @@ try {
   assert(cursor >= archived.message.sequence);
   const credentials = join(directory, 'agent.json');
   await privateJson(credentials, { origin, token: agent.token, user: agent.user, secrets: agent.secrets });
+  await checkImCli(human, account.user!.id, credentials, agent.user.id, conversation.id);
   const progressDir = join(stateDirectory, 'im-agent-progress');
   await mkdir(stateDirectory, { mode: 0o700 });
   privateDir(stateDirectory);

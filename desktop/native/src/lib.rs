@@ -21,6 +21,7 @@ mod history_media;
 mod im_agent;
 mod im_attachments;
 mod im_calls;
+mod im_cli;
 mod im_client;
 mod im_crypto;
 mod im_interactions;
@@ -67,6 +68,12 @@ use tokio::{
 pub fn start() -> Result<()> {
     install_tls()?;
     let arguments: Vec<String> = env::args().skip(1).collect();
+    if arguments.first().is_some_and(|flag| flag == "--im") {
+        return im_cli::run(&arguments[1..]);
+    }
+    if arguments.first().is_some_and(|flag| flag == "--im-call") {
+        return im_calls::cli(&arguments[1..]);
+    }
     let directory = env::var_os("POCKET_NATIVE_STATE_DIR")
         .map(PathBuf::from)
         .or_else(|| dirs::data_local_dir().map(|path| path.join("agent-space-native-preview")))
@@ -93,9 +100,6 @@ pub fn start() -> Result<()> {
     if arguments.first().is_some_and(|flag| flag == "--instance") {
         migration::initialize(&directory)?;
         return appearance_cli::run(&directory, &arguments[1..]);
-    }
-    if arguments.first().is_some_and(|flag| flag == "--im-call") {
-        return im_calls::cli(&arguments[1..]);
     }
     if arguments
         .first()

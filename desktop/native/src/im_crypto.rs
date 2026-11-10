@@ -5,12 +5,12 @@ use base64::{
 };
 use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint};
 use ring::{
-    aead, hkdf, hmac,
+    aead, hkdf, hmac, pbkdf2,
     rand::{SecureRandom, SystemRandom},
     signature,
 };
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroU32};
 
 const SEALED: &str = "pocket-e2ee:1:";
 
@@ -188,6 +188,54 @@ impl AccountCrypto {
         let bytes = open(&derive(&self.root, "private-records")?, value, context)?;
         Ok(serde_json::from_slice(&bytes)?)
     }
+}
+
+pub(crate) fn new_agent_vault() -> Result<(Value, Value)> {
+    let root = random::<32>()?;
+    let (encryption, encryption_public) = jwk_pair("deriveBits", &[])?;
+    let (signing, signing_public) = jwk_pair("sign", &["verify"])?;
+    let public = json!({"encryption":encryption_public,"signing":signing_public});
+    let secrets = json!({
+        "root":STANDARD.encode(root),"encryption":encryption,"signing":signing,"publicKeys":public,
+    });
+    let salt = random::<32>()?;
+    let password = STANDARD.encode(random::<32>()?);
+    let mut base = [0; 32];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(600_000).expect("valid iteration count"),
+        &salt,
+        password.as_bytes(),
+        &mut base,
+    );
+    let wrapping = derive(&base, "password-wrapping")?;
+    base.fill(0);
+    let recovery = derive(&random::<32>()?, "recovery-wrapping")?;
+    let vault = json!({
+        "version":1,"salt":STANDARD.encode(salt),"publicKeys":public,
+        "password":seal(&wrapping, &root, "account-root:password:v1")?,
+        "recovery":seal(&recovery, &root, "account-root:recovery:v1")?,
+        "secrets":seal(&root, canonical(&secrets).as_bytes(), "account-secrets:v1")?,
+    });
+    Ok((secrets, vault))
+}
+
+fn jwk_pair(private_usage: &str, public_usages: &[&str]) -> Result<(Value, Value)> {
+    let secret = loop {
+        if let Ok(secret) = SecretKey::from_slice(&random::<32>()?) {
+            break secret;
+        }
+    };
+    let point = secret.public_key().to_encoded_point(false);
+    let public = json!({
+        "kty":"EC","crv":"P-256","ext":true,"key_ops":public_usages,
+        "x":URL_SAFE_NO_PAD.encode(point.x().expect("P-256 x")),
+        "y":URL_SAFE_NO_PAD.encode(point.y().expect("P-256 y")),
+    });
+    let mut private = public.clone();
+    private["key_ops"] = json!([private_usage]);
+    private["d"] = json!(URL_SAFE_NO_PAD.encode(secret.to_bytes()));
+    Ok((private, public))
 }
 
 pub(crate) fn same_public_keys(a: &Value, b: &Value) -> Result<bool> {
