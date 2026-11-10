@@ -99,17 +99,6 @@ impl Store {
         };
         let path = directory.join("state.sqlite");
         drop(private_file(&path, true)?);
-        // SQLite creates these with the database mode. Refuse any pre-existing unsafe sidecars.
-        for name in [
-            "state.sqlite-wal",
-            "state.sqlite-shm",
-            "state.sqlite-journal",
-        ] {
-            let sidecar = directory.join(name);
-            if fs::symlink_metadata(&sidecar).is_ok() {
-                drop(private_file(&sidecar, false)?);
-            }
-        }
         let db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(3))?;
         db.execute_batch(
@@ -246,16 +235,28 @@ pub(crate) fn lock_directory(directory: &Path) -> Result<File> {
     private_directory(directory)?;
     let lock = private_file(&directory.join("native.lock"), true)?;
     lock.try_lock().context("已有原生适配器使用此状态目录")?;
+    for name in ["device-identity-v2.json", "state.sqlite"] {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => drop(private_file(&path, false).with_context(|| format!("检查 {name}"))?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     for name in [
-        "device-identity-v2.json",
-        "state.sqlite",
         "state.sqlite-wal",
         "state.sqlite-shm",
         "state.sqlite-journal",
     ] {
         let path = directory.join(name);
         match fs::symlink_metadata(&path) {
-            Ok(_) => drop(private_file(&path, false)?),
+            Ok(_) => {
+                #[cfg(windows)]
+                crate::windows::private_sqlite_sidecar(&path)
+                    .with_context(|| format!("检查 {name}"))?;
+                #[cfg(not(windows))]
+                drop(private_file(&path, false)?);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }

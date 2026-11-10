@@ -18,17 +18,18 @@ use windows_sys::Win32::{
         ACCESS_ALLOWED_ACE, ACE_HEADER,
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+            GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
         },
         DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetTokenInformation, IsWellKnownSid,
-        OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, TOKEN_INFORMATION_CLASS,
+        TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
         WinLocalSystemSid,
     },
     Storage::FileSystem::{
         CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_ALWAYS, OPEN_EXISTING,
-        READ_CONTROL, SECURITY_IDENTIFICATION,
+        READ_CONTROL, SECURITY_IDENTIFICATION, WRITE_OWNER,
     },
     System::{
         Pipes::GetNamedPipeServerProcessId,
@@ -67,30 +68,11 @@ impl Drop for Local {
 struct User(Vec<usize>);
 impl User {
     fn read(process: HANDLE) -> Result<Self> {
-        let mut token = null_mut();
-        unsafe {
-            ok(OpenProcessToken(process, TOKEN_QUERY, &mut token))?;
-        }
-        let _token = unsafe { OwnedHandle::from_raw_handle(token) };
-        let mut needed = 0;
-        unsafe {
-            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut needed);
-        }
-        ensure!(
-            needed >= std::mem::size_of::<TOKEN_USER>() as u32 && needed <= 65536,
-            "无法读取 Windows 用户身份"
-        );
-        let mut buffer = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
-        unsafe {
-            ok(GetTokenInformation(
-                token,
-                TokenUser,
-                buffer.as_mut_ptr().cast(),
-                needed,
-                &mut needed,
-            ))?;
-        }
-        Ok(Self(buffer))
+        Ok(Self(token_info(
+            process,
+            TokenUser,
+            std::mem::size_of::<TOKEN_USER>(),
+        )?))
     }
 
     fn current() -> Result<Self> {
@@ -114,6 +96,37 @@ impl User {
             std::slice::from_raw_parts(value, len)
         })?)
     }
+}
+
+fn token_info(
+    process: HANDLE,
+    class: TOKEN_INFORMATION_CLASS,
+    min_size: usize,
+) -> Result<Vec<usize>> {
+    let mut token = null_mut();
+    unsafe {
+        ok(OpenProcessToken(process, TOKEN_QUERY, &mut token))?;
+    }
+    let _token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut needed = 0;
+    unsafe {
+        GetTokenInformation(token, class, null_mut(), 0, &mut needed);
+    }
+    ensure!(
+        needed as usize >= min_size && needed <= 65536,
+        "无法读取 Windows 用户身份"
+    );
+    let mut buffer = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+    unsafe {
+        ok(GetTokenInformation(
+            token,
+            class,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        ))?;
+    }
+    Ok(buffer)
 }
 
 fn descriptor(user: &User, directory: bool) -> Result<Local> {
@@ -163,7 +176,7 @@ pub fn private_directory(path: &Path) -> Result<()> {
         .share_mode(SHARE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
-    verify(file.as_raw_handle(), &user, true)
+    verify(file.as_raw_handle(), &user, true, false)
 }
 
 pub fn private_file(path: &Path, create: bool) -> Result<File> {
@@ -189,11 +202,24 @@ pub fn private_file(path: &Path, create: bool) -> Result<File> {
         return Err(io::Error::last_os_error().into());
     }
     let file = unsafe { File::from_raw_handle(handle) };
-    verify(handle, &user, false)?;
+    verify(handle, &user, false, false)?;
     Ok(file)
 }
 
-fn verify(handle: HANDLE, user: &User, directory: bool) -> Result<()> {
+pub(crate) fn private_sqlite_sidecar(path: &Path) -> Result<()> {
+    if private_file(path, false).is_ok() {
+        return Ok(());
+    }
+    let user = User::current()?;
+    let file = OpenOptions::new()
+        .access_mode(READ_CONTROL | WRITE_OWNER)
+        .share_mode(SHARE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    verify(file.as_raw_handle(), &user, false, true)
+}
+
+fn verify(handle: HANDLE, user: &User, directory: bool, sqlite_sidecar: bool) -> Result<()> {
     let mut info = unsafe { std::mem::zeroed() };
     unsafe {
         ok(GetFileInformationByHandle(handle, &mut info))?;
@@ -222,9 +248,26 @@ fn verify(handle: HANDLE, user: &User, directory: bool) -> Result<()> {
         return Err(io::Error::from_raw_os_error(error as i32).into());
     }
     ensure!(
-        !owner.is_null() && unsafe { EqualSid(owner, user.sid()) } != 0 && !dacl.is_null(),
-        "Windows 状态文件必须属于当前用户"
+        !owner.is_null() && !dacl.is_null(),
+        "Windows 状态文件缺少属主或 ACL"
     );
+    let repair_owner = unsafe { EqualSid(owner, user.sid()) } == 0;
+    if repair_owner {
+        ensure!(
+            sqlite_sidecar && unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0,
+            "Windows 状态文件必须属于当前用户"
+        );
+        let token = token_info(
+            unsafe { GetCurrentProcess() },
+            TokenOwner,
+            std::mem::size_of::<TOKEN_OWNER>(),
+        )?;
+        let default_owner = unsafe { (*token.as_ptr().cast::<TOKEN_OWNER>()).Owner };
+        ensure!(
+            !default_owner.is_null() && unsafe { EqualSid(owner, default_owner) } != 0,
+            "Windows 数据库临时文件属主无效"
+        );
+    }
     let mut own = false;
     let mut system = false;
     for i in 0..unsafe { (*dacl).AceCount as u32 } {
@@ -248,6 +291,22 @@ fn verify(handle: HANDLE, user: &User, directory: bool) -> Result<()> {
         }
     }
     ensure!(own && system, "Windows 状态 ACL 缺少必要权限");
+    if repair_owner {
+        let error = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                user.sid(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            )
+        };
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error as i32).into());
+        }
+    }
     Ok(())
 }
 
