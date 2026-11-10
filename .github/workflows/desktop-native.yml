@@ -126,6 +126,11 @@ jobs:
         run: cargo build --release --locked --no-default-features --example native-plugin-fixture
       - name: Verify native plugin install, recovery and rollback
         run: node --import tsx scripts/desktop/native-plugin-smoke.ts desktop/native/target/release/${{ matrix.binary }} desktop/native/target/release/examples/native-plugin-fixture${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Build the independent IM and call fixture
+        working-directory: desktop/native
+        run: cargo build --release --locked --no-default-features --example native-im-fixture
+      - name: Verify existing Agent identity, encrypted messaging and WebRTC calls
+        run: node --import tsx scripts/desktop/native-rust-im-smoke.ts desktop/native/target/release/${{ matrix.binary }} desktop/native/target/release/examples/native-im-fixture${{ runner.os == 'Windows' && '.exe' || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: agent-space-native-${{ matrix.platform }}-${{ matrix.arch }}

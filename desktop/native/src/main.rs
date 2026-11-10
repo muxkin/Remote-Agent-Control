@@ -15,6 +15,10 @@ mod dsh_settings;
 mod files;
 mod gateway;
 mod history_media;
+mod im_agent;
+mod im_calls;
+mod im_client;
+mod im_crypto;
 mod operations;
 mod plugin_catalog;
 mod plugin_host;
@@ -111,6 +115,8 @@ fn start() -> Result<()> {
     let mut installs = Some(installs);
     let mut commands = Some(commands);
     let handle = runtime.handle().clone();
+    let im_workers = im_agent::Workers::default();
+    let im_runtime = im_workers.clone();
     let mut connect = move |origin: &str, enrollment: String| -> Result<String> {
         let mut config = RelayConfig::new(origin, enrollment)?;
         let explicit = env::var_os("POCKET_NATIVE_CODEX_HOME");
@@ -142,6 +148,13 @@ fn start() -> Result<()> {
         let origin = config.origin.origin().ascii_serialization();
         let receiver = commands.take().context("连接已初始化")?;
         let gate = update::UpdateGate::default();
+        im_agent::start(
+            &directory,
+            &handle,
+            &im_runtime,
+            gate.clone(),
+            state.clone(),
+        );
         if !headless {
             handle.spawn(update::run(
                 config.origin.clone(),
@@ -165,7 +178,7 @@ fn start() -> Result<()> {
         None
     };
 
-    if headless {
+    let result = if headless {
         ensure!(configured.is_some(), "请先设置 POCKET_NATIVE_ORIGIN");
         runtime.block_on(run_headless(updates, pair, print_pair))
     } else {
@@ -187,7 +200,9 @@ fn start() -> Result<()> {
                 "此二进制没有编译 Ely 界面，请使用 --headless"
             ))
         }
-    }
+    };
+    runtime.block_on(im_workers.shutdown());
+    result
 }
 
 async fn run_headless(

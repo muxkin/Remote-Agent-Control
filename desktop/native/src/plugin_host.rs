@@ -42,7 +42,7 @@ const READS: &[&str] = &[
     "plugins.list",
 ];
 
-struct Process {
+pub(crate) struct Process {
     child: Child,
     input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
@@ -51,7 +51,7 @@ struct Process {
 }
 
 impl Process {
-    async fn stop(&mut self) -> Result<()> {
+    pub(crate) async fn stop(&mut self) -> Result<()> {
         self.ready = false;
         drop(self.input.take());
         if let Ok(result) = timeout(Duration::from_secs(1), self.child.wait()).await {
@@ -98,6 +98,10 @@ impl Process {
         }
         #[cfg(windows)]
         command.creation_flags(0x08000000);
+        Self::spawn(command)
+    }
+
+    pub(crate) fn spawn(mut command: Command) -> Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -115,7 +119,7 @@ impl Process {
         })
     }
 
-    async fn request(&mut self, method: &str, mut params: Value) -> Result<Value> {
+    pub(crate) async fn request(&mut self, method: &str, mut params: Value) -> Result<Value> {
         let id = Uuid::new_v4().to_string();
         params["generation"] = json!(self.generation);
         let body =
