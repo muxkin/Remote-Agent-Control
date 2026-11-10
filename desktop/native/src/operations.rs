@@ -1,5 +1,6 @@
 use crate::{
     codex_live::{Action, Outcome, View},
+    plugins::{Delivery, Observation, Write},
     state::{Store, hash, now},
 };
 use anyhow::{Result, ensure};
@@ -20,6 +21,7 @@ impl Store {
         action: &Action,
     ) -> Result<(Value, bool)> {
         self.begin(
+            BACKEND,
             id,
             device,
             &thread.to_string(),
@@ -36,11 +38,37 @@ impl Store {
         kind: &str,
         input: &impl serde::Serialize,
     ) -> Result<(Value, bool)> {
-        self.begin(id, device, thread, kind, json!([thread, kind, input]))
+        self.begin(
+            BACKEND,
+            id,
+            device,
+            thread,
+            kind,
+            json!([thread, kind, input]),
+        )
+    }
+
+    pub(crate) fn begin_plugin(
+        &mut self,
+        backend: &str,
+        id: Uuid,
+        device: &str,
+        thread: &str,
+        action: &Write,
+    ) -> Result<(Value, bool)> {
+        self.begin(
+            backend,
+            id,
+            device,
+            thread,
+            action.kind(),
+            json!([thread, action]),
+        )
     }
 
     fn begin(
         &mut self,
+        backend: &str,
         id: Uuid,
         device: &str,
         thread: &str,
@@ -55,7 +83,7 @@ impl Store {
         let fingerprint = hash(&serde_json::to_string(&input)?);
         let old: Option<(String, String, Value)> = tx.query_row(
             &format!("SELECT device_id,fingerprint,{COLUMNS} FROM operations WHERE backend_id=?1 AND id=?2"),
-            params![BACKEND, id],
+            params![backend, id],
             |row| Ok((row.get(0)?, row.get(1)?, operation(row, 2)?)),
         ).optional()?;
         if let Some((owner, actual, operation)) = old {
@@ -67,7 +95,7 @@ impl Store {
         }
         let busy = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM operations WHERE backend_id=?1 AND thread_id=?2 AND state='dispatching')",
-            params![BACKEND, thread], |row| row.get::<_, bool>(0),
+            params![backend, thread], |row| row.get::<_, bool>(0),
         )?;
         let (state, error) = if busy {
             ("rejected", Some("此会话有一个控制请求正在确认"))
@@ -77,11 +105,11 @@ impl Store {
         tx.execute(
             "INSERT INTO operations (id,device_id,thread_id,kind,fingerprint,state,error,created,updated,backend_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,?9)",
-            params![id, device, thread, kind, fingerprint, state, error, time, BACKEND],
+            params![id, device, thread, kind, fingerprint, state, error, time, backend],
         )?;
         let result = tx.query_row(
             &format!("SELECT {COLUMNS} FROM operations WHERE backend_id=?1 AND id=?2"),
-            params![BACKEND, id],
+            params![backend, id],
             |row| operation(row, 0),
         )?;
         tx.commit()?;
@@ -111,6 +139,76 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn finish_plugin(
+        &mut self,
+        backend: &str,
+        id: Uuid,
+        result: Delivery,
+    ) -> Result<()> {
+        let (state, turn, error, thread) = match result {
+            Delivery::Accepted(turn) => ("accepted", turn, None, None),
+            Delivery::Completed(thread) => ("completed", None, None, thread),
+            Delivery::Rejected(reason) => ("rejected", None, Some(reason), None),
+            Delivery::Uncertain => (
+                "uncertain",
+                None,
+                Some("结果待确认，请在原会话中核对"),
+                None,
+            ),
+        };
+        self.db.execute(
+            "UPDATE operations SET state=?1,turn_id=?2,error=?3,updated=?4,result_thread_id=COALESCE(?5,result_thread_id)
+             WHERE backend_id=?6 AND id=?7 AND state='dispatching'",
+            params![state, turn, error, now(), thread, backend, id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn record_plugin_thread(
+        &mut self,
+        backend: &str,
+        id: Uuid,
+        thread: &str,
+    ) -> Result<()> {
+        let changed = self.db.execute(
+            "UPDATE operations SET result_thread_id=?1,updated=?2
+             WHERE backend_id=?3 AND id=?4 AND kind='create' AND state='dispatching'",
+            params![thread, now(), backend, id.to_string()],
+        )?;
+        ensure!(changed == 1, "无法保存新会话标识");
+        Ok(())
+    }
+
+    pub(crate) fn observe_plugin(
+        &mut self,
+        backend: &str,
+        thread: &str,
+        events: &[Observation],
+    ) -> Result<()> {
+        let tx = self.db.transaction()?;
+        let mut update = tx.prepare(
+            "UPDATE operations SET state=?1,turn_id=?2,error=NULL,updated=?3
+             WHERE backend_id=?4 AND thread_id=?5
+               AND ((kind IN ('send','steer','queue') AND id=?6)
+                    OR (kind='interrupt' AND ?1<>'accepted' AND turn_id=?2))
+               AND state IN ('dispatching','accepted','uncertain')
+               AND (state<>?1 OR turn_id IS NOT ?2)",
+        )?;
+        for event in events {
+            update.execute(params![
+                event.state,
+                event.turn,
+                now(),
+                backend,
+                thread,
+                event.request.map(|id| id.to_string()),
+            ])?;
+        }
+        drop(update);
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn observe_operations(&mut self, thread: &str, view: &View) -> Result<()> {
         let tx = self.db.transaction()?;
         let mut update = tx.prepare(
@@ -136,18 +234,36 @@ impl Store {
     }
 
     pub fn operation(&self, device: &str, id: &str) -> Result<Option<Value>> {
+        self.operation_for(BACKEND, device, id)
+    }
+
+    pub(crate) fn operation_for(
+        &self,
+        backend: &str,
+        device: &str,
+        id: &str,
+    ) -> Result<Option<Value>> {
         Ok(self.db.query_row(
             &format!("SELECT {COLUMNS} FROM operations WHERE backend_id=?1 AND device_id=?2 AND id=?3"),
-            params![BACKEND, device, id], |row| operation(row, 0),
+            params![backend, device, id], |row| operation(row, 0),
         ).optional()?)
     }
 
     pub fn recent_operations(&self, device: &str, thread: &str) -> Result<Vec<Value>> {
+        self.recent_operations_for(BACKEND, device, thread)
+    }
+
+    pub(crate) fn recent_operations_for(
+        &self,
+        backend: &str,
+        device: &str,
+        thread: &str,
+    ) -> Result<Vec<Value>> {
         let mut stmt = self.db.prepare(
             &format!("SELECT {COLUMNS} FROM operations WHERE backend_id=?1 AND device_id=?2 AND thread_id=?3 ORDER BY created DESC LIMIT 20"),
         )?;
         Ok(stmt
-            .query_map(params![BACKEND, device, thread], |row| operation(row, 0))?
+            .query_map(params![backend, device, thread], |row| operation(row, 0))?
             .collect::<rusqlite::Result<_>>()?)
     }
 

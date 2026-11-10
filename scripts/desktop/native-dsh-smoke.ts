@@ -7,83 +7,221 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { WebSocketServer } from 'ws';
+import { setTimeout as delay } from 'node:timers/promises';
+import { WebSocket, WebSocketServer } from 'ws';
 import { nodeSession } from '../../src/client/node-session.js';
 import { buildRelay } from '../../src/server/relay.js';
 import { apiCall } from '../../src/shared/rpc.js';
 import { createIdentity } from '../../src/shared/secure-channel.js';
 
 const state = await mkdtemp(join(tmpdir(), 'native-dsh-smoke-'));
-const token = randomBytes(16).toString('hex');
+const instances = ['dsh-one', 'dsh-two'].map((id) => ({
+  id,
+  token: randomBytes(16).toString('hex'),
+  title: id,
+  created: new Map<string, string>(),
+  inbox: [] as { id: string; content: { type: string; text: string }[] }[],
+  followers: new Map<WebSocket, string>(),
+  calls: [] as { method: string; request: any }[],
+  records: [
+    {
+      event: {
+        seq: 1,
+        time: 123,
+        type: 'assistant/message',
+        data: {
+          message: { id: 'reply', role: 'assistant', content: [{ type: 'text', text: 'Rust DSH history' }] },
+        },
+      },
+    },
+  ] as { event: Record<string, unknown> }[],
+  opens: 0,
+}));
+const [one, two] = instances;
+const cookie = (value?: string) => instances.find(({ id }) => value === 'session=' + id);
 const dsh = createServer(async (request, response) => {
   const path = new URL(request.url!, 'http://localhost');
-  if (path.pathname === '/connect' && path.searchParams.get('token') === token) {
-    response.writeHead(302, { Location: '/api/remote.mux', 'Set-Cookie': 'session=fixture' }).end();
-  } else if (path.pathname === '/api/session/list' && request.headers.cookie === 'session=fixture') {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const rpc = JSON.parse(Buffer.concat(chunks).toString());
-    assert.equal(rpc.method, 'session/list');
-    response.setHeader('Content-Type', 'application/json');
-    response.end(
-      JSON.stringify({
-        type: 'server-response',
-        rpcId: rpc.rpcId,
-        result: {
-          ok: true,
-          value: {
-            items: [
-              { sessionId: 'shared', updatedAt: 123, projections: { values: { title: 'DSH fixture' } } },
-            ],
-          },
-        },
-      }),
-    );
-  } else response.writeHead(404).end();
+  if (path.pathname === '/connect') {
+    const instance = instances.find(({ token }) => path.searchParams.get('token') === token);
+    if (!instance) return response.writeHead(403).end();
+    assert.equal(path.searchParams.get('interactions'), 'none');
+    return response
+      .writeHead(302, { Location: '/api/remote.mux', 'Set-Cookie': 'session=' + instance.id })
+      .end();
+  }
+  const instance = cookie(request.headers.cookie);
+  if (!instance) return response.writeHead(403).end();
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const rpc = JSON.parse(Buffer.concat(chunks).toString());
+  assert.equal(path.pathname, '/api/' + rpc.method);
+  const args = rpc.payload.args.request;
+  let value;
+  switch (rpc.method) {
+    case 'session/list':
+      value = {
+        items: [
+          { sessionId: 'shared', updatedAt: 123, projections: { values: { title: instance.title } } },
+          ...[...instance.created].map(([sessionId, title]) => ({
+            sessionId,
+            updatedAt: 124,
+            projections: { values: { title } },
+          })),
+        ],
+      };
+      break;
+    case 'session/create': {
+      assert.equal(args.workspaceId, 'work-' + instance.id);
+      const id = 'created-' + args.sessionId;
+      instance.created.set(id, '新会话');
+      value = { sessionId: id };
+      break;
+    }
+    case 'session/prompt':
+      assert(args.sessionId === 'shared' || instance.created.has(args.sessionId));
+      if (['lost response', 'lost initial response'].includes(args.content[0].text)) {
+        instance.calls.push({ method: rpc.method, request: args });
+        return response.destroy();
+      }
+      if (args.content[0].text === 'queued') {
+        const queued = { id: 'queue-' + args.requestId, content: args.content };
+        const start = instance.inbox.length;
+        instance.inbox.push(queued);
+        record(instance, 'agent/inbox/spliced', { target: 'next-turn', start, inserted: [queued] });
+      }
+      value = { accepted: true };
+      break;
+    case 'session/updateQueue': {
+      assert.deepEqual(args.action, { kind: 'remove' });
+      const start = instance.inbox.findIndex((item) => item.id === args.itemId);
+      assert(start >= 0);
+      instance.inbox.splice(start, 1);
+      record(instance, 'agent/inbox/spliced', {
+        target: 'next-turn',
+        start,
+        removedCount: 1,
+        inserted: [],
+        outcome: 'canceled',
+      });
+      value = { accepted: true };
+      break;
+    }
+    case 'session/cancel':
+      assert.deepEqual(args, { sessionId: 'shared' });
+      record(instance, 'turn/end', { turn: 8, reason: { kind: 'interrupted' } });
+      await delay(300); // The event can reach the relay before the acknowledgement.
+      value = { accepted: true };
+      break;
+    case 'session/rename':
+      if (args.sessionId === 'shared') {
+        instance.title = args.title;
+        record(instance, 'session/title', { title: args.title });
+      } else {
+        assert(instance.created.has(args.sessionId));
+        instance.created.set(args.sessionId, args.title);
+      }
+      value = { title: args.title, seq: instance.records.length };
+      break;
+    default:
+      assert.fail('Unexpected DSH RPC ' + rpc.method);
+  }
+  instance.calls.push({ method: rpc.method, request: args });
+  response.setHeader('Content-Type', 'application/json');
+  response.end(JSON.stringify({ type: 'server-response', rpcId: rpc.rpcId, result: { ok: true, value } }));
 });
 const dshSocket = new WebSocketServer({ server: dsh, path: '/api/remote.mux' });
 dshSocket.on('connection', (socket, request) => {
-  assert.equal(request.headers.cookie, 'session=fixture');
+  const instance = cookie(request.headers.cookie);
+  assert(instance);
   socket.on('message', (buffer) => {
     const frame = JSON.parse(buffer.toString());
     if (frame.type !== 'open') return;
+    if (frame.endpoint === 'workspace/follow') {
+      socket.send(
+        JSON.stringify({
+          type: 'item',
+          streamId: frame.streamId,
+          value: {
+            type: 'baseline',
+            value: {
+              items: [
+                {
+                  workspaceId: 'work-' + instance.id,
+                  title: 'Workspace ' + instance.id,
+                  path: '/fixture',
+                  sessionIds: ['shared', ...instance.created.keys()],
+                },
+              ],
+            },
+          },
+        }),
+      );
+      return;
+    }
     assert.equal(frame.endpoint, 'session/follow');
-    assert.deepEqual(frame.payload.args.request.address, { kind: 'session', sessionId: 'shared' });
+    const id = frame.payload.args.request.address.sessionId;
+    const isShared = id === 'shared';
+    assert(isShared || instance.created.has(id));
+    assert.equal(frame.payload.args.request.address.kind, 'session');
     socket.send(
       JSON.stringify({
         type: 'item',
         streamId: frame.streamId,
         value: {
           type: 'snapshot',
-          header: { id: 'shared', version: 4, cwd: '/fixture', createdAt: 123 },
-          projections: { values: { title: 'DSH fixture' } },
-          cursor: 1,
-          hasMore: false,
-          records: [
-            {
-              event: {
-                seq: 1,
-                type: 'assistant/message',
-                data: {
-                  message: {
-                    id: 'reply',
-                    role: 'assistant',
-                    content: [{ type: 'text', text: 'Rust DSH history' }],
-                  },
-                },
-              },
+          header: { id, version: 4, cwd: '/fixture', createdAt: 123 },
+          projections: {
+            values: {
+              title: isShared ? instance.title : instance.created.get(id),
+              inbox: { 'next-turn': isShared ? instance.inbox : [], 'next-step': [] },
             },
-          ],
+          },
+          cursor: isShared ? instance.records.length : -1,
+          hasMore: false,
+          records: isShared ? instance.records : [],
         },
       }),
     );
+    if (frame.payload.args.request.assistantStream) {
+      instance.opens++;
+      instance.followers.set(socket, frame.streamId);
+    }
   });
+  socket.once('close', () => instance.followers.delete(socket));
 });
-const port = createServer().listen(0, '127.0.0.1');
-await once(port, 'listening');
-const address = port.address();
+function push(instance: typeof one, value: object) {
+  for (const [socket, streamId] of instance.followers)
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'item', streamId, value }));
+}
+function record(instance: typeof one, type: string, data: object, publish = true) {
+  const event = { type, data, seq: instance.records.length + 1, time: Date.now() };
+  instance.records.push({ event });
+  if (publish) push(instance, { type: 'event', event });
+}
+function user(instance: typeof one, turn: number, requestId: string, text: string) {
+  record(instance, 'user/message', {
+    turn,
+    id: requestId,
+    role: 'user',
+    source: { kind: 'user', rpcId: requestId },
+    content: [{ type: 'text', text }],
+  });
+}
+async function wait<T>(test: () => T | Promise<T>) {
+  const until = Date.now() + 8000;
+  while (Date.now() < until) {
+    const result = await test();
+    if (result) return result;
+    await delay(30);
+  }
+  assert.fail('Expected DSH state did not arrive');
+}
+
+const probe = createServer().listen(0, '127.0.0.1');
+await once(probe, 'listening');
+const address = probe.address();
 assert(address && typeof address !== 'string');
-await new Promise<void>((done) => port.close(() => done()));
+await new Promise<void>((done) => probe.close(() => done()));
 const origin = 'http://127.0.0.1:' + address.port;
 const enrollment = randomBytes(32).toString('hex');
 const relay = await buildRelay({
@@ -93,26 +231,10 @@ const relay = await buildRelay({
   assetOrigin: null,
   uploadOrigins: [],
 });
+const phone = await createIdentity();
 let child: ReturnType<typeof spawn> | undefined;
-try {
-  dsh.listen(0, '127.0.0.1');
-  await once(dsh, 'listening');
-  const carrier = dsh.address();
-  assert(carrier && typeof carrier !== 'string');
-  await writeFile(
-    join(state, 'instances.json'),
-    JSON.stringify(
-      ['dsh-one', 'dsh-two'].map((id) => ({
-        id,
-        name: id,
-        plugin: '@agent-remote/adapter-dsh',
-        config: { url: 'http://127.0.0.1:' + carrier.port },
-        secrets: { token: 'RUST_DSH_TEST_TOKEN' },
-      })),
-    ),
-    { mode: 0o600 },
-  );
-  await relay.app.listen({ host: '127.0.0.1', port: address.port });
+
+async function launch() {
   child = spawn(resolve(process.argv[2]), ['--headless', '--print-pair'], {
     env: {
       ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(POCKET_|CODEX_)/i.test(key))),
@@ -121,72 +243,281 @@ try {
       POCKET_NATIVE_ORIGIN: origin,
       POCKET_NATIVE_ENROLLMENT: enrollment,
       POCKET_NATIVE_P2P: '0',
-      RUST_DSH_TEST_TOKEN: token,
+      ...Object.fromEntries(instances.map(({ token }, index) => ['RUST_DSH_TEST_TOKEN_' + index, token])),
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
-  const exited = once(child, 'close');
   const lines = createInterface({ input: child.stdout! });
-  const timeout = setTimeout(() => child?.kill(), 30_000);
+  const timeout = setTimeout(() => child?.kill(), 15000);
   try {
-    let link;
     for await (const line of lines) {
-      if (line.startsWith(origin)) {
-        link = new URL(line);
-        break;
-      }
+      if (line.startsWith(origin)) return new URL(line);
     }
-    assert(link);
-    const params = new URLSearchParams(link.hash.slice(1));
-    const pair = params.get('pair')!;
-    const host = params.get('host')!;
-    const session = await nodeSession(
-      origin,
-      host,
-      await createIdentity(),
-      createHash('sha256').update(pair).digest('hex'),
-      {
-        type: 'pair',
-        protocol: 2,
-        sessionId: randomUUID(),
-        code: pair,
-        name: 'DSH fixture',
-      },
-    );
-    try {
-      const { backends } = await session.rpc<{ backends: { id: string; connected: boolean }[] }>(
-        apiCall('/backends'),
-      );
-      assert.deepEqual(
-        backends.map(({ id, connected }) => [id, connected]),
-        [
-          ['dsh-one', true],
-          ['dsh-two', true],
-        ],
-      );
-      for (const backendId of ['dsh-one', 'dsh-two']) {
-        const rpc = <T>(path: string) => session.rpc<T>({ ...apiCall(path), backendId });
-        const threads = await rpc<{ threads: { id: string }[] }>('/threads');
-        assert.equal(threads.threads[0].id, 'shared');
-        const history = await rpc<{ messages: { text: string }[] }>('/threads/shared/history');
-        assert.equal(history.messages[0].text, 'Rust DSH history');
-        await assert.rejects(
-          session.rpc({ ...apiCall('/threads/shared/messages', 'POST', { text: 'never sent' }), backendId }),
-        );
-      }
-    } finally {
-      session.close();
-    }
-    console.log(
-      'Rust DSH: two configured instances, native carrier authentication, list, history and write rejection passed.',
-    );
+    assert.fail('Rust adapter did not expose a fixture pairing link');
   } finally {
     lines.close();
     clearTimeout(timeout);
-    child.kill('SIGINT');
-    await exited;
   }
+}
+async function stop() {
+  if (!child) return;
+  const exited = once(child, 'close');
+  child.kill('SIGINT');
+  await exited;
+  child = undefined;
+}
+
+try {
+  dsh.listen(0, '127.0.0.1');
+  await once(dsh, 'listening');
+  const carrier = dsh.address();
+  assert(carrier && typeof carrier !== 'string');
+  await writeFile(
+    join(state, 'instances.json'),
+    JSON.stringify(
+      instances.map(({ id }, index) => ({
+        id,
+        name: id,
+        plugin: '@agent-remote/adapter-dsh',
+        config: { url: 'http://127.0.0.1:' + carrier.port, version: '0.2.1-rc.5' },
+        secrets: { token: 'RUST_DSH_TEST_TOKEN_' + index },
+      })),
+    ),
+    { mode: 0o600 },
+  );
+  await relay.app.listen({ host: '127.0.0.1', port: address.port });
+  const link = await launch();
+  const params = new URLSearchParams(link.hash.slice(1));
+  const pair = params.get('pair')!;
+  const host = params.get('host')!;
+  let session = await nodeSession(origin, host, phone, createHash('sha256').update(pair).digest('hex'), {
+    type: 'pair',
+    protocol: 2,
+    sessionId: randomUUID(),
+    code: pair,
+    name: 'DSH fixture',
+  });
+  const ready = await session.ready;
+  const views = new Map<string, { thread: any; messages: Map<string, any>; order: string[] }>();
+  function listen() {
+    return session.onEvent((value) => {
+      if (value.type !== 'sync' || value.threadId !== 'shared') return;
+      for (const update of value.updates) {
+        const messages = views.get(value.backendId)?.messages ?? new Map();
+        for (const msg of update.changed) messages.set(msg.id, msg);
+        views.set(value.backendId, { thread: update.thread, messages, order: update.order });
+      }
+    });
+  }
+  let remove = listen();
+  const rpc = <T>(backendId: string, path: string, method = 'GET', body?: unknown) =>
+    session.rpc<T>({ ...apiCall(path, method, body), backendId });
+  const operation = (id: string, state: string, backendId = one.id) =>
+    wait(async () => {
+      const op = await rpc<{ state: string }>(backendId, '/operations/' + id);
+      return op.state === state && op;
+    });
+  const watch = async (backendId: string) => {
+    await session.request('watch', { backendId, threadId: 'shared' });
+    await wait(() => views.get(backendId)?.thread.synchronized === true);
+  };
+  try {
+    const { backends } = await session.rpc<{ backends: { id: string; connected: boolean }[] }>(
+      apiCall('/backends'),
+    );
+    assert.deepEqual(
+      backends.map(({ id, connected }) => [id, connected]),
+      instances.map(({ id }) => [id, true]),
+    );
+    for (const instance of instances) {
+      const { threads } = await rpc<{ threads: { id: string; title: string }[] }>(instance.id, '/threads');
+      assert.deepEqual([threads[0].id, threads[0].title], ['shared', instance.id]);
+      const history = await rpc<{ messages: { text: string }[] }>(instance.id, '/threads/shared/history');
+      assert.equal(history.messages[0].text, 'Rust DSH history');
+      await watch(instance.id);
+    }
+
+    const requestId = randomUUID();
+    const send = { requestId, text: 'first' };
+    await rpc(one.id, '/threads/shared/messages', 'POST', send);
+    await operation(requestId, 'accepted');
+    await rpc(one.id, '/threads/shared/messages', 'POST', send);
+    await assert.rejects(rpc(one.id, '/threads/shared/messages', 'POST', { ...send, text: 'different' }), {
+      status: 409,
+    });
+    assert.equal(one.calls.filter((call) => call.method === 'session/prompt').length, 1);
+    assert.equal(two.calls.filter((call) => call.method === 'session/prompt').length, 0);
+    await rpc(two.id, '/threads/shared/messages', 'POST', { requestId, text: 'second instance' });
+    await operation(requestId, 'accepted', two.id);
+    assert.equal(two.calls.filter((call) => call.method === 'session/prompt').length, 1);
+    record(one, 'turn/start', { turn: 8 });
+    user(one, 8, requestId, 'first');
+    push(one, {
+      type: 'assistant-stream',
+      frame: { type: 'start', revision: 1, attemptId: 'attempt', turn: 8, step: 1 },
+    });
+    push(one, {
+      type: 'assistant-stream',
+      frame: {
+        type: 'chunk',
+        revision: 2,
+        attemptId: 'attempt',
+        index: 0,
+        chunk: { type: 'text-delta', index: 0, text: 'streaming' },
+      },
+    });
+    await wait(() => views.get(one.id)?.messages.get('stream-attempt')?.text === 'streaming');
+    assert.equal(views.get(two.id)?.thread.activeTurnId, null);
+
+    const stale = randomUUID();
+    await rpc(one.id, '/threads/shared/steer', 'POST', {
+      requestId: stale,
+      expectedTurnId: '7',
+      text: 'old',
+    });
+    await operation(stale, 'rejected');
+    const steer = randomUUID();
+    await rpc(one.id, '/threads/shared/steer', 'POST', {
+      requestId: steer,
+      expectedTurnId: '8',
+      text: 'steer',
+    });
+    await operation(steer, 'accepted');
+    user(one, 8, steer, 'steer');
+    const queued = randomUUID();
+    const beforeQueue = views.get(one.id)?.thread.queueFingerprint;
+    assert.equal(typeof beforeQueue, 'string');
+    await rpc(one.id, '/threads/shared/queue', 'POST', {
+      requestId: queued,
+      text: 'queued',
+      expectedQueueFingerprint: beforeQueue,
+    });
+    await operation(queued, 'accepted');
+    await wait(() =>
+      views.get(one.id)?.thread.queuedMessages.some((item: any) => item.id === 'queue-' + queued),
+    );
+    const staleRemoval = randomUUID();
+    await rpc(one.id, '/threads/shared/queue-remove', 'POST', {
+      requestId: staleRemoval,
+      messageId: 'queue-' + queued,
+      expectedQueueFingerprint: beforeQueue,
+    });
+    await operation(staleRemoval, 'rejected');
+    assert(!one.calls.some((call) => call.method === 'session/updateQueue'));
+    const removed = randomUUID();
+    await rpc(one.id, '/threads/shared/queue-remove', 'POST', {
+      requestId: removed,
+      messageId: 'queue-' + queued,
+      expectedQueueFingerprint: views.get(one.id)?.thread.queueFingerprint,
+    });
+    await operation(removed, 'completed');
+    await wait(() => views.get(one.id)?.thread.queuedMessages.length === 0);
+    const cancel = randomUUID();
+    await rpc(one.id, '/threads/shared/interrupt', 'POST', { requestId: cancel, expectedTurnId: '8' });
+    await operation(cancel, 'interrupted');
+    await operation(steer, 'interrupted');
+    await operation(requestId, 'interrupted');
+    await wait(
+      () =>
+        views.get(one.id)?.thread.canSend === true && !views.get(one.id)?.order.includes('stream-attempt'),
+    );
+
+    const reopen = one.opens;
+    record(one, 'turn/start', { turn: 9 }, false);
+    record(one, 'turn/end', { turn: 9, reason: { kind: 'completed' } });
+    await wait(() => one.opens > reopen && views.get(one.id)?.thread.synchronized === true);
+    const rename = randomUUID();
+    await rpc(one.id, '/threads/shared/rename', 'POST', { requestId: rename, title: 'renamed' });
+    await operation(rename, 'completed');
+
+    await wait(() => views.get(one.id)?.thread.title === 'renamed');
+    const grouped = await rpc<{ threads: { id: string; projectId: string }[] }>(
+      one.id,
+      '/threads?project=work-dsh-one',
+    );
+    assert.equal(grouped.threads[0].projectId, 'work-dsh-one');
+    assert.deepEqual(await rpc(one.id, '/projects'), {
+      projects: [{ id: 'work-dsh-one', name: 'Workspace dsh-one', count: 1 }],
+      total: 1,
+      ungrouped: 0,
+    });
+    const create = randomUUID();
+    await rpc(one.id, '/threads/new/create', 'POST', {
+      requestId: create,
+      title: 'new session',
+      prompt: 'initial',
+      projectId: 'work-dsh-one',
+    });
+    const completed = (await operation(create, 'completed')) as { resultThreadId?: string };
+    assert.equal(completed.resultThreadId, 'created-' + create);
+    assert.equal(one.created.get('created-' + create), 'new session');
+    const partial = randomUUID();
+    await rpc(one.id, '/threads/new/create', 'POST', {
+      requestId: partial,
+      title: 'partial',
+      prompt: 'lost initial response',
+      projectId: 'work-dsh-one',
+    });
+    const incomplete = (await operation(partial, 'uncertain')) as { resultThreadId?: string };
+    assert.equal(incomplete.resultThreadId, 'created-' + partial);
+    assert(!two.created.size);
+
+    const lost = randomUUID();
+    await rpc(one.id, '/threads/shared/messages', 'POST', { requestId: lost, text: 'lost response' });
+    await operation(lost, 'uncertain');
+    const restartCount = one.calls.length;
+    remove();
+    session.close();
+    await stop();
+    await launch();
+    views.clear();
+    session = await nodeSession(origin, host, phone, ready.ticket, {
+      type: 'authenticate',
+      protocol: 2,
+      sessionId: randomUUID(),
+    });
+    remove = listen();
+    await watch(one.id);
+    await rpc(one.id, '/threads/shared/messages', 'POST', { requestId: lost, text: 'lost response' });
+    await operation(lost, 'uncertain');
+    assert.equal(one.calls.length, restartCount);
+    record(one, 'turn/start', { turn: 10 });
+    user(one, 10, lost, 'lost response');
+    record(one, 'turn/end', { turn: 10, reason: { kind: 'completed' } });
+    await operation(lost, 'completed');
+
+    remove();
+    session.close();
+    await stop();
+    await writeFile(join(state, 'gateway.env'), 'POCKET_READ_ONLY=1\n', { mode: 0o600 });
+    await launch();
+    views.clear();
+    session = await nodeSession(origin, host, phone, ready.ticket, {
+      type: 'authenticate',
+      protocol: 2,
+      sessionId: randomUUID(),
+    });
+    remove = listen();
+    await watch(one.id);
+    assert.equal(views.get(one.id)?.thread.canSend, false);
+    assert.equal((await rpc<{ writesEnabled: boolean }>(one.id, '/status')).writesEnabled, false);
+    const blocked = randomUUID();
+    const before = one.calls.length;
+    await rpc(one.id, '/threads/shared/messages', 'POST', {
+      requestId: blocked,
+      text: 'blocked by migrated read-only config',
+    });
+    await operation(blocked, 'rejected');
+    assert.equal(one.calls.length, before);
+  } finally {
+    remove();
+    session.close();
+  }
+  console.log(
+    'Rust DSH: isolated instances, live deltas and recovery, send/steer/cancel/rename/create, projects, queue, replay, uncertain restart recovery and migrated read-only policy passed.',
+  );
 } finally {
+  await stop();
   for (const socket of dshSocket.clients) socket.terminate();
   dshSocket.close();
   dsh.close();

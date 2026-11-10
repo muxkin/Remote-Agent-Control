@@ -5,7 +5,9 @@ use crate::{
     conversations,
     files::{Attachment, Download},
     gateway::{Database, Packet, reply, reply_packet},
-    history_media, queue, requests, settings,
+    history_media,
+    plugins::{Adapter, Delivery, Subscription, Write},
+    queue, requests, settings,
     state::Device,
 };
 use anyhow::{Context, Result, ensure};
@@ -116,6 +118,7 @@ pub struct DeviceSession {
     device: Device,
     backends: Backends,
     watches: HashMap<Uuid, Watch>,
+    plugin_watches: HashMap<(String, String), PluginWatch>,
     last_status: Value,
     bulk: bool,
     signaling: Option<Uuid>,
@@ -128,6 +131,14 @@ struct Watch {
     fallback_epoch: Uuid,
     fallback_after: Instant,
     published: Option<(Uuid, u64, Option<String>)>,
+    versions: HashMap<String, [u8; 32]>,
+    operations: HashMap<String, Value>,
+}
+
+struct PluginWatch {
+    live: Arc<Subscription>,
+    epoch: Uuid,
+    revision: Option<u64>,
     versions: HashMap<String, [u8; 32]>,
     operations: HashMap<String, Value>,
 }
@@ -148,6 +159,7 @@ impl DeviceSession {
             last_status: backends.status(false),
             backends,
             watches: HashMap::new(),
+            plugin_watches: HashMap::new(),
             bulk,
             signaling,
             connection: None,
@@ -184,9 +196,10 @@ impl DeviceSession {
                     self.ensure_device()?;
                     self.publish(io).await?;
                 }
-                _ = updates.tick(), if !self.bulk && !self.watches.is_empty() => {
+                _ = updates.tick(), if !self.bulk && !(self.watches.is_empty() && self.plugin_watches.is_empty()) => {
                     self.ensure_device()?;
                     self.publish(io).await?;
+                    self.publish_plugins(io).await?;
                 }
                 request = requests.recv() => {
                     let Some(Packet { value: request, bytes }) = request else { return Ok(()) };
@@ -211,7 +224,6 @@ impl DeviceSession {
                         continue;
                     }
                     let mut reply_bytes = Vec::new();
-                    let mut snapshot = None;
                     let result = match request["type"].as_str() {
                         Some("rpc") if !self.bulk && bytes.is_empty() => self.rpc(request["call"].clone()).await,
                         Some("file") if codex(&request) => self.file(request.clone(), bytes).await.map(|(value, bytes)| {
@@ -222,10 +234,7 @@ impl DeviceSession {
                             if codex(&request) {
                                 self.watch(&request).await.map(Some)
                             } else {
-                                self.plugin_snapshot(&request).await.map(|sync| {
-                                    snapshot = sync;
-                                    snapshot.as_ref().map(|_| json!({"ok":true}))
-                                })
+                                self.plugin_watch(&request)
                             }
                         },
                         Some("offer") if bytes.is_empty() && self.signaling.is_some() => self.offer(&request).await.map(Some),
@@ -238,6 +247,8 @@ impl DeviceSession {
                         Some("unwatch") if !self.bulk && bytes.is_empty() => {
                             if codex(&request) {
                                 self.watches.remove(&thread_id(&request["threadId"])?);
+                            } else if let (Some(backend), Some(thread)) = (request["backendId"].as_str(), request["threadId"].as_str()) {
+                                self.plugin_watches.remove(&(backend.to_owned(), thread.to_owned()));
                             }
                             Ok(Some(json!({"ok": true})))
                         }
@@ -256,9 +267,6 @@ impl DeviceSession {
                         Err(_) => json!({"type":"response","id":id,"status":400,"error":"请求未完成，请核对本机会话和参数"}),
                     };
                     reply_packet(io, value, &reply_bytes).await?;
-                    if let Some(snapshot) = snapshot {
-                        reply(io, snapshot).await?;
-                    }
                     if !self.bulk && request["call"]["method"] == "device.revoke" {
                         // Let the encrypted response reach the requesting client.
                         tokio::time::sleep(Duration::from_millis(35)).await;
@@ -319,7 +327,10 @@ impl DeviceSession {
             watch.versions.clear();
             return Ok(json!({"ok": true}));
         }
-        ensure!(self.watches.len() < 8, "订阅数量过多");
+        ensure!(
+            self.watches.len() + self.plugin_watches.len() < 8,
+            "订阅数量过多"
+        );
         let history = self.backends.history.clone().context("尚未配置 Codex")?;
         let fallback = tokio::task::spawn_blocking(move || {
             let params = json!({"id": id});
@@ -428,24 +439,10 @@ impl DeviceSession {
                 }
             };
             if let Some((mark, thread, messages)) = changed {
-                let mut order = Vec::new();
-                let mut changed = Vec::new();
-                let mut versions = HashMap::new();
-                for message in &messages {
-                    let Some(id) = message["id"].as_str() else {
-                        continue;
-                    };
-                    let fingerprint = Sha256::digest(serde_json::to_vec(message)?).into();
-                    if watch.versions.get(id) != Some(&fingerprint) {
-                        changed.push(message);
-                    }
-                    versions.insert(id.to_owned(), fingerprint);
-                    order.push(id);
-                }
+                let (order, changed) = diff_messages(messages.iter(), &mut watch.versions)?;
                 reply(io, json!({"type":"sync","backendId":CODEX,"threadId":id,"updates":[{
                     "kind":"manifest","epoch":mark.0,"thread":thread,"order":order,"changed":changed,
                 }]})).await?;
-                watch.versions = versions;
                 watch.published = Some(mark);
             }
             let operations = self
@@ -502,30 +499,127 @@ impl DeviceSession {
         .await?
     }
 
-    async fn plugin_snapshot(&self, request: &Value) -> Result<Option<Value>> {
+    fn plugin_watch(&mut self, request: &Value) -> Result<Option<Value>> {
         let Some(plugin) = request["backendId"]
             .as_str()
             .and_then(|id| self.backends.plugins.get(id))
         else {
             return Ok(None);
         };
-        let id = request["threadId"].as_str().context("会话 ID 无效")?;
-        let mut value = plugin
-            .read("thread.read", &json!({"id":id}), &Value::Null)
-            .await?
-            .context("找不到此会话")?;
-        let order = value["messages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|message| message["id"].as_str().map(str::to_owned))
-            .collect::<Vec<_>>();
-        Ok(Some(
-            json!({"type":"sync","backendId":plugin.id(),"threadId":id,"updates":[{
-                "kind":"manifest","epoch":Uuid::new_v4(),"thread":value["thread"].take(),
-                "order":order,"changed":value["messages"].take()
-            }]}),
-        ))
+        let thread = plugin_thread(&request["threadId"])?;
+        let key = (plugin.id().to_owned(), thread.to_owned());
+        if let Some(watch) = self.plugin_watches.get_mut(&key) {
+            watch.revision = None;
+            watch.versions.clear();
+        } else {
+            ensure!(
+                self.watches.len() + self.plugin_watches.len() < 8,
+                "订阅数量过多"
+            );
+            self.plugin_watches.insert(
+                key,
+                PluginWatch {
+                    live: plugin.subscribe(thread)?,
+                    epoch: Uuid::new_v4(),
+                    revision: None,
+                    versions: HashMap::new(),
+                    operations: HashMap::new(),
+                },
+            );
+        }
+        Ok(Some(json!({"ok":true})))
+    }
+
+    async fn publish_plugins(&mut self, io: &mut (impl AsyncWrite + Unpin)) -> Result<()> {
+        for ((backend, thread), watch) in &mut self.plugin_watches {
+            let view = watch.live.0.borrow().clone();
+            if let Some(view) = view {
+                let revision = view.thread["revision"].as_u64();
+                if revision != watch.revision {
+                    if view.thread["synchronized"] == true {
+                        self.db
+                            .lock()
+                            .expect("database mutex poisoned")
+                            .observe_plugin(backend, thread, &view.observations)?;
+                    }
+                    let (order, changed) = diff_messages(
+                        view.messages.iter().chain(view.streamed.iter()),
+                        &mut watch.versions,
+                    )?;
+                    reply(io, json!({"type":"sync","backendId":backend,"threadId":thread,"updates":[{
+                        "kind":"manifest","epoch":watch.epoch,"thread":view.thread,"order":order,"changed":changed,
+                    }]})).await?;
+                    watch.revision = revision;
+                }
+            }
+            let operations = self
+                .db
+                .lock()
+                .expect("database mutex poisoned")
+                .recent_operations_for(backend, &self.device.id, thread)?;
+            let mut current = HashMap::new();
+            for operation in operations {
+                let id = operation["id"].as_str().unwrap_or_default().to_owned();
+                if watch.operations.get(&id) != Some(&operation) {
+                    reply(
+                        io,
+                        json!({"type":"event","backendId":backend,"threadId":thread,
+                            "event":{"type":"operation","operation":operation},
+                        }),
+                    )
+                    .await?;
+                }
+                current.insert(id, operation);
+            }
+            watch.operations = current;
+        }
+        Ok(())
+    }
+
+    fn plugin_write(&self, plugin: Arc<dyn Adapter>, method: &str, call: &Value) -> Result<Value> {
+        let thread = plugin_thread(&call["params"]["id"])?;
+        let (request, action) =
+            serde_json::from_value::<PluginRequest>(call["body"].clone())?.parse(method)?;
+        let live = self
+            .plugin_watches
+            .get(&(plugin.id().to_owned(), thread.to_owned()))
+            .map(|watch| watch.live.clone());
+        if matches!(&action, Write::Create { .. }) {
+            ensure!(thread == "new" || live.is_some(), "请先打开 DSH 会话");
+        } else {
+            ensure!(live.is_some(), "请先打开 DSH 会话");
+        }
+        let (operation, fresh) = self
+            .db
+            .lock()
+            .expect("database mutex poisoned")
+            .begin_plugin(plugin.id(), request, &self.device.id, thread, &action)
+            .map_err(|_| Conflict)?;
+        if fresh {
+            let db = self.db.clone();
+            let thread = thread.to_owned();
+            tokio::spawn(async move {
+                let created = |id: &str| {
+                    db.lock()
+                        .expect("database mutex poisoned")
+                        .record_plugin_thread(plugin.id(), request, id)
+                };
+                let result = timeout(
+                    Duration::from_secs(45),
+                    plugin.write(&thread, request, action, live.clone(), &created),
+                )
+                .await
+                .unwrap_or(Delivery::Uncertain);
+                let view = live.and_then(|live| live.0.borrow().clone());
+                let mut db = db.lock().expect("database mutex poisoned");
+                if db.finish_plugin(plugin.id(), request, result).is_ok()
+                    && let Some(view) = view.filter(|value| value.thread["synchronized"] == true)
+                {
+                    let _ = db.observe_plugin(plugin.id(), &thread, &view.observations);
+                }
+            });
+        }
+        Ok(operation)
     }
 
     async fn rpc(&mut self, call: Value) -> Result<Option<Value>> {
@@ -549,6 +643,26 @@ impl DeviceSession {
                     "device":{"id":self.device.id,"name":self.device.name},
                     "status":plugin.status().await,"backend":plugin.info().await,
                 }))),
+                "operation.read" => {
+                    let id = thread_id(&call["params"]["id"])?;
+                    self.db
+                        .lock()
+                        .expect("database mutex poisoned")
+                        .operation_for(plugin.id(), &self.device.id, &id.to_string())
+                }
+                "operations.list" => {
+                    let thread = plugin_thread(&call["params"]["id"])?;
+                    let operations = self
+                        .db
+                        .lock()
+                        .expect("database mutex poisoned")
+                        .recent_operations_for(plugin.id(), &self.device.id, thread)?;
+                    Ok(Some(json!(operations)))
+                }
+                "message.send" | "turn.steer" | "turn.interrupt" | "thread.rename"
+                | "thread.create" | "queue.add" | "queue.remove" => {
+                    self.plugin_write(plugin, method, &call).map(Some)
+                }
                 _ => plugin.read(method, &call["params"], &call["query"]).await,
             };
         }
@@ -898,6 +1012,181 @@ impl DeviceSession {
             });
         }
         Ok(operation)
+    }
+}
+
+fn diff_messages<'a>(
+    messages: impl IntoIterator<Item = &'a Value>,
+    versions: &mut HashMap<String, [u8; 32]>,
+) -> Result<(Vec<&'a str>, Vec<&'a Value>)> {
+    let mut order = Vec::new();
+    let mut changed = Vec::new();
+    let mut current = HashMap::new();
+    for message in messages {
+        let Some(id) = message["id"].as_str() else {
+            continue;
+        };
+        let fingerprint = Sha256::digest(serde_json::to_vec(message)?).into();
+        if versions.get(id) != Some(&fingerprint) {
+            changed.push(message);
+        }
+        current.insert(id.to_owned(), fingerprint);
+        order.push(id);
+    }
+    *versions = current;
+    Ok((order, changed))
+}
+
+fn plugin_thread(value: &Value) -> Result<&str> {
+    value
+        .as_str()
+        .filter(|id| {
+            (1..=200).contains(&id.encode_utf16().count())
+                && !id
+                    .chars()
+                    .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+        })
+        .context("DSH 会话标识无效")
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginRequest {
+    request_id: Uuid,
+    text: Option<String>,
+    expected_turn_id: Option<String>,
+    title: Option<String>,
+    prompt: Option<String>,
+    project_id: Option<String>,
+    expected_queue_fingerprint: Option<String>,
+    message_id: Option<String>,
+    upload_ids: Option<Vec<Uuid>>,
+    skill_ids: Option<Vec<String>>,
+    plugin_ids: Option<Vec<String>>,
+}
+
+impl PluginRequest {
+    fn parse(self, method: &str) -> Result<(Uuid, Write)> {
+        ensure!(
+            self.upload_ids.as_ref().is_none_or(Vec::is_empty)
+                && self.skill_ids.as_ref().is_none_or(Vec::is_empty)
+                && self.plugin_ids.as_ref().is_none_or(Vec::is_empty),
+            "DSH 附件和技能尚未迁移"
+        );
+        let text = |input: Option<String>, limit: usize| {
+            let value = input.unwrap_or_default();
+            let trimmed = value.trim();
+            ensure!(
+                (1..=limit).contains(&trimmed.encode_utf16().count()),
+                "DSH 内容无效"
+            );
+            Ok::<_, anyhow::Error>(trimmed.to_owned())
+        };
+        let expected = || {
+            self.expected_turn_id
+                .as_deref()
+                .filter(|id| !id.is_empty() && id.len() <= 200)
+                .map(str::to_owned)
+                .context("当前回合无效")
+        };
+        if method != "thread.create" {
+            ensure!(
+                self.prompt.is_none() && self.project_id.is_none(),
+                "DSH 请求参数无效"
+            );
+        }
+        let queue = matches!(method, "queue.add" | "queue.remove");
+        if !queue {
+            ensure!(
+                self.expected_queue_fingerprint.is_none() && self.message_id.is_none(),
+                "DSH 请求参数无效"
+            );
+        }
+        let queue_fingerprint = || {
+            self.expected_queue_fingerprint
+                .as_ref()
+                .filter(|value| {
+                    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .cloned()
+                .context("队列指纹无效")
+        };
+        let action = match method {
+            "message.send" if self.title.is_none() && self.expected_turn_id.is_none() => {
+                Write::Send {
+                    text: text(self.text, 16_000)?,
+                }
+            }
+            "turn.steer" if self.title.is_none() => Write::Steer {
+                expected: expected()?,
+                text: text(self.text, 16_000)?,
+            },
+            "turn.interrupt" if self.text.is_none() && self.title.is_none() => Write::Interrupt {
+                expected: expected()?,
+            },
+            "thread.rename" if self.text.is_none() && self.expected_turn_id.is_none() => {
+                let title = text(self.title, 160)?;
+                ensure!(!title.chars().any(char::is_control), "会话名称无效");
+                Write::Rename { title }
+            }
+            "queue.add"
+                if self.title.is_none()
+                    && self.expected_turn_id.is_none()
+                    && self.message_id.is_none() =>
+            {
+                Write::Queue {
+                    text: text(self.text, 16_000)?,
+                    expected: queue_fingerprint()?,
+                }
+            }
+            "queue.remove"
+                if self.title.is_none()
+                    && self.expected_turn_id.is_none()
+                    && self.text.is_none() =>
+            {
+                let message = self
+                    .message_id
+                    .filter(|id| {
+                        (1..=200).contains(&id.encode_utf16().count())
+                            && !id.chars().any(char::is_control)
+                    })
+                    .context("队列条目标识无效")?;
+                Write::RemoveQueued {
+                    message,
+                    expected: queue_fingerprint()?,
+                }
+            }
+            "thread.create" if self.text.is_none() && self.expected_turn_id.is_none() => {
+                let title = self
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned);
+                ensure!(
+                    title
+                        .as_ref()
+                        .is_none_or(|title| title.encode_utf16().count() <= 160
+                            && !title.chars().any(char::is_control)),
+                    "会话名称无效"
+                );
+                let project = self.project_id;
+                ensure!(
+                    project
+                        .as_ref()
+                        .is_none_or(|id| (1..=200).contains(&id.encode_utf16().count())
+                            && !id.chars().any(char::is_control)),
+                    "工作区标识无效"
+                );
+                Write::Create {
+                    title,
+                    prompt: text(self.prompt, 16_000)?,
+                    project,
+                }
+            }
+            _ => anyhow::bail!("DSH 请求参数无效"),
+        };
+        Ok((self.request_id, action))
     }
 }
 

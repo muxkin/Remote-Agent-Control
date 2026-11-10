@@ -8,6 +8,7 @@ mod codex_peer;
 mod device;
 mod direct;
 mod dsh;
+mod dsh_live;
 mod files;
 mod gateway;
 mod history_media;

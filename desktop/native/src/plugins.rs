@@ -1,9 +1,11 @@
 use crate::{dsh::Dsh, state::private_file};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, env, io::Read, path::Path, sync::Arc};
+use tokio::sync::watch;
+use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait Adapter: Send + Sync {
@@ -11,6 +13,86 @@ pub(crate) trait Adapter: Send + Sync {
     async fn info(&self) -> Value;
     async fn status(&self) -> Value;
     async fn read(&self, method: &str, params: &Value, query: &Value) -> Result<Option<Value>>;
+    fn subscribe(self: Arc<Self>, thread: &str) -> Result<Arc<Subscription>>;
+    async fn write(
+        &self,
+        thread: &str,
+        request: Uuid,
+        action: Write,
+        live: Option<Arc<Subscription>>,
+        created: &RecordCreated<'_>,
+    ) -> Delivery;
+}
+
+pub(crate) type RecordCreated<'a> =
+    dyn for<'thread> Fn(&'thread str) -> Result<()> + Send + Sync + 'a;
+
+pub(crate) struct Subscription(pub watch::Receiver<Option<Arc<View>>>);
+
+#[derive(Clone)]
+pub(crate) struct View {
+    pub thread: Value,
+    pub messages: Arc<[Value]>,
+    pub streamed: Option<Value>,
+    pub observations: Arc<[Observation]>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Observation {
+    pub request: Option<Uuid>,
+    pub turn: String,
+    pub state: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) enum Write {
+    Send {
+        text: String,
+    },
+    Steer {
+        expected: String,
+        text: String,
+    },
+    Interrupt {
+        expected: String,
+    },
+    Queue {
+        expected: String,
+        text: String,
+    },
+    RemoveQueued {
+        expected: String,
+        message: String,
+    },
+    Rename {
+        title: String,
+    },
+    Create {
+        title: Option<String>,
+        prompt: String,
+        project: Option<String>,
+    },
+}
+
+impl Write {
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Send { .. } => "send",
+            Self::Steer { .. } => "steer",
+            Self::Interrupt { .. } => "interrupt",
+            Self::Queue { .. } => "queue",
+            Self::RemoveQueued { .. } => "queue-remove",
+            Self::Rename { .. } => "rename",
+            Self::Create { .. } => "create",
+        }
+    }
+}
+
+pub(crate) enum Delivery {
+    Accepted(Option<String>),
+    Completed(Option<String>),
+    Rejected(&'static str),
+    Uncertain,
 }
 
 #[derive(Clone, Default)]
@@ -52,6 +134,12 @@ impl Registry {
                 secrets.insert(name, value);
             }
         }
+        let read_only = ["POCKET_NATIVE_READ_ONLY", "POCKET_READ_ONLY"]
+            .iter()
+            .any(|key| {
+                env::var(key).as_deref() == Ok("1")
+                    || secrets.get(*key).is_some_and(|value| value == "1")
+            });
         let mut plugins = HashMap::<String, Arc<dyn Adapter>>::new();
         for row in rows {
             if row.plugin != "@agent-remote/adapter-dsh" {
@@ -87,6 +175,7 @@ impl Registry {
                     .unwrap_or("unknown")
                     .to_owned(),
                 token,
+                read_only || row.config["readOnly"] == true,
             )?;
             let id = dsh.id().to_owned();
             ensure!(
@@ -97,8 +186,8 @@ impl Registry {
         Ok(Self(Arc::new(plugins)))
     }
 
-    pub(crate) fn get(&self, id: &str) -> Option<&dyn Adapter> {
-        self.0.get(id).map(AsRef::as_ref)
+    pub(crate) fn get(&self, id: &str) -> Option<Arc<dyn Adapter>> {
+        self.0.get(id).cloned()
     }
 
     pub(crate) async fn infos(&self) -> Vec<Value> {
