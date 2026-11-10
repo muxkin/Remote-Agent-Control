@@ -1,6 +1,6 @@
 [package]
 name = "agent-space-native"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -8,7 +8,7 @@ publish = false
 
 [features]
 default = ["ely"]
-ely = ["dep:ely-core", "dep:gpui", "dep:gpui-platform", "dep:tray-icon", "dep:auto-launch", "dep:image"]
+ely = ["dep:ely-core", "dep:gpui", "dep:gpui-platform", "dep:tray-icon", "dep:auto-launch", "dep:image", "dep:zbus"]
 
 [dependencies]
 anyhow = "1"
@@ -52,6 +52,9 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "net", "process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
 
 [build-dependencies]
 embed-resource = "3.0.12"

@@ -8,6 +8,7 @@ use tray_icon::{
 
 pub const APP_ID: &str = "org.agent-space.adapter";
 pub const APP_NAME: &str = "Agent 空间适配器";
+const ICON_32: &[u8] = include_bytes!("../../../src/web/public/app-icon-32.png");
 const ICON_192: &[u8] = include_bytes!("../../../src/web/public/app-icon-192.png");
 
 pub fn window_icon() -> Result<image::RgbaImage> {
@@ -18,9 +19,9 @@ pub fn window_icon() -> Result<image::RgbaImage> {
 pub fn register_launcher() -> Result<()> {
     use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path};
 
-    fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
+    fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool> {
         if fs::read(path).is_ok_and(|old| old == bytes) {
-            return Ok(());
+            return Ok(false);
         }
         let parent = path.parent().context("桌面入口目录无效")?;
         fs::create_dir_all(parent)?;
@@ -29,7 +30,7 @@ pub fn register_launcher() -> Result<()> {
         file.as_file()
             .set_permissions(fs::Permissions::from_mode(0o644))?;
         file.persist(path)?;
-        Ok(())
+        Ok(true)
     }
 
     let data = dirs::data_dir().context("无法定位桌面应用目录")?;
@@ -51,17 +52,57 @@ pub fn register_launcher() -> Result<()> {
             _ => exec.push(ch),
         }
     }
-    write_if_changed(
-        &data.join(format!("icons/hicolor/192x192/apps/{APP_ID}.png")),
-        ICON_192,
+    use image::ImageEncoder;
+    let icon_48 = image::imageops::resize(
+        &window_icon()?,
+        48,
+        48,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut png_48 = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png_48).write_image(
+        icon_48.as_raw(),
+        48,
+        48,
+        image::ExtendedColorType::Rgba8,
     )?;
+    let theme = data.join("icons/hicolor");
+    let mut icons_changed = false;
+    for (size, png) in [(32, ICON_32), (48, png_48.as_slice()), (192, ICON_192)] {
+        icons_changed |=
+            write_if_changed(&theme.join(format!("{size}x{size}/apps/{APP_ID}.png")), png)?;
+    }
+    if icons_changed {
+        fs::File::open(&theme)?.set_modified(std::time::SystemTime::now())?;
+    }
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName={APP_NAME}\nName[en]=Agent Space Adapter\nExec=\"{exec}\"\nIcon={APP_ID}\nTerminal=false\nStartupWMClass={APP_ID}\nCategories=Utility;\n"
     );
-    write_if_changed(
+    let entry_changed = write_if_changed(
         &data.join(format!("applications/{APP_ID}.desktop")),
         entry.as_bytes(),
-    )
+    )?;
+    if (icons_changed || entry_changed)
+        && std::env::var("XDG_CURRENT_DESKTOP")
+            .is_ok_and(|desktop| desktop.split(':').any(|name| name == "KDE"))
+    {
+        // Refresh both Plasma's named-icon and desktop-entry caches on installation.
+        if let Ok(bus) = zbus::blocking::Connection::session() {
+            let _ = bus.emit_signal(
+                None::<&str>,
+                "/KIconLoader",
+                "org.kde.KIconLoader",
+                "iconChanged",
+                &(0_i32,), // KIconLoader::Desktop
+            );
+        }
+        let _ = std::process::Command::new("kbuildsycoca6")
+            .arg("--noincremental")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    Ok(())
 }
 
 pub fn startup() -> Result<AutoLaunch> {
@@ -82,8 +123,7 @@ enum Event {
 }
 
 pub fn install(cx: &mut App, mut open_window: impl FnMut(&mut App) + 'static) -> Result<()> {
-    let image = image::load_from_memory(include_bytes!("../../../src/web/public/app-icon-32.png"))?
-        .into_rgba8();
+    let image = image::load_from_memory(ICON_32)?.into_rgba8();
     let (width, height) = image.dimensions();
     let icon = Icon::from_rgba(image.into_raw(), width, height)?;
     let menu = Menu::new();

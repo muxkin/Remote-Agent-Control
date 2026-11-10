@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "agent-space-native"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -177,6 +177,7 @@ dependencies = [
  "uuid",
  "webrtc",
  "windows-sys 0.61.2",
+ "zbus 5.19.0",
  "zstd",
 ]
 
