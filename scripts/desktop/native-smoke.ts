@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { zstdCompressSync } from 'node:zlib';
 import { once } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
@@ -192,6 +192,21 @@ async function cloudflareRelay(port: number) {
 }
 
 async function launch(useSaved = false) {
+  if (process.platform === 'win32') {
+    // The hosted runner is elevated. Node-created fixture files and SQLite's
+    // sidecars can inherit Administrators as owner even in a private directory.
+    // Normalize the fixture just as the legacy Windows adapter does on reopen.
+    const runtime = platformRuntime();
+    for (const name of [
+      'device-identity-v2.json',
+      'state.sqlite-wal',
+      'state.sqlite-shm',
+      'state.sqlite-journal',
+    ]) {
+      const file = join(state, name);
+      if (existsSync(file)) runtime.privateFile(file);
+    }
+  }
   const child = spawn(executable, ['--headless', '--print-pair'], {
     env: {
       ...process.env,

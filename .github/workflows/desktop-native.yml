@@ -2,7 +2,7 @@ name: Native desktop releases
 on:
   workflow_dispatch:
   push:
-    tags: [native-v*]
+    tags: [native-v*, native-publish-v*]
   pull_request:
     paths:
       - 'desktop/native/**'
@@ -38,15 +38,15 @@ jobs:
       - name: Build the Ely desktop app
         working-directory: desktop/native
         run: cargo build --release --locked
+      - name: Package the native preview
+        run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }}
       - name: Build the console binary for protocol verification
         working-directory: desktop/native
-        run: cargo build --release --locked --no-default-features --target-dir target/protocol-smoke
+        run: cargo build --release --locked --no-default-features
       - name: Verify native peer identity, live controls and file transfers
         env:
           POCKET_NATIVE_TEST_IPC: '1'
-        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/protocol-smoke/release/${{ matrix.binary }}
-      - name: Package the native preview
-        run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }}
+        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }}
       - uses: actions/upload-artifact@v4
         with:
           name: agent-space-native-${{ matrix.platform }}-x64
@@ -57,13 +57,15 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/native-v')
+    if: startsWith(github.ref, 'refs/tags/native-v') || startsWith(github.ref, 'refs/tags/native-publish-v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: agent-space-native-*-x64
@@ -76,11 +78,18 @@ jobs:
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' desktop/native/Cargo.toml)
-          test "$GITHUB_REF_NAME" = "native-v$version"
+          release_tag="native-v$version"
+          if [ "$GITHUB_REF_NAME" = "native-publish-v$version" ]; then
+            # Retry a release after verification-only fixes, keeping its source tag immutable.
+            git diff --exit-code "$release_tag" HEAD -- desktop/native scripts/desktop/native-package.mjs \
+              assets/branding/agent-space.ico src/web/public/app-icon-32.png src/web/public/app-icon-192.png
+          else
+            test "$GITHUB_REF_NAME" = "$release_tag"
+          fi
           cd native-release
           linux="AgentSpace-Native-$version-linux-x64.tar.xz"
           windows="AgentSpace-Native-$version-windows-x64.zip"
           sha256sum --check "$linux.sha256" "$windows.sha256"
-          gh release create "$GITHUB_REF_NAME" "$linux" "$linux.sha256" "$windows" "$windows.sha256" \
+          gh release create "$release_tag" "$linux" "$linux.sha256" "$windows" "$windows.sha256" \
             --verify-tag --prerelease --title "Agent Space Native $version" \
             --notes "Rust + Ely portable adapter for Linux and Windows x64. Closing the window keeps the adapter in the system tray. The tray menu can reopen it or quit the adapter. Both platforms use the Agent Space app icon."
