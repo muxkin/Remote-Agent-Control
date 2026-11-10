@@ -693,15 +693,16 @@ async function testLive(
       view = update?.thread;
     }
   });
-  const wait = async (check: () => boolean | Promise<boolean>) => {
-    for (let i = 0; i < 90; i++) {
+  const wait = async (check: () => boolean | Promise<boolean>, timeout = 6_000) => {
+    const deadline = performance.now() + timeout;
+    while (performance.now() < deadline) {
       if (await check()) return;
       await new Promise((resolve) => setTimeout(resolve, 65));
     }
     throw Error('Native Codex control did not reach the expected state');
   };
   const operation = (id: string) =>
-    session.rpc<{ state: string; resultThreadId?: string; turnId?: string }>(apiCall(`/operations/${id}`));
+    session.rpc<{ state: string; error?: string; resultThreadId?: string; turnId?: string }>(apiCall(`/operations/${id}`));
   let step = 'subscribing to Codex';
   try {
     await session.request('watch', { threadId: THREAD, backendId: 'codex-local' });
@@ -712,8 +713,18 @@ async function testLive(
       const requestId = crypto.randomUUID();
       const request = apiCall(`/threads/${anchor}/${suffix}`, 'POST', { requestId, ...input });
       await session.rpc(request);
-      await wait(async () => (await operation(requestId)).state === state);
-      return { request, operation: await operation(requestId) };
+      let observed = await operation(requestId);
+      try {
+        // The native CLI-backed fork may legitimately take up to 15 seconds.
+        await wait(async () => {
+          if (observed.state === state) return true;
+          observed = await operation(requestId);
+          return observed.state === state;
+        }, suffix === 'fork' && 'lastTurnId' in input && forkCli ? 20_000 : undefined);
+      } catch (cause) {
+        throw Error(`Codex ${suffix} expected ${state}, received ${observed.state}${observed.error ? ' (' + observed.error + ')' : ''}`, { cause });
+      }
+      return { request, operation: observed };
     };
     const open = await submit('open');
     await session.rpc(open.request);
