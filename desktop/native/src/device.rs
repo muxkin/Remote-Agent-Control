@@ -135,8 +135,18 @@ impl DeviceSession {
                             let scope = self.file_scope(&request);
                             storage_jobs.spawn(async move {
                                 let result = async {
-                                    storage.handle(db, device, scope?,
-                                        thread_id(&request["fileId"])?, request["action"].as_str().unwrap(), &request).await
+                                    let scope = scope?;
+                                    let transfer = thread_id(&request["fileId"])?;
+                                    let action = request["action"].as_str().unwrap();
+                                    if action == "storage-plan" {
+                                        let (db, device, scope) = (db.clone(), device.clone(), scope.clone());
+                                        let batch = storage.batch();
+                                        tokio::task::spawn_blocking(move || {
+                                            db.lock().expect("database mutex poisoned")
+                                                .import_pending_upload(&device, &scope, transfer, Some(batch))
+                                        }).await??;
+                                    }
+                                    storage.handle(db, device, scope, transfer, action, &request).await
                                 }.await;
                                 (id, result)
                             });
@@ -147,6 +157,8 @@ impl DeviceSession {
                     }
                     let mut reply_bytes = Vec::new();
                     let result = match request["type"].as_str() {
+                        Some("rpc") if !self.bulk && request["call"]["method"] == "upload.chunk" =>
+                            self.legacy_upload_chunk(&request["call"], bytes).await,
                         Some("rpc") if !self.bulk && bytes.is_empty() => self.rpc(request["call"].clone()).await,
                         Some("file") => self.file(request.clone(), bytes).await.map(|(value, bytes)| {
                             reply_bytes = bytes;
@@ -437,6 +449,26 @@ impl DeviceSession {
         .await?
     }
 
+    async fn legacy_upload_chunk(&self, call: &Value, bytes: Vec<u8>) -> Result<Option<Value>> {
+        let scope = self.file_scope(&json!({
+            "backendId":backend_id(call),"threadId":call["params"]["id"],"action":"write",
+        }))?;
+        let id = thread_id(&call["params"]["uploadId"])?;
+        let offset = call["query"]["offset"]
+            .as_str()
+            .context("旧附件偏移缺失")?
+            .parse::<u64>()?;
+        let db = self.db.clone();
+        let device = self.device.id.clone();
+        tokio::task::spawn_blocking(move || {
+            db.lock()
+                .expect("database mutex poisoned")
+                .legacy_chunk(&device, &scope, id, offset, &bytes)
+                .map(Some)
+        })
+        .await?
+    }
+
     async fn describe_staged_upload(&self, scope: Scope, reference: &str) -> Result<Option<Value>> {
         let path = std::path::PathBuf::from(reference);
         if !path.is_absolute() {
@@ -483,6 +515,11 @@ impl DeviceSession {
         let scope = self.file_scope(&request)?;
         let db = self.db.clone();
         let device = self.device.id.clone();
+        let batch = self
+            .backends
+            .storage
+            .as_ref()
+            .map(crate::storage::Storage::batch);
         tokio::task::spawn_blocking(move || {
             let action = request["action"].as_str().context("附件操作无效")?;
             let mut store = db.lock().expect("database mutex poisoned");
@@ -493,6 +530,9 @@ impl DeviceSession {
                     json!({"index":index}),
                     store.read_upload(&device, &scope, id, index)?,
                 ));
+            }
+            if matches!(action, "missing" | "write" | "finish") {
+                store.import_pending_upload(&device, &scope, id, batch)?;
             }
             Ok((
                 store.file_request(

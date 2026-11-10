@@ -126,6 +126,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS native_storage_objects (
                id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, transfer TEXT NOT NULL,
                indices TEXT NOT NULL, download INTEGER NOT NULL, expires INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS legacy_upload_progress (
+               id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, sha256 TEXT NOT NULL,
+               size INTEGER NOT NULL, offset INTEGER NOT NULL, expires INTEGER NOT NULL
              );",
         )?;
         crate::appearance::initialize(&db)?;

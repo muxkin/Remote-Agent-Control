@@ -13,6 +13,8 @@ use std::{
 };
 use uuid::Uuid;
 
+mod legacy;
+
 pub const BLOCK: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -196,9 +198,31 @@ impl Store {
                 && spec.hashes.iter().all(|value| is_hash(value)),
             "附件摘要无效"
         );
-        let mut stale = self
-            .db
-            .prepare("SELECT id FROM native_uploads WHERE expires<=?1 AND complete=0")?;
+        self.reserve_upload(spec.size as i64)?;
+        let id = Uuid::new_v4();
+        drop(self.open_upload_file(id, &spec.name)?);
+        let manifest = serde_json::to_value(Manifest {
+            mime: content_type(&spec.name),
+            spec,
+            id,
+            version: Uuid::new_v4(),
+            key: STANDARD.encode(rand::random::<[u8; 32]>()),
+            nonce: STANDARD.encode(rand::random::<[u8; 8]>()),
+            storage: storage_batch.is_some(),
+            storage_batch,
+        })?;
+        self.db.execute(
+            "INSERT INTO native_uploads (id,device,thread,manifest,present,expires) VALUES (?1,?2,?3,?4,'[]',?5)",
+            params![id.to_string(), device, scope.key(), manifest.to_string(), now() + 86_400_000],
+        )?;
+        Ok(manifest)
+    }
+
+    fn reserve_upload(&self, size: i64) -> Result<()> {
+        let mut stale = self.db.prepare(
+            "SELECT id FROM native_uploads WHERE expires<=?1 AND complete=0
+             UNION SELECT id FROM legacy_upload_progress WHERE expires<=?1",
+        )?;
         let stale = stale
             .query_map([now()], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -211,38 +235,34 @@ impl Store {
                         "DELETE FROM native_uploads WHERE id=?1 AND complete=0",
                         [id.to_string()],
                     )?;
+                    self.db.execute(
+                        "DELETE FROM legacy_upload_progress WHERE id=?1 AND expires<=?2",
+                        params![id.to_string(), now()],
+                    )?;
                 }
             }
         }
         let (count, allocated): (i64, i64) = self.db.query_row(
-            "SELECT count(*), coalesce(sum(json_extract(manifest, '$.size')),0) FROM native_uploads WHERE complete=0",
-            [], |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT count(*),coalesce(sum(size),0) FROM (
+               SELECT json_extract(manifest,'$.size') AS size FROM native_uploads WHERE complete=0
+               UNION ALL SELECT size FROM legacy_upload_progress
+             )",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         ensure!(
-            count < 24 && allocated + spec.size as i64 <= (512 * BLOCK) as i64,
+            count < 24 && allocated + size <= (512 * BLOCK) as i64,
             "待传附件过多"
         );
-        let id = Uuid::new_v4();
-        let path = upload_path(&uploads, id, &spec.name);
-        let mime = content_type(&spec.name);
+        Ok(())
+    }
+
+    fn open_upload_file(&self, id: Uuid, name: &str) -> Result<File> {
+        let uploads = self.directory.join("native-uploads");
+        let path = upload_path(&uploads, id, name);
         private_directory(&uploads)?;
         private_directory(path.parent().unwrap())?;
-        drop(private_file(&path, true)?);
-        let manifest = serde_json::to_value(Manifest {
-            spec,
-            id,
-            version: Uuid::new_v4(),
-            key: STANDARD.encode(rand::random::<[u8; 32]>()),
-            nonce: STANDARD.encode(rand::random::<[u8; 8]>()),
-            mime,
-            storage: storage_batch.is_some(),
-            storage_batch,
-        })?;
-        self.db.execute(
-            "INSERT INTO native_uploads (id,device,thread,manifest,present,expires) VALUES (?1,?2,?3,?4,'[]',?5)",
-            params![id.to_string(), device, scope.key(), manifest.to_string(), now() + 86_400_000],
-        )?;
-        Ok(manifest)
+        private_file(&path, true)
     }
 
     pub fn file_request(
@@ -354,7 +374,7 @@ impl Store {
     }
 
     pub(crate) fn finish_compatible_upload(
-        &self,
+        &mut self,
         device: &str,
         scope: &Scope,
         id: Uuid,
@@ -362,8 +382,7 @@ impl Store {
         if self.native_upload_exists(id)? {
             return self.file_request(device, scope, id, "finish", None, &[]);
         }
-        let upload = self.legacy_attachment(device, scope, id)?;
-        Ok(json!({"id":id,"name":upload.name,"path":upload.path}))
+        self.finish_legacy_upload(device, scope, id)
     }
 
     fn native_upload_exists(&self, id: Uuid) -> Result<bool> {

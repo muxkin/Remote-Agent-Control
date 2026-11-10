@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { zstdCompressSync } from 'node:zlib';
 import { once } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,10 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import type { Config } from '../../src/server/config.js';
+import { FileService } from '../../src/server/file-service.js';
 import { Store } from '../../src/server/store.js';
+import { Uploads } from '../../src/server/uploads.js';
 import { hostIdentity } from '../../src/server/device-identity.js';
 import { buildRelay } from '../../src/server/relay.js';
 import { platformRuntime } from '../../src/server/platform.js';
@@ -92,6 +95,53 @@ if (process.platform === 'win32') {
   for (const dir of [join(legacyState, 'native-uploads'), migratedNativeDir]) runtime.privateDirectory(dir);
   for (const path of [migratedReceipt, migratedDraftPath, migratedNativePath]) runtime.privateFile(path);
 }
+const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+const legacyBlocks = [Buffer.alloc(BLOCK_SIZE, 43), Buffer.alloc(BLOCK_SIZE, 92), Buffer.from('最后一块')];
+const legacyBlockBytes = Buffer.concat(legacyBlocks);
+const legacyRawBytes = Buffer.from('old upload in three pieces');
+const legacyConfig = { stateDir: legacyState } as Config;
+const legacyUploads = new Uploads(legacyConfig);
+const legacyFiles = new FileService(legacyConfig, legacyUploads);
+const legacyManifest = await legacyFiles.begin({
+  name: 'old-blocks.bin', size: legacyBlockBytes.length, sha256: digest(legacyBlockBytes),
+  hashes: legacyBlocks.map(digest),
+}, old.deviceId, THREAD);
+for (const index of [0, 1]) {
+  await legacyFiles.handle('write', {
+    threadId: THREAD, fileId: legacyManifest.id, index,
+  }, old.deviceId, legacyBlocks[index]);
+}
+legacyFiles.close();
+const legacyBlockUpload = await legacyUploads.get(legacyManifest.id, old.deviceId, THREAD);
+const legacyBlockPart = legacyBlockUpload.file + '.part';
+const corruptBlock = await open(legacyBlockPart, 'r+');
+try {
+  await corruptBlock.write(Buffer.from([0]), 0, 1, BLOCK_SIZE);
+} finally {
+  await corruptBlock.close();
+}
+const legacyRawUpload = await legacyUploads.begin({
+  name: 'old-offset.txt', size: legacyRawBytes.length, sha256: digest(legacyRawBytes),
+}, old.deviceId, THREAD);
+await legacyUploads.chunk(legacyRawUpload.id, old.deviceId, THREAD, 0, legacyRawBytes.subarray(0, 4));
+const legacyRawPart = (await legacyUploads.get(legacyRawUpload.id, old.deviceId, THREAD)).file + '.part';
+const transfersDir = join(legacyState, 'transfers-v2');
+const legacyUploadSources = [
+  legacyBlockPart, legacyRawPart, join(transfersDir, legacyManifest.id + '.json'),
+  ...[legacyManifest.id, legacyRawUpload.id].map((id) => join(legacyState, 'uploads', id + '.json')),
+];
+if (process.platform === 'win32') {
+  const runtime = platformRuntime();
+  for (const dir of [transfersDir, join(legacyBlockPart, '..'), join(legacyRawPart, '..')])
+    runtime.privateDirectory(dir);
+  for (const path of legacyUploadSources) runtime.privateFile(path);
+}
+const legacyUploadSnapshots = await Promise.all(legacyUploadSources.map((path) => readFile(path)));
+const legacyTransfer = { backendId: 'codex-local', threadId: THREAD, fileId: legacyManifest.id };
+const legacyMissing = { ...legacyTransfer, action: 'missing' };
+const rawChunk = (offset: number) =>
+  apiCall(`/threads/${THREAD}/uploads/${legacyRawUpload.id}/chunk?offset=${offset}`, 'POST');
+const rawFinish = apiCall(`/threads/${THREAD}/uploads/${legacyRawUpload.id}/complete`, 'POST');
 const legacyNativeDb = new DatabaseSync(join(legacyState, 'state.sqlite'));
 try {
   legacyNativeDb.exec(`CREATE TABLE native_uploads (
@@ -1576,6 +1626,14 @@ try {
       });
       assert.deepEqual(Buffer.from(bytes.bytes!), legacyBytes);
     }
+    const importedTransfer = (await existing.request('file', legacyMissing)).value;
+    assert.deepEqual(importedTransfer.missing, [1, 2]);
+    for (const field of ['id', 'version', 'key', 'nonce'] as const)
+      assert.equal(importedTransfer.manifest[field], legacyManifest[field]);
+    await existing.request('file', { ...legacyTransfer, action: 'write', index: 1 }, legacyBlocks[1]);
+    await assert.rejects(existing.rpc(rawChunk(0), legacyRawBytes.subarray(4, 9)));
+    assert.deepEqual(await existing.rpc(rawChunk(4), legacyRawBytes.subarray(4, 9)), { offset: 9 });
+    await assert.rejects(existing.rpc(rawFinish));
     const corruptedDraft = Buffer.from(legacyBytes);
     corruptedDraft[0] ^= 1;
     await writeFile(migratedDraftPath, corruptedDraft);
@@ -1661,6 +1719,8 @@ try {
     const session = await pair();
     const ready = await session.ready;
     await assert.rejects(session.rpc(restoreDraft));
+    await assert.rejects(session.request('file', legacyMissing));
+    await assert.rejects(session.rpc(rawChunk(9), legacyRawBytes.subarray(9)));
     await assert.rejects(session.rpc(apiCall(`/threads/${THREAD}/media`, 'POST', { path: migratedNativePath })));
     assert.equal(ready.status.writesEnabled, !!ipc);
     assert.equal(ready.status.capabilities.openThread, !!ipc);
@@ -1788,6 +1848,19 @@ try {
 
     await gateway.stop();
     gateway = await launch(true);
+    const resumedLegacy = await reconnect(existingPhone, old.routeTicket);
+    assert.deepEqual((await resumedLegacy.request('file', legacyMissing)).value.missing, [2]);
+    await resumedLegacy.request('file', { ...legacyTransfer, action: 'write', index: 2 }, legacyBlocks[2]);
+    const blockResult = await resumedLegacy.request('file', { ...legacyTransfer, action: 'finish' });
+    assert.deepEqual(await readFile(blockResult.value.path), legacyBlockBytes);
+    assert.deepEqual(await resumedLegacy.rpc(rawChunk(9), legacyRawBytes.subarray(9)), {
+      offset: legacyRawBytes.length,
+    });
+    const rawResult = await resumedLegacy.rpc<{ path: string }>(rawFinish);
+    assert.deepEqual(await readFile(rawResult.path), legacyRawBytes);
+    assert.deepEqual(await resumedLegacy.rpc(rawFinish), rawResult);
+    assert.deepEqual(await Promise.all(legacyUploadSources.map((path) => readFile(path))), legacyUploadSnapshots);
+    resumedLegacy.close();
     const resumed = await reconnect(phone, ready.ticket);
     assert.equal((await resumed.ready).device.id, ready.device.id);
     assert.equal((await resumed.rpc<{ path: string }>(completeOldDraft)).path, legacyPath);
@@ -1802,7 +1875,7 @@ try {
     await gateway.stop();
   }
   console.log(
-    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, legacy drafts, replay rejection, appearance settings and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with two isolated instances of the independently installed Codex plugin' : ''}.`,
+    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, legacy draft recovery and upload resumption, replay rejection, appearance settings and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with two isolated instances of the independently installed Codex plugin' : ''}.`,
   );
 } finally {
   await relay.close();
