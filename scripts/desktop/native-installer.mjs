@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { macSignApp, macSignDmg, windowsSign } from './native-signing.mjs';
@@ -40,6 +40,7 @@ export async function buildInstaller(platform, source, version, output, signed =
 }
 
 async function buildDeb(stage, source, version, output) {
+  await chmod(stage, 0o755);
   const locations = {
     DEBIAN: [],
     'usr/bin': [program],
