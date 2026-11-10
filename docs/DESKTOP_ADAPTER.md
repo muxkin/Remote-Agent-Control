@@ -2,7 +2,7 @@
 
 ## Rust + Ely 原生预览
 
-原生适配器位于 `desktop/native`。v0.3.12 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。v0.3.13 开发构建沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包只携带 Rust 适配器、系统集成所需资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 安装包曾附带 Node 和 Python。该版本是此前的混合构建。纯 Rust 构建在其他 Agent 能力迁移完成前仅用于开发验收。
 
@@ -38,7 +38,16 @@ DSH 技能选择使用会话的原生目录，发送前会重新验证。会话�
 
 沿用私有 `im-agents.json`、账号凭据和 `im-agent-progress/<id>.json`，也可通过 `POCKET_NATIVE_IM_AGENTS` 指定配置文件。保留原实例 `id` 和账号 `state`，将 `messageHandler` 或 `callHandler` 改为对应的原生可执行程序绝对路径。可选的 `environmentFile` 只给本机处理程序提供所需配置。旧 JavaScript 处理器需移植到原生接口。
 
-消息处理程序每次从标准输入接收一个 `{"sdk":1,"event":{...}}` JSON 文档，在标准输出返回 `{"replies":[{"text":"回复","clientId":"可选的稳定请求标识"}]}`。可返回空回复列表。适配器负责验签、解密、发送加密文字回复和保存游标。默认以事件序号及回复序号生成请求标识。历史读取、流式更新、附件收发和审批回复等旧处理器 API 还待接入原生接口。
+消息处理程序默认从标准输入接收一个 `{"sdk":1,"event":{...}}` JSON 文档，在标准输出返回 `{"replies":[{"text":"回复","clientId":"可选的稳定请求标识"}]}`。可返回空回复列表。适配器负责验签、解密、发送加密文字回复和保存游标。默认以事件序号及回复序号生成请求标识。
+
+实例配置可设置 `"messageProtocol":"rpc"`。此模式的输入输出为逐行 JSON。首行是 `{"sdk":1,"protocol":"rpc","event":{...}}`。处理程序发出一行 `{"id":"1","method":"message.send","params":{"clientId":"稳定的消息标识","text":"","options":{"state":"streaming"}}}`，适配器返回同一个 `id` 和 `result` 或 `error`。默认使用事件所在会话，也可在请求顶层传入可访问的 `conversationId`。发送选项还支持 `replyTo`、`mentions` 和已上传的 `attachmentIds`。
+
+- `message.update` 接收 `messageId`、下一个 `revision` 和完整快照 `text`。可传 `state`（`streaming`、`complete` 或 `failed`）和工具活动 `activities`。省略活动时保留上一次快照的活动。
+- `message.read` 和 `message.cancel` 接收 `messageId`，分别读取快照和取消流。用 `message.read` 检查当前流是否已被用户取消。更新发生版本冲突时返回 `error.status = 409`。
+- `message.history` 接收可选的 `before`，返回解密的历史消息与分页游标。
+- 重试 `message.send` 时复用相同的 `clientId` 和初始参数，适配器会返回现有消息的最新状态与修订号。收到 `done` 请求（`{"id":"最后一个请求","method":"done"}`）并确认处理程序成功退出后，适配器保存事件游标。
+
+加密附件上传与下载，以及发送交互卡片的旧处理器接口仍在迁移。
 
 通话处理程序负责 WebRTC 对端、编解码和模型接入。适配器负责接听状态、心跳、加密 SDP/ICE 信令和挂断。更新交接会等待正在处理的消息和通话。 [原生通话处理程序接口](AGENT_CALLS.md#原生通话处理程序)
 

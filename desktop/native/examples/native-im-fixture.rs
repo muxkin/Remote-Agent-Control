@@ -31,9 +31,14 @@ async fn main() -> Result<()> {
     if input.fill_buf()?.starts_with(b"Content-Length: ") {
         return calls(input, output).await;
     }
-    let request: Value = serde_json::from_reader(input)?;
+    let mut event = String::new();
+    input.read_line(&mut event)?;
+    let request: Value = serde_json::from_str(&event)?;
     assert_eq!(request["sdk"], 1);
     let message = &request["event"]["message"];
+    if request["protocol"] == "rpc" {
+        return messages(input, output, message).await;
+    }
     let text = message["text"].as_str().expect("fixture message");
     let response = match text {
         "迁移前的旧消息" => panic!("saved cursor replayed a message"),
@@ -41,6 +46,128 @@ async fn main() -> Result<()> {
         _ => json!({}),
     };
     serde_json::to_writer(&mut output, &response)?;
+    Ok(())
+}
+
+async fn messages(mut input: impl BufRead, mut output: impl Write, message: &Value) -> Result<()> {
+    let mut sequence = 0;
+    let mut call = |method: &str, params: Value| -> Result<Value> {
+        sequence += 1;
+        let id = sequence.to_string();
+        let request = if method == "done" {
+            json!({"id":id,"method":method})
+        } else {
+            json!({"id":id,"method":method,"params":params})
+        };
+        serde_json::to_writer(&mut output, &request)?;
+        writeln!(output)?;
+        output.flush()?;
+        let mut line = String::new();
+        ensure!(
+            input.read_line(&mut line)? > 0,
+            "adapter closed the RPC connection"
+        );
+        let reply: Value = serde_json::from_str(&line)?;
+        assert_eq!(reply["id"], id);
+        Ok(reply)
+    };
+    let scenario = message["text"].as_str().unwrap_or_default();
+    if matches!(
+        scenario,
+        "启动 Rust 流式回复" | "等待用户取消" | "Agent 自行取消" | "模拟流式失败"
+    ) {
+        let cid = format!("fixture-stream-{}", message["id"].as_str().unwrap());
+        let initial = json!({
+            "clientId":cid,"text":"","options":{
+                "state":"streaming","replyTo":message["id"],"mentions":[message["senderId"]],
+            }
+        });
+        let reply = call("message.send", initial.clone())?;
+        assert!(reply["error"].is_null(), "{reply}");
+        let stream = &reply["result"];
+        let id = &stream["id"];
+        if stream["state"] == "streaming" {
+            if scenario == "Agent 自行取消" {
+                assert_eq!(
+                    call("message.cancel", json!({"messageId":id}))?["result"]["state"],
+                    "cancelled"
+                );
+            } else if scenario == "模拟流式失败" {
+                assert_eq!(
+                    call(
+                        "message.update",
+                        json!({"messageId":id,"revision":1,"text":"Rust 失败","state":"failed"})
+                    )?["result"]["state"],
+                    "failed"
+                );
+            } else {
+                let partial = json!({
+                    "messageId":id,"revision":1,"text":"Rust 部分回复 🔒",
+                    "activities":[{"kind":"search","status":"in_progress"}]
+                });
+                if stream["revision"] == 0 {
+                    assert_eq!(
+                        call("message.update", partial.clone())?["result"]["revision"],
+                        1
+                    );
+                }
+                assert_eq!(
+                    call("message.update", partial.clone())?["result"]["revision"],
+                    1
+                );
+                let mut conflict = partial;
+                conflict["text"] = json!("不同的快照");
+                assert_eq!(call("message.update", conflict)?["error"]["status"], 409);
+                let cancel = scenario == "等待用户取消";
+                let mut ready = false;
+                for _ in 0..160 {
+                    if cancel {
+                        let snapshot = call("message.read", json!({"messageId":id}))?;
+                        if snapshot["result"]["state"] == "cancelled" {
+                            assert_eq!(snapshot["result"]["text"], "Rust 部分回复 🔒");
+                            ready = true;
+                            break;
+                        }
+                    } else {
+                        let history = call("message.history", json!({}))?;
+                        if history["result"]["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|item| {
+                                item["text"] == "继续流式回复"
+                                    && item["senderId"] == message["senderId"]
+                            })
+                        {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                ensure!(ready, "fixture stream did not receive user action");
+                let result = call(
+                    "message.update",
+                    json!({
+                        "messageId":id,"revision":if cancel { 3 } else { 2 },"text":"Rust 完整回复 🔒","state":"complete"
+                    }),
+                )?;
+                if cancel {
+                    assert_eq!(result["error"]["status"], 409);
+                } else {
+                    assert_eq!(result["result"]["state"], "complete");
+                    assert_eq!(result["result"]["activities"][0]["status"], "in_progress");
+                }
+            }
+        }
+        let replay = call("message.send", initial.clone())?;
+        assert_eq!(&replay["result"]["id"], id);
+        assert_ne!(replay["result"]["state"], "streaming");
+        let mut different = initial;
+        different["text"] = json!("不同的请求");
+        assert_eq!(call("message.send", different)?["error"]["status"], 409);
+    }
+    assert_eq!(call("done", Value::Null)?["result"]["ok"], true);
     Ok(())
 }
 

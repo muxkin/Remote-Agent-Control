@@ -1,7 +1,7 @@
 use crate::{
     gateway::{ManagedAgent, Snapshot},
     im_calls,
-    im_client::{Client, required},
+    im_client::{Client, MessageConflict, MessageUpdate, NewMessage, required},
     state::{private_directory, private_file},
     update::UpdateGate,
 };
@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
     runtime::Handle,
     sync::watch,
@@ -49,9 +49,19 @@ struct Profile {
     id: String,
     state: PathBuf,
     message_handler: Option<PathBuf>,
+    #[serde(default)]
+    message_protocol: MessageProtocol,
     call_handler: Option<PathBuf>,
     environment_file: Option<PathBuf>,
     cursor: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MessageProtocol {
+    #[default]
+    Replies,
+    Rpc,
 }
 
 impl Profile {
@@ -277,22 +287,22 @@ async fn listen(
             };
             let cid = required(message, "conversationId")?;
             let mut input = event.clone();
-            input["message"] = client.decode_message(message).await.unwrap_or_else(|_| {
-                let mut safe = message.clone();
-                safe["text"] = json!("此消息无法解密或验证；请检查账号及联系人安全码");
-                safe["attachments"] = json!([]);
-                if let Some(fields) = safe.as_object_mut() {
-                    for key in ["interaction", "activities", "initialRequest", "sticker"] {
-                        fields.remove(key);
+            input["message"] = client.decode_or_redact(message).await;
+            match profile.message_protocol {
+                MessageProtocol::Replies => {
+                    let response = handler.run(&input).await?;
+                    for (index, reply) in response.replies.into_iter().enumerate() {
+                        let input = NewMessage {
+                            client_id: reply
+                                .client_id
+                                .unwrap_or_else(|| format!("native-agent-{sequence}-{index}")),
+                            text: reply.text,
+                            options: Default::default(),
+                        };
+                        client.send(cid, &input).await?;
                     }
                 }
-                safe
-            });
-            let response = handler.run(&input).await?;
-            for (index, reply) in response.replies.iter().enumerate() {
-                let default = format!("native-agent-{sequence}-{index}");
-                let id = reply.client_id.as_deref().unwrap_or(&default);
-                client.send_text(cid, id, &reply.text).await?;
+                MessageProtocol::Rpc => handler.run_rpc(&client, cid, &input).await?,
             }
             persist(progress, &client, sequence)?;
             cursor = sequence;
@@ -348,6 +358,72 @@ struct Response {
 struct Reply {
     text: String,
     client_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageFrame {
+    id: String,
+    conversation_id: Option<Uuid>,
+    #[serde(flatten)]
+    request: MessageRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "method", content = "params")]
+enum MessageRequest {
+    #[serde(rename = "message.send")]
+    Send(NewMessage),
+    #[serde(rename = "message.update")]
+    Update(MessageUpdate),
+    #[serde(rename = "message.read")]
+    Read(MessageRef),
+    #[serde(rename = "message.history")]
+    History { before: Option<u64> },
+    #[serde(rename = "message.cancel")]
+    Cancel(MessageRef),
+    #[serde(rename = "done")]
+    Done,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MessageRef {
+    message_id: String,
+}
+
+impl MessageRequest {
+    async fn execute(self, client: &Client, cid: &str) -> Result<Value> {
+        match self {
+            Self::Send(input) => client.send(cid, &input).await,
+            Self::Update(input) => client.update(cid, &input).await,
+            Self::Read(input) => client.read_message(cid, &input.message_id).await,
+            Self::History { before } => {
+                ensure!(
+                    before.is_none_or(|value| value <= MAX_CURSOR),
+                    "历史游标无效"
+                );
+                client.history(cid, before).await
+            }
+            Self::Cancel(input) => client.cancel(cid, &input.message_id).await,
+            Self::Done => Ok(json!({"ok":true})),
+        }
+    }
+}
+
+fn message_error(error: &anyhow::Error) -> Value {
+    let status = if error.is::<MessageConflict>() {
+        409
+    } else if let Some(http) = error.downcast_ref::<reqwest::Error>() {
+        http.status().map_or(503, |status| status.as_u16())
+    } else {
+        400
+    };
+    json!({"status":status,"message":if status == 409 {
+        "消息请求标识已用于其他内容，或回复版本已变化"
+    } else {
+        "独立 Agent 消息请求未完成"
+    }})
 }
 
 impl Handler {
@@ -447,4 +523,67 @@ impl Handler {
             }
         }
     }
+
+    async fn run_rpc(&self, client: &Client, conversation: &str, event: &Value) -> Result<()> {
+        let mut child = self.command()?.spawn()?;
+        let mut input = child.stdin.take().context("消息处理程序缺少输入管道")?;
+        let mut output = BufReader::new(child.stdout.take().context("消息处理程序缺少输出管道")?);
+        write_frame(&mut input, &json!({"sdk":1,"protocol":"rpc","event":event})).await?;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let mut limited = (&mut output).take(MAX_REPLY + 1);
+            let size = timeout(
+                Duration::from_secs(120),
+                limited.read_until(b'\n', &mut line),
+            )
+            .await??;
+            ensure!(
+                size > 0 && size as u64 <= MAX_REPLY && line.last() == Some(&b'\n'),
+                "消息处理程序帧无效或在完成前退出"
+            );
+            let frame: Value = serde_json::from_slice(&line)?;
+            let id = required(&frame, "id")?;
+            ensure!(id.encode_utf16().count() <= 128, "消息处理程序请求标识无效");
+            let parsed = serde_json::from_value::<MessageFrame>(frame.clone());
+            let mut done = false;
+            let reply = match parsed {
+                Ok(frame) => {
+                    let cid = frame.conversation_id.map(|value| value.to_string());
+                    done = matches!(frame.request, MessageRequest::Done);
+                    match frame
+                        .request
+                        .execute(client, cid.as_deref().unwrap_or(conversation))
+                        .await
+                    {
+                        Ok(result) => json!({"id":frame.id,"result":result}),
+                        Err(error) => json!({"id":frame.id,"error":message_error(&error)}),
+                    }
+                }
+                Err(_) => json!({"id":id,"error":{"status":400,"message":"消息处理程序请求无效"}}),
+            };
+            write_frame(&mut input, &reply).await?;
+            if done {
+                break;
+            }
+        }
+        drop(input);
+        ensure!(
+            timeout(Duration::from_secs(5), child.wait())
+                .await??
+                .success(),
+            "消息处理程序退出失败"
+        );
+        Ok(())
+    }
+}
+
+async fn write_frame(
+    output: &mut (impl tokio::io::AsyncWrite + Unpin),
+    value: &Value,
+) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    timeout(Duration::from_secs(15), output.write_all(&bytes)).await??;
+    Ok(())
 }

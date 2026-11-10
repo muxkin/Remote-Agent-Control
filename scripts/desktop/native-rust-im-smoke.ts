@@ -41,13 +41,19 @@ assert(address && typeof address !== 'string');
 await new Promise<void>((done) => portProbe.close(() => done()));
 const origin = 'http://127.0.0.1:' + address.port;
 const enrollmentSecret = randomBytes(32).toString('hex');
-const relay = await buildRelay({
-  origin,
-  webRoot: join(directory, 'web'),
-  enrollmentSecret,
-  assetOrigin: null,
-  uploadOrigins: [],
-});
+const cloudflare = process.env.POCKET_NATIVE_TEST_RELAY === 'cloudflare';
+const relay = cloudflare
+  ? await cloudflareRelay(address.port)
+  : await buildRelay({
+      origin,
+      webRoot: join(directory, 'web'),
+      enrollmentSecret,
+      assetOrigin: null,
+      uploadOrigins: [],
+    }).then(({ app }) => ({
+      listen: () => app.listen({ host: '127.0.0.1', port: address.port }),
+      close: () => app.close(),
+    }));
 const stateDirectory = join(directory, 'adapter');
 const env = {
   ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(POCKET_|CODEX_)/i.test(key))),
@@ -79,14 +85,42 @@ const until = async (check: () => Promise<boolean>) => {
   assert.fail('Rust independent Agent did not reach the expected state');
 };
 
+async function cloudflareRelay(port: number) {
+  const { Miniflare, convertV4MiniflareOptions } = await import('miniflare');
+  const worker = new Miniflare({
+    ...convertV4MiniflareOptions({
+      name: 'native-agent-im-smoke',
+      modules: true,
+      scriptPath: '.implementation/cloudflare/index.js',
+      compatibilityDate: '2026-11-04',
+      compatibilityFlags: ['nodejs_compat'],
+      host: '127.0.0.1',
+      port,
+      bindings: {
+        POCKET_PUBLIC_ORIGIN: origin,
+        POCKET_RELAY_ENROLLMENT: enrollmentSecret,
+        POCKET_IM_HUMAN_CONTACTS: 'true',
+      },
+      durableObjects: {
+        RELAY: { className: 'RelayHub', useSQLite: true },
+        MESSAGING: { className: 'MessagingHub', useSQLite: true },
+      },
+      r2Buckets: ['IM_MEDIA'],
+      images: { binding: 'IMAGES' },
+      serviceBindings: { ASSETS: () => new Response(null, { status: 404 }) },
+    }),
+  });
+  return { listen: () => worker.ready, close: () => worker.dispose() };
+}
+
 try {
-  await relay.app.listen({ host: '127.0.0.1', port: address.port });
+  await relay.listen();
   let token: string | undefined;
   const account = new AccountClient(async (path, method, body, signal) => {
     const response = await fetch(origin + '/api/im' + path, {
       method,
       signal,
-      headers: { 'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }) },
+      headers: { 'Content-Type': 'application/json', Origin: origin, ...(token && { Authorization: 'Bearer ' + token }) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const cookie = response.headers.getSetCookie().find((item) => item.startsWith('pocket_im_session='));
@@ -120,9 +154,9 @@ try {
   const progress = join(progressDir, 'fixture.json');
   const original = { origin, user: agent.user.id, cursor };
   await privateJson(progress, original);
-  await privateJson(join(stateDirectory, 'im-agents.json'), [
-    { id: 'fixture', state: credentials, messageHandler: handler, callHandler: handler, cursor: 0 },
-  ]);
+  const manifest = join(stateDirectory, 'im-agents.json');
+  const profile = { id: 'fixture', state: credentials, messageHandler: handler, callHandler: handler, cursor: 0 };
+  await privateJson(manifest, [profile]);
   const incoming = await human.send(conversation.id, '从旧客户端发来的加密消息 👋', 'rust-message');
   start();
   const countReplies = async () =>
@@ -136,6 +170,68 @@ try {
   start();
   await until(async () => (await readCursor()) >= incoming.message.sequence);
   assert.equal(await countReplies(), 1, 'Replay duplicated the encrypted reply');
+  await stop();
+
+  const replayCursor = await readCursor();
+  await privateJson(manifest, [{ ...profile, messageProtocol: 'rpc' }]);
+  start();
+  const streamFor = async (promptId: string) =>
+    (await human.history(conversation.id)).messages.find(
+      (message) => message.senderId === agent.user.id && message.replyTo === promptId,
+    );
+  const prompt = (text: string, clientId: string) => human.send(conversation.id, text, clientId);
+  const completing = await prompt('启动 Rust 流式回复', 'rust-stream-complete');
+  await until(async () => (await streamFor(completing.message.id))?.revision === 1);
+  const partial = (await streamFor(completing.message.id))!;
+  assert.equal(partial.text, 'Rust 部分回复 🔒');
+  assert.equal(partial.state, 'streaming');
+  assert.deepEqual(partial.activities, [{ kind: 'search', status: 'in_progress' }]);
+  assert.deepEqual(partial.mentions, [account.user!.id]);
+  const raw = await human.raw<{ message: { text: string } }>(`/conversations/${conversation.id}/messages/${partial.id}`);
+  assert(raw.message.text.startsWith('pocket-e2ee:1:'));
+  assert(!raw.message.text.includes('Rust 部分回复'));
+  await prompt('继续流式回复', 'rust-stream-continue');
+  await until(async () => (await streamFor(completing.message.id))?.state === 'complete');
+  const complete = (await streamFor(completing.message.id))!;
+  assert.equal(complete.id, partial.id);
+  assert.equal(complete.revision, 2);
+  assert.equal(complete.text, 'Rust 完整回复 🔒');
+  assert.deepEqual(complete.activities, partial.activities);
+
+  await until(async () => (await readCursor()) >= completing.message.sequence);
+  await stop();
+  const cancelling = await prompt('等待用户取消', 'rust-stream-user-cancel');
+  const oldStream = await legacy.send(conversation.id, '', 'fixture-stream-' + cancelling.message.id, {
+    state: 'streaming',
+    replyTo: cancelling.message.id,
+    mentions: [account.user!.id],
+  });
+  start();
+  await until(async () => (await streamFor(cancelling.message.id))?.revision === 1);
+  const active = (await streamFor(cancelling.message.id))!;
+  assert.equal(active.id, oldStream.message.id, 'The Rust Agent did not resume the Node stream');
+  await human.cancel(conversation.id, active.id);
+  await until(async () => (await readCursor()) >= cancelling.message.sequence);
+  const cancelled = (await streamFor(cancelling.message.id))!;
+  assert.equal(cancelled.state, 'cancelled');
+  assert.equal(cancelled.revision, 2);
+  assert.equal(cancelled.text, active.text);
+  const selfCancel = await prompt('Agent 自行取消', 'rust-stream-self-cancel');
+  await until(async () => (await streamFor(selfCancel.message.id))?.state === 'cancelled');
+  const failing = await prompt('模拟流式失败', 'rust-stream-fail');
+  await until(async () => (await streamFor(failing.message.id))?.state === 'failed');
+  await until(async () => (await readCursor()) >= failing.message.sequence);
+
+  await stop();
+  await privateJson(progress, { ...original, cursor: replayCursor });
+  start();
+  await until(async () => (await readCursor()) >= failing.message.sequence);
+  const replayed = (await human.history(conversation.id)).messages.filter(
+    (message) => message.senderId === agent.user.id && message.clientId.startsWith('fixture-stream-'),
+  );
+  assert.equal(replayed.length, 4, 'Replay created duplicate stream messages');
+  assert.equal((await streamFor(completing.message.id))?.id, complete.id);
+
   const calls = new AgentCallsClient(human);
   await until(async () => (await calls.capabilities(conversation.id)).video);
   for (const mode of ['audio', 'video'] as const) {
@@ -214,11 +310,11 @@ try {
     await until(async () => !(await calls.capabilities(conversation.id)).audio);
   }
   console.log(
-    'Rust independent Agent: existing identity and cursor, encrypted text and signaling, replay, and bidirectional audio/video RTP passed.',
+    `Rust independent Agent (${cloudflare ? 'Cloudflare' : 'Node'}): existing identity and cursor, encrypted text and streaming, revision replay, cancellation and failure, encrypted signaling, and bidirectional audio/video RTP passed.`,
   );
 } finally {
   await stop();
   await peer?.close();
-  await relay.app.close();
+  await relay.close();
   await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }

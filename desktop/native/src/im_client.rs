@@ -5,10 +5,90 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client as Http, Method, header, redirect};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Read, path::Path, time::Duration};
 use tokio::sync::Mutex;
 use url::Url;
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum MessageState {
+    #[default]
+    Streaming,
+    Complete,
+    Failed,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SendOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<MessageState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mentions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_ids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NewMessage {
+    pub(crate) client_id: String,
+    pub(crate) text: String,
+    #[serde(default)]
+    pub(crate) options: SendOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MessageUpdate {
+    pub(crate) message_id: String,
+    revision: u32,
+    text: String,
+    #[serde(default)]
+    state: MessageState,
+    activities: Option<Vec<Activity>>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Activity {
+    kind: ActivityKind,
+    status: ActivityStatus,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ActivityKind {
+    Read,
+    Search,
+    Fetch,
+    Execute,
+    Edit,
+    Other,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ActivityStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug)]
+pub(crate) struct MessageConflict;
+
+impl std::fmt::Display for MessageConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("消息请求标识已用于其他内容，或回复版本已变化")
+    }
+}
+
+impl std::error::Error for MessageConflict {}
 
 pub(crate) struct Client {
     pub(crate) id: String,
@@ -89,12 +169,13 @@ impl Client {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(serde_json::to_vec(body)?);
         }
-        let mut response = request.send().await?;
-        ensure!(
-            response.status().is_success(),
-            "独立 Agent 服务请求返回 {}",
-            response.status()
-        );
+        let mut response = request
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        ensure!(response.status().is_success(), "独立 Agent 服务重定向");
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             ensure!(
@@ -302,51 +383,177 @@ impl Client {
         Ok(message)
     }
 
-    pub(crate) async fn send_text(&self, id: &str, client_id: &str, text: &str) -> Result<()> {
+    async fn recipients(&self, endpoint: &str) -> Result<Vec<String>> {
+        let snapshot = self.get(endpoint).await?;
+        let recipients = snapshot["conversation"]["members"]
+            .as_array()
+            .context("缺少会话成员")?
+            .iter()
+            .map(|member| Ok(required(member, "id")?.to_owned()))
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(recipients.contains(&self.id), "独立 Agent 不在此会话");
+        Ok(recipients)
+    }
+
+    async fn seal_message(
+        &self,
+        id: &str,
+        endpoint: &str,
+        client_id: &str,
+        revision: u32,
+        content: &Value,
+    ) -> Result<String> {
+        let recipients = self.recipients(endpoint).await?;
+        let recipients: Vec<_> = recipients.iter().map(String::as_str).collect();
+        self.encrypt(
+            &recipients,
+            &format!("message:{id}:{client_id}:{revision}"),
+            content,
+        )
+        .await
+    }
+
+    pub(crate) async fn send(&self, id: &str, input: &NewMessage) -> Result<Value> {
+        let NewMessage {
+            client_id,
+            text,
+            options,
+        } = input;
+        let state = options.state.unwrap_or(MessageState::Complete);
         ensure!(
-            !text.trim().is_empty() && text.encode_utf16().count() <= 64_000,
-            "消息长度无效"
+            (1..=128).contains(&client_id.encode_utf16().count())
+                && text.encode_utf16().count() <= 64_000
+                && !matches!(state, MessageState::Failed)
+                && (matches!(state, MessageState::Streaming)
+                    || !text.trim().is_empty()
+                    || options
+                        .attachment_ids
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())),
+            "消息格式无效"
         );
         let endpoint = format!("/conversations/{}", segment(id));
-        let request = json!({"text":text,"options":{}});
+        let request = json!({"text":text,"options":options});
         let previous = self
             .get(&format!("{endpoint}/by-client/{}", segment(client_id)))
             .await?;
         if !previous["message"].is_null() {
-            let content = self.message_content(&previous["message"]).await?;
-            ensure!(
-                canonical(&content["request"]) == canonical(&request),
-                "消息请求标识已用于其他内容"
-            );
-            return Ok(());
+            let message = self.decode_message(&previous["message"]).await?;
+            if canonical(&message["initialRequest"]) != canonical(&request) {
+                return Err(MessageConflict.into());
+            }
+            return Ok(message);
         }
-        let snapshot = self.get(&endpoint).await?;
-        let members = snapshot["conversation"]["members"]
-            .as_array()
-            .context("缺少会话成员")?;
-        let recipients = members
-            .iter()
-            .map(|member| required(member, "id"))
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            recipients.contains(&self.id.as_str()),
-            "独立 Agent 不在此会话"
-        );
-        let content = json!({"text":text,"options":{},"state":"complete","request":request});
+        let content = json!({"text":text,"options":options,"state":state,"request":request});
         let encrypted = self
-            .encrypt(
-                &recipients,
-                &format!("message:{id}:{client_id}:0"),
-                &content,
+            .seal_message(id, &endpoint, client_id, 0, &content)
+            .await?;
+        let mut body = serde_json::to_value(options)?;
+        body["text"] = json!(encrypted);
+        body["clientId"] = json!(client_id);
+        let response = self
+            .request(Method::POST, &format!("{endpoint}/messages"), Some(&body))
+            .await?;
+        self.decode_message(&response["message"]).await
+    }
+
+    pub(crate) async fn update(&self, id: &str, input: &MessageUpdate) -> Result<Value> {
+        let MessageUpdate {
+            message_id,
+            revision,
+            text,
+            state,
+            activities,
+        } = input;
+        ensure!(
+            (1..=1_000_000).contains(revision)
+                && text.encode_utf16().count() <= 64_000
+                && activities.as_ref().is_none_or(|items| items.len() <= 8),
+            "流式回复格式无效"
+        );
+        let endpoint = format!("/conversations/{}", segment(id));
+        let path = format!("{endpoint}/messages/{}", segment(message_id));
+        let response = self.get(&path).await?;
+        let message = &response["message"];
+        ensure!(message["senderId"] == self.id, "只能更新自己发出的回复");
+        let previous = self.message_content(message).await?;
+        let mut content = previous.clone();
+        content["text"] = json!(text);
+        content["state"] = json!(state);
+        if let Some(activities) = activities {
+            content["activities"] = json!(activities);
+        }
+        let current = message["revision"].as_u64().context("消息版本无效")?;
+        if u64::from(*revision) == current {
+            if message["state"] == content["state"] && content == previous {
+                return self.decode_message(message).await;
+            }
+            return Err(MessageConflict.into());
+        }
+        if message["state"] != "streaming" || u64::from(*revision) != current + 1 {
+            return Err(MessageConflict.into());
+        }
+        let client_id = required(message, "clientId")?;
+        let encrypted = self
+            .seal_message(id, &endpoint, client_id, *revision, &content)
+            .await?;
+        let response = self
+            .request(
+                Method::PATCH,
+                &path,
+                Some(&json!({
+                    "text":encrypted,"revision":revision,"state":state
+                })),
             )
             .await?;
-        self.request(
-            Method::POST,
-            &format!("{endpoint}/messages"),
-            Some(&json!({"text":encrypted,"clientId":client_id})),
-        )
-        .await?;
-        Ok(())
+        self.decode_message(&response["message"]).await
+    }
+
+    pub(crate) async fn read_message(&self, id: &str, message_id: &str) -> Result<Value> {
+        let path = format!(
+            "/conversations/{}/messages/{}",
+            segment(id),
+            segment(message_id)
+        );
+        let response = self.get(&path).await?;
+        Ok(self.decode_or_redact(&response["message"]).await)
+    }
+
+    pub(crate) async fn history(&self, id: &str, before: Option<u64>) -> Result<Value> {
+        let mut path = format!("/conversations/{}/messages", segment(id));
+        if let Some(before) = before {
+            path.push_str(&format!("?before={before}"));
+        }
+        let mut result = self.get(&path).await?;
+        let messages = result["messages"].as_array_mut().context("消息记录无效")?;
+        for message in messages {
+            *message = self.decode_or_redact(message).await;
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn cancel(&self, id: &str, message_id: &str) -> Result<Value> {
+        let path = format!(
+            "/conversations/{}/messages/{}/cancel",
+            segment(id),
+            segment(message_id)
+        );
+        let response = self.request(Method::POST, &path, None).await?;
+        self.decode_message(&response["message"]).await
+    }
+
+    pub(crate) async fn decode_or_redact(&self, message: &Value) -> Value {
+        self.decode_message(message).await.unwrap_or_else(|_| {
+            let mut safe = message.clone();
+            safe["text"] = json!("此消息无法解密或验证；请检查账号及联系人安全码");
+            safe["attachments"] = json!([]);
+            if let Some(fields) = safe.as_object_mut() {
+                for key in ["interaction", "activities", "initialRequest", "sticker"] {
+                    fields.remove(key);
+                }
+            }
+            safe
+        })
     }
 }
 
