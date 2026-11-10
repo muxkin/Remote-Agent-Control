@@ -152,8 +152,11 @@ async function serveRelease() {
       }
       if (path === prefix + filename && ['good', 'corrupt', 'partial', 'abandoned'].includes(name)) {
         res.writeHead(200, { 'Content-Length': payload.length });
-        if (name === 'partial') res.write(payload.subarray(0, 64 * 1024));
-        else res.end(name === 'corrupt' ? corrupt : payload);
+        if (name === 'partial') {
+          res.socket?.setNoDelay(true);
+          res.flushHeaders();
+          res.write(payload.subarray(0, 256 * 1024));
+        } else res.end(name === 'corrupt' ? corrupt : payload);
         return;
       }
     }

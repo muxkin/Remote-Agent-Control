@@ -784,7 +784,9 @@ mod tests {
                             file.file_name()
                                 .to_string_lossy()
                                 .starts_with("AgentSpace-Native-")
-                                && file.metadata().is_ok_and(|metadata| metadata.len() > 0)
+                                && fs::File::open(file.path())
+                                    .and_then(|mut file| file.read_exact(&mut [0_u8]))
+                                    .is_ok()
                         })
                         .then_some(path)
                 }) {

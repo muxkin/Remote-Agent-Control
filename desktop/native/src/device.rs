@@ -424,6 +424,60 @@ impl DeviceSession {
         .await?
     }
 
+    async fn finish_compatible_upload(&self, scope: Scope, call: &Value) -> Result<Option<Value>> {
+        let id = thread_id(&call["params"]["uploadId"])?;
+        let db = self.db.clone();
+        let device = self.device.id.clone();
+        tokio::task::spawn_blocking(move || {
+            db.lock()
+                .expect("database mutex poisoned")
+                .finish_compatible_upload(&device, &scope, id)
+                .map(Some)
+        })
+        .await?
+    }
+
+    async fn describe_staged_upload(&self, scope: Scope, reference: &str) -> Result<Option<Value>> {
+        let path = std::path::PathBuf::from(reference);
+        if !path.is_absolute() {
+            return Ok(None);
+        }
+        let db = self.db.clone();
+        let device = self.device.id.clone();
+        let batch = self
+            .backends
+            .storage
+            .as_ref()
+            .map(crate::storage::Storage::batch);
+        tokio::task::spawn_blocking(move || {
+            let native = {
+                let store = db.lock().expect("database mutex poisoned");
+                store
+                    .is_native_upload_reference(&path)
+                    .then(|| store.describe_upload(&device, &scope, &path))
+                    .transpose()?
+            };
+            if let Some(mut manifest) = native {
+                manifest["storage"] = json!(batch.is_some());
+                if let Some(batch) = batch {
+                    manifest["storageBatchBlocks"] = json!(batch);
+                }
+                return Ok(Some(manifest));
+            }
+            let (backend, thread) = scope.backend_and_thread();
+            let Some(source) = history_media::legacy_upload(&path, backend, thread, &device)?
+            else {
+                return Ok(None);
+            };
+            let download = Download::prepare(source, device, scope, batch)?;
+            db.lock()
+                .expect("database mutex poisoned")
+                .register_download(download)
+                .map(Some)
+        })
+        .await?
+    }
+
     async fn file(&self, request: Value, bytes: Vec<u8>) -> Result<(Value, Vec<u8>)> {
         let id = thread_id(&request["fileId"])?;
         let scope = self.file_scope(&request)?;
@@ -715,8 +769,14 @@ impl DeviceSession {
                     self.begin_upload(Scope::plugin(plugin.id(), thread), call["body"].clone())
                         .await
                 }
+                "upload.finish" => {
+                    let thread = plugin_thread(&call["params"]["id"])?;
+                    self.finish_compatible_upload(Scope::plugin(plugin.id(), thread), &call)
+                        .await
+                }
                 "media.describe" | "log.export" => {
                     let thread = plugin_thread(&call["params"]["id"])?;
+                    let scope = Scope::plugin(plugin.id(), thread);
                     let media = if method == "log.export" {
                         Media::Download(plugin.export_log(thread).await?)
                     } else {
@@ -724,9 +784,14 @@ impl DeviceSession {
                             .as_str()
                             .filter(|path| (1..=4096).contains(&path.encode_utf16().count()))
                             .context("附件地址无效")?;
+                        if let Some(manifest) = self
+                            .describe_staged_upload(scope.clone(), reference)
+                            .await?
+                        {
+                            return Ok(Some(manifest));
+                        }
                         plugin.media(thread, reference).await?
                     };
-                    let scope = Scope::plugin(plugin.id(), thread);
                     let db = self.db.clone();
                     let device = self.device.id.clone();
                     let backend = plugin.id().to_owned();
@@ -794,6 +859,10 @@ impl DeviceSession {
                     .filter(|path| (1..=4096).contains(&path.encode_utf16().count()))
                     .context("附件地址无效")?
                     .to_owned();
+                let scope = Scope::codex(backend, thread);
+                if let Some(manifest) = self.describe_staged_upload(scope.clone(), &path).await? {
+                    return Ok(Some(manifest));
+                }
                 let db = self.db.clone();
                 let device = self.device.id.clone();
                 let batch = self
@@ -801,26 +870,6 @@ impl DeviceSession {
                     .storage
                     .as_ref()
                     .map(crate::storage::Storage::batch);
-                let scope = Scope::codex(backend, thread);
-                let native = tokio::task::spawn_blocking({
-                    let (db, device, scope, path) =
-                        (db.clone(), device.clone(), scope.clone(), path.clone());
-                    move || {
-                        db.lock().expect("database mutex poisoned").describe_upload(
-                            &device,
-                            &scope,
-                            std::path::Path::new(&path),
-                        )
-                    }
-                })
-                .await?;
-                if let Ok(mut manifest) = native {
-                    manifest["storage"] = json!(batch.is_some());
-                    if let Some(batch) = batch {
-                        manifest["storageBatchBlocks"] = json!(batch);
-                    }
-                    return Ok(Some(manifest));
-                }
                 let live = self
                     .codex_watch(backend, thread)
                     .and_then(|watch| watch.live.as_ref());
@@ -840,6 +889,11 @@ impl DeviceSession {
                 let thread = thread_id(&call["params"]["id"])?;
                 ensure!(self.codex_watch(backend, thread).is_some(), "请先打开会话");
                 self.begin_upload(Scope::codex(backend, thread), call["body"].clone())
+                    .await
+            }
+            "upload.finish" => {
+                let thread = thread_id(&call["params"]["id"])?;
+                self.finish_compatible_upload(Scope::codex(backend, thread), &call)
                     .await
             }
             "operation.read" => {

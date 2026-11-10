@@ -899,18 +899,37 @@ try {
     const imageRef = 'dsh-image:sha256:' + hash(png);
     await assert.rejects(describe(one.id, fileRef), { status: 404 });
     await assert.rejects(describe(two.id, imageRef), { status: 404 });
+    const legacyDraftId = randomUUID();
+    const legacyDraftName = 'old-draft.txt';
+    const legacyDraftBytes = Buffer.from('DSH draft saved by the Node adapter');
+    const legacyDraftRoot = join(legacy, 'backends', one.id, 'uploads');
+    const legacyDraftPath = join(legacyDraftRoot, legacyDraftId, legacyDraftName);
+    await mkdir(join(legacyDraftRoot, legacyDraftId), { mode: 0o700, recursive: true });
+    await writeFile(legacyDraftPath, legacyDraftBytes, { mode: 0o600 });
+    await writeFile(join(legacyDraftRoot, legacyDraftId + '.json'), JSON.stringify({
+      id: legacyDraftId, name: legacyDraftName, size: legacyDraftBytes.length, sha256: hash(legacyDraftBytes),
+      device: ready.device.id, thread: 'shared', file: legacyDraftPath, complete: true,
+    }), { mode: 0o600 });
+    const completeLegacy = '/threads/shared/uploads/' + legacyDraftId + '/complete';
+    assert.deepEqual(await rpc(one.id, completeLegacy, 'POST'), {
+      id: legacyDraftId, name: legacyDraftName, path: legacyDraftPath,
+    });
+    await assert.rejects(rpc(two.id, completeLegacy, 'POST'));
+    await assert.rejects(describe(two.id, legacyDraftPath));
+    assert.deepEqual(await download(legacyDraftPath, 'text/plain'), legacyDraftBytes);
     const imageUpload = await stage('image.png', png);
-    const mediaSend = { requestId: randomUUID(), text: '', uploadIds: [upload.id, imageUpload] };
+    const mediaSend = { requestId: randomUUID(), text: '', uploadIds: [upload.id, imageUpload, legacyDraftId] };
     await assert.rejects(rpc(two.id, '/threads/shared/messages', 'POST', mediaSend));
     await rpc(one.id, '/threads/shared/messages', 'POST', mediaSend);
     await operation(mediaSend.requestId, 'accepted');
     await rpc(one.id, '/threads/shared/messages', 'POST', mediaSend);
-    assert.equal(one.calls.filter((call) => call.method === 'session/uploadFileBinary').length, 1);
+    assert.equal(one.calls.filter((call) => call.method === 'session/uploadFileBinary').length, 2);
     assert.equal(one.calls.filter((call) => call.request.requestId === mediaSend.requestId).length, 1);
-    await wait(() => views.get(one.id)?.messages.get(mediaSend.requestId)?.attachments?.length === 2);
+    await wait(() => views.get(one.id)?.messages.get(mediaSend.requestId)?.attachments?.length === 3);
     assert.deepEqual(views.get(one.id)?.messages.get(mediaSend.requestId)?.attachments, [
       { path: fileRef, name: 'scope.txt' },
       { path: imageRef, name: 'image.png' },
+      { path: 'dsh-file:sha256:' + hash(legacyDraftBytes), name: legacyDraftName },
     ]);
     assert.deepEqual(await download(fileRef, 'text/plain'), attachment);
     assert.deepEqual(await download(imageRef, 'image/png'), png);

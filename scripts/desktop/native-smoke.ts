@@ -60,6 +60,11 @@ const legacyId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const legacyName = '旧附件.txt';
 const legacyPath = join(legacyState, 'uploads', legacyId, legacyName);
 const legacyBytes = Buffer.from('旧附件校验数据');
+const migratedDraftId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const migratedDraftPath = join(legacyState, 'uploads', migratedDraftId, legacyName);
+const migratedNativeId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const migratedNativeDir = join(legacyState, 'native-uploads', migratedNativeId);
+const migratedNativePath = join(migratedNativeDir, 'attachment.txt');
 const inlineBytes = Buffer.alloc(420_000, 37);
 const inlineSource = 'data:image/png;base64,' + inlineBytes.toString('base64');
 const inlineRef = 'pocket-inline:' + createHash('sha256').update(inlineSource).digest('hex') + '.png';
@@ -72,6 +77,37 @@ await writeFile(unrelatedFile, 'unmentioned file');
 await mkdir(join(legacyState, 'uploads', legacyId), { mode: 0o700, recursive: true });
 await writeFile(legacyPath, legacyBytes, { mode: 0o600 });
 if (process.platform === 'win32') platformRuntime().privateFile(legacyPath);
+await mkdir(join(migratedDraftPath, '..'), { mode: 0o700 });
+await writeFile(migratedDraftPath, legacyBytes, { mode: 0o600 });
+const migratedReceipt = join(legacyState, 'uploads', migratedDraftId + '.json');
+const migratedDigest = createHash('sha256').update(legacyBytes).digest('hex');
+await writeFile(migratedReceipt, JSON.stringify({
+  id: migratedDraftId, device: old.deviceId, thread: THREAD, name: legacyName, file: migratedDraftPath,
+  size: legacyBytes.length, sha256: migratedDigest, complete: true,
+}), { mode: 0o600 });
+await mkdir(migratedNativeDir, { mode: 0o700, recursive: true });
+await writeFile(migratedNativePath, legacyBytes, { mode: 0o600 });
+if (process.platform === 'win32') {
+  const runtime = platformRuntime();
+  for (const dir of [join(legacyState, 'native-uploads'), migratedNativeDir]) runtime.privateDirectory(dir);
+  for (const path of [migratedReceipt, migratedDraftPath, migratedNativePath]) runtime.privateFile(path);
+}
+const legacyNativeDb = new DatabaseSync(join(legacyState, 'state.sqlite'));
+try {
+  legacyNativeDb.exec(`CREATE TABLE native_uploads (
+    id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, manifest TEXT NOT NULL,
+    present TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0, expires INTEGER NOT NULL
+  )`);
+  legacyNativeDb.prepare('INSERT INTO native_uploads VALUES (?,?,?,?,?,1,0)').run(
+    migratedNativeId, old.deviceId, THREAD, JSON.stringify({
+      id: migratedNativeId, name: legacyName, size: legacyBytes.length, sha256: migratedDigest,
+      hashes: [migratedDigest], version: migratedNativeId, storage: false,
+      key: randomBytes(32).toString('base64'), nonce: randomBytes(8).toString('base64'),
+    }), '[0]',
+  );
+} finally {
+  legacyNativeDb.close();
+}
 const legacyRecord = JSON.parse(await readFile(rollout, 'utf8'));
 legacyRecord.payload.content[0].text +=
   '\n\n手机上传的附件（保留原始文件）：\n' + JSON.stringify({ name: legacyName, path: legacyPath });
@@ -617,7 +653,10 @@ async function desktopFixture(id = 'default', initialTitle = '测试会话', ren
             }
             expected.send++;
             assert.equal(value.targetClientId, 'fixture-owner');
-            assert.equal(value.params.turnStart.request.input[0].text, 'native smoke');
+            assert(value.params.turnStart.request.input[0].text.endsWith('native smoke'));
+            assert.deepEqual(value.params.turnStart.context.attachments, [
+              { label: legacyName, path: legacyPath, fsPath: legacyPath },
+            ]);
             assert.deepEqual(
               value.params.turnStart.request.input.slice(1).map((item: any) => [item.type, item.name]),
               [
@@ -845,6 +884,7 @@ async function testLive(
     const call = apiCall(`/threads/${THREAD}/messages`, 'POST', {
       requestId: id,
       text: 'native smoke',
+      uploadIds: [legacyId],
       skillIds: [skills[0].id],
       pluginIds: [plugins[0].id],
     });
@@ -997,6 +1037,10 @@ async function testLive(
       await bulk.request('file', { ...data, action: 'write', index: 1 }, blocks[1]);
       const done = await bulk.request('file', { ...data, action: 'finish' });
       assert.deepEqual(await readFile(done.value.path), bytes);
+      const oldClient = await session.rpc(apiCall(
+        `/threads/${THREAD}/uploads/${upload.id}/complete`, 'POST',
+      ));
+      assert.deepEqual(oldClient, done.value);
       const described = await session.rpc<{ id: string }>(
         apiCall(`/threads/${THREAD}/media`, 'POST', { path: done.value.path }),
       );
@@ -1520,6 +1564,29 @@ try {
     }
     const existing = await reconnect(existingPhone, old.routeTicket);
     assert.equal((await existing.ready).device.id, old.deviceId);
+    const restoreDraft = apiCall(`/threads/${THREAD}/uploads/${migratedDraftId}/complete`, 'POST');
+    assert.deepEqual(await existing.rpc(restoreDraft), {
+      id: migratedDraftId, name: legacyName, path: migratedDraftPath,
+    });
+    for (const path of [migratedDraftPath, migratedNativePath]) {
+      const manifest = await existing.rpc<FileManifest>(apiCall(`/threads/${THREAD}/media`, 'POST', { path }));
+      if (path === migratedNativePath) assert.equal(manifest.id, migratedNativeId);
+      const bytes = await existing.request('file', {
+        backendId: 'codex-local', threadId: THREAD, fileId: manifest.id, action: 'read', index: 0,
+      });
+      assert.deepEqual(Buffer.from(bytes.bytes!), legacyBytes);
+    }
+    const corruptedDraft = Buffer.from(legacyBytes);
+    corruptedDraft[0] ^= 1;
+    await writeFile(migratedDraftPath, corruptedDraft);
+    try {
+      await assert.rejects(
+        existing.rpc(apiCall(`/threads/${THREAD}/media`, 'POST', { path: migratedDraftPath })),
+        { status: 400 },
+      );
+    } finally {
+      await writeFile(migratedDraftPath, legacyBytes);
+    }
     const appearancePath = '/backends/codex-local/appearance';
     const getAppearance = (session: typeof existing) =>
       session.rpc<BackendAppearanceDocument>(apiCall(appearancePath));
@@ -1593,6 +1660,8 @@ try {
       });
     const session = await pair();
     const ready = await session.ready;
+    await assert.rejects(session.rpc(restoreDraft));
+    await assert.rejects(session.rpc(apiCall(`/threads/${THREAD}/media`, 'POST', { path: migratedNativePath })));
     assert.equal(ready.status.writesEnabled, !!ipc);
     assert.equal(ready.status.capabilities.openThread, !!ipc);
     if (versions) {
@@ -1665,6 +1734,11 @@ try {
     );
     if (process.platform === 'win32')
       platformRuntime().privateFile(join(legacyState, 'uploads', legacyId + '.json'));
+    const completeOldDraft = apiCall(`/threads/${THREAD}/uploads/${legacyId}/complete`, 'POST');
+    assert.deepEqual(await session.rpc(completeOldDraft), {
+      id: legacyId, name: legacyName, path: legacyPath,
+    });
+    await assert.rejects(session.rpc(apiCall(`/threads/${FORK_REPLY}/uploads/${legacyId}/complete`, 'POST')));
     const describe = (path: string) =>
       session.rpc<FileManifest>(apiCall(`/threads/${THREAD}/media`, 'POST', { path }));
     await assert.rejects(describe(unpaired), /没有可恢复的数据/);
@@ -1694,8 +1768,10 @@ try {
             index: 0,
           }),
         );
-        if (path === legacyPath)
+        if (path === legacyPath) {
           await assert.rejects(other.rpc(apiCall(`/threads/${THREAD}/media`, 'POST', { path })));
+          await assert.rejects(other.rpc(completeOldDraft));
+        }
       } finally {
         other.close();
       }
@@ -1714,6 +1790,7 @@ try {
     gateway = await launch(true);
     const resumed = await reconnect(phone, ready.ticket);
     assert.equal((await resumed.ready).device.id, ready.device.id);
+    assert.equal((await resumed.rpc<{ path: string }>(completeOldDraft)).path, legacyPath);
     assert.deepEqual(await getAppearance(resumed), savedAppearance);
     await cliAppearance('reset', 'codex-local', '--revision', '5');
     const restored = await getAppearance(resumed);
@@ -1725,7 +1802,7 @@ try {
     await gateway.stop();
   }
   console.log(
-    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, replay rejection, appearance settings and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with two isolated instances of the independently installed Codex plugin' : ''}.`,
+    `Native gateway (${cloudflare ? 'Cloudflare' : 'Node'} relay): TLS startup, pairing, history, legacy drafts, replay rejection, appearance settings and restart passed${ipc ? ', including native Codex live controls' : ''}${versions ? ' with two isolated instances of the independently installed Codex plugin' : ''}.`,
   );
 } finally {
   await relay.close();

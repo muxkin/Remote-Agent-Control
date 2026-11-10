@@ -120,7 +120,7 @@ pub fn description(
         Some(local_path(reference, &cwd)?)
     };
     if let Some(path) = &requested {
-        if let Some(source) = legacy_upload(path, backend, thread, device)? {
+        if let Some(source) = legacy_upload(path, backend, &thread.to_string(), device)? {
             return Ok(source);
         }
         ensure!(
@@ -336,15 +336,16 @@ pub(crate) fn legacy_root() -> Option<PathBuf> {
     }
 }
 
-fn legacy_upload(path: &Path, backend: &str, thread: Uuid, device: &str) -> Result<Option<Source>> {
+pub(crate) fn legacy_upload(
+    path: &Path,
+    backend: &str,
+    thread: &str,
+    device: &str,
+) -> Result<Option<Source>> {
     let Some(state) = legacy_root() else {
         return Ok(None);
     };
-    let root = if backend == crate::codex_backend::ID {
-        state.join("uploads")
-    } else {
-        state.join("backends").join(backend).join("uploads")
-    };
+    let root = legacy_upload_dir(&state, backend);
     if !path.starts_with(&root) {
         let is_upload = |path: &Path, state: &Path| {
             let Ok(relative) = path.strip_prefix(state) else {
@@ -370,47 +371,113 @@ fn legacy_upload(path: &Path, backend: &str, thread: Uuid, device: &str) -> Resu
         );
         return Ok(None);
     }
-    let (id, name) = path
+    let id = path
         .strip_prefix(&root)?
         .components()
         .next()
-        .and_then(|component| {
-            Some((
-                Uuid::parse_str(component.as_os_str().to_str()?).ok()?,
-                path.file_name()?.to_str()?,
-            ))
-        })
+        .and_then(|component| Uuid::parse_str(component.as_os_str().to_str()?).ok())
         .context("旧附件路径无效")?;
-    ensure!(
-        path == root.join(id.to_string()).join(name)
-            && path.canonicalize()? == root.canonicalize()?.join(id.to_string()).join(name),
-        "旧附件路径无效"
-    );
+    let (upload, file) =
+        open_legacy_upload(&root, thread, device, id)?.context(MissingAttachment)?;
+    ensure!(upload.path == path, "旧附件路径无效");
+    Ok(Some(Source {
+        file,
+        name: upload.name,
+        expected: Some((upload.size, upload.sha256)),
+    }))
+}
+
+pub(crate) fn legacy_upload_id(
+    backend: &str,
+    thread: &str,
+    device: &str,
+    id: Uuid,
+) -> Result<Option<files::VerifiedUpload>> {
+    let Some(state) = legacy_root() else {
+        return Ok(None);
+    };
+    let root = legacy_upload_dir(&state, backend);
+    Ok(open_legacy_upload(&root, thread, device, id)?.map(|(upload, _)| upload))
+}
+
+fn legacy_upload_dir(state: &Path, backend: &str) -> PathBuf {
+    if backend == crate::codex_backend::ID {
+        state.join("uploads")
+    } else {
+        state.join("backends").join(backend).join("uploads")
+    }
+}
+
+fn open_legacy_upload(
+    root: &Path,
+    thread: &str,
+    device: &str,
+    id: Uuid,
+) -> Result<Option<(files::VerifiedUpload, File)>> {
     let metadata = root.join(format!("{id}.json"));
-    let metadata: Value = serde_json::from_reader(private_file(&metadata, false)?.take(64 * 1024))?;
+    let receipt = match private_file(&metadata, false) {
+        Ok(receipt) => receipt,
+        Err(error) if is_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    receipt.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 64 * 1024, "旧附件回执过大");
+    let metadata: Value = serde_json::from_slice(&bytes)?;
     ensure!(
         metadata["id"] == id.to_string()
             && metadata["complete"] == true
-            && metadata["thread"] == thread.to_string()
-            && metadata["device"] == device
-            && metadata["name"] == name
-            && metadata["file"]
-                .as_str()
-                .is_some_and(|file| Path::new(file) == path),
+            && metadata["thread"] == thread
+            && metadata["device"] == device,
         "旧附件不属于此会话和设备"
     );
-    let expected = (
-        metadata["size"].as_u64().context("旧附件尺寸缺失")?,
-        metadata["sha256"]
+    let name = metadata["name"]
+        .as_str()
+        .filter(|name| {
+            (1..=200).contains(&name.encode_utf16().count())
+                && !name.chars().any(|ch| {
+                    ch.is_control() || matches!(ch, '/' | '\\') || (cfg!(windows) && ch == ':')
+                })
+                && {
+                    let mut parts = Path::new(name).components();
+                    matches!(parts.next(), Some(std::path::Component::Normal(_)))
+                        && parts.next().is_none()
+                }
+        })
+        .context("旧附件名称无效")?;
+    let path = root.join(id.to_string()).join(name);
+    ensure!(
+        metadata["file"]
             .as_str()
-            .context("旧附件摘要缺失")?
-            .to_owned(),
+            .is_some_and(|file| Path::new(file) == path)
+            && path.canonicalize().map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    anyhow::Error::new(MissingAttachment)
+                } else {
+                    error.into()
+                }
+            })? == root.canonicalize()?.join(id.to_string()).join(name),
+        "旧附件路径无效"
     );
-    Ok(Some(Source {
-        file: private_file(path, false)?,
-        name: name.to_owned(),
-        expected: Some(expected),
-    }))
+    let size = metadata["size"]
+        .as_u64()
+        .filter(|size| (1..=(256 * files::BLOCK) as u64).contains(size))
+        .context("旧附件尺寸无效")?;
+    let sha256 = metadata["sha256"]
+        .as_str()
+        .filter(|value| files::is_hash(value))
+        .context("旧附件摘要无效")?;
+    let file = private_file(&path, false)?;
+    ensure!(file.metadata()?.len() == size, "旧附件大小校验失败");
+    Ok(Some((
+        files::VerifiedUpload {
+            name: name.to_owned(),
+            path,
+            size,
+            sha256: sha256.to_owned(),
+        },
+        file,
+    )))
 }
 
 fn project_file(path: &Path, home: &Path, cwd: &Path) -> Result<Source> {
