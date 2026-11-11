@@ -1,5 +1,7 @@
+import vueJsx from '@vitejs/plugin-vue-jsx';
 import { defineConfig } from 'vitest/config';
 export default defineConfig({
+  plugins: [vueJsx()],
   test: {
     include: ['test/**/*.test.ts', 'test/**/*.test.tsx', 'test/**/*.test.mjs', 'packages/*/test/**/*.test.ts'],
     exclude: ['test/adapter-packages.test.ts', 'test/cloudflare/**'],

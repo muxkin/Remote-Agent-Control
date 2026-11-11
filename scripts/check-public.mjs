@@ -44,10 +44,12 @@ const findings = [];
 for (const file of files) {
   if ((file !== '.env.example' && forbidden.test(file)) || file.startsWith('docs/design/'))
     findings.push([file, 'private or generated path']);
-  if (file.endsWith('/.gitignore')) findings.push([file, 'local ignore file must remain local']);
   const bytes = git(['show', `:${file}`]);
   if (/\.(png|webp|jpg|jpeg|ico|icns|woff2?)$/i.test(file)) continue;
   const content = bytes.toString('utf8');
+  const nativeBuildIgnore = file === 'desktop/native/.gitignore' && /^\/target\/\r?\n?$/.test(content);
+  if (file.endsWith('/.gitignore') && !nativeBuildIgnore)
+    findings.push([file, 'local ignore file must remain local']);
   if (
     /-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{40,}|\bAKIA[0-9A-Z]{16}\b|\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}/.test(
       content,

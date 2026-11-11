@@ -1,7 +1,8 @@
 import { attachmentName } from '../shared/attachments.js';
 import { AttachmentCache } from './attachment-cache.js';
 import { controlAction } from '../shared/controls.js';
-import { join } from 'node:path';
+import { extname, isAbsolute, join, relative, sep } from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { DEFAULT_BACKEND } from '../shared/backends.js';
 import { requireCapability } from './backends/registry.js';
 import { resolveBackend, type BackendDependencies } from './backends/resolve.js';
@@ -10,7 +11,7 @@ import { CoreRouter } from './core-router.js';
 import type { Config } from './config.js';
 import type { Store } from './store.js';
 import { Operations } from './operations.js';
-import { MediaService, authorizeFile } from './media.js';
+import { MediaService, authorizeFile, resolveAttachmentPath } from './media.js';
 import { Uploads, uploadSpec } from './uploads.js';
 import { FileService } from './file-service.js';
 import { creationBody } from './control-schemas.js';
@@ -107,6 +108,26 @@ export function createGatewayCore(config: Config, deps: { store: Store } & Backe
       }
       let file: string,
         fromCache = false;
+      const nativeRoot = join(config.stateDir, 'native-uploads');
+      const requested = resolveAttachmentPath(path, thread.cwd);
+      const nativePath = relative(nativeRoot, requested);
+      if (nativePath && !isAbsolute(nativePath) && nativePath !== '..' && !nativePath.startsWith('..' + sep)) {
+        // Files from the previous Rust gateway keep their original device and conversation ownership.
+        const [uploadId, filename, extra] = nativePath.split(sep);
+        const manifest = backendId === DEFAULT_BACKEND && !extra && uuid.safeParse(uploadId).success
+          ? store.completedNativeUpload(uploadId, req.device.id, id)
+          : undefined;
+        if (!manifest) throw Error('附件不属于当前设备和会话');
+        const saved = JSON.parse(manifest);
+        const { name, size, sha256 } = uploadSpec.parse({ name: saved.name, size: saved.size, sha256: saved.sha256 });
+        const ext = extname(name);
+        const stored = 'attachment' + (/^\.[A-Za-z0-9]{1,16}$/.test(ext) ? ext : '');
+        if (filename !== stored || await realpath(requested) !== join(await realpath(nativeRoot), uploadId, stored))
+          throw Error('旧版附件路径无效');
+        const result = await files.describe(requested, req.device.id, id);
+        if (result.size !== size || result.sha256 !== sha256) throw Error('旧版附件校验失败');
+        return { ...result, name };
+      }
       try {
         file =
           (await uploads.reference(path, req.device.id, id)) ??

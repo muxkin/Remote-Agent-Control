@@ -1,0 +1,104 @@
+name: Publish verified Rust desktop packages
+on:
+  push:
+    tags: ['native-rust-v*', 'native-rust-source-v*']
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    if: startsWith(github.ref_name, 'native-rust-v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retrieve the exact packages already tested on all four targets
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' desktop/native/Cargo.toml)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$GITHUB_REF_NAME" = "native-rust-v$version"
+          commit=$(git rev-parse HEAD)
+          run_id=$(gh api "repos/$GH_REPO/actions/workflows/desktop-native.yml/runs?head_sha=$commit&status=success&event=push&per_page=30" \
+            --jq '.workflow_runs | map(select(.conclusion == "success" and (.head_branch | startswith("native-rust-qa-v")))) | first | .id // empty')
+          test -n "$run_id" || { echo 'A successful four-target QA run is required for this commit'; exit 1; }
+          mkdir release
+          out="$PWD/release"
+          for target in win32-x64 darwin-arm64 darwin-x64 linux-x64; do
+            arch=${target#*-}
+            case "$target" in
+              win32-*) platform=windows; installers=(windows-x64-setup.exe windows-x64.zip); executable_suffix=.exe ;;
+              darwin-*) platform=macos; installers=("macos-$arch.dmg"); executable_suffix= ;;
+              linux-*) platform=linux; installers=(linux-x64.deb linux-x64.tar.xz linux-x64-musl.tar.xz linux-x64-musl-desktop.tar.zst); executable_suffix= ;;
+            esac
+            download="$RUNNER_TEMP/$target"
+            gh run download "$run_id" --name "agent-space-native-$target" --dir "$download"
+            for suffix in "${installers[@]}"; do
+              file="AgentSpace-Native-$version-$suffix"
+              (
+                cd "$download"
+                read -r digest recorded < "$file.sha256"
+                test "$recorded" = "$file"
+                printf '%s  %s\n' "$digest" "$file" | sha256sum --check --strict
+                cp -- "$file" "$out/"
+              )
+            done
+            for product in codex dsh; do
+              entry="agent-space-adapter-$product$executable_suffix"
+              plugin="$RUNNER_TEMP/$product-$target"
+              gh run download "$run_id" --name "agent-space-adapter-$product-$target" --dir "$plugin"
+              digest=$(jq -er --arg product "$product" --arg version "$version" --arg entry "$entry" '
+                select(.sdk == 1 and .product == $product and .version == $version and
+                  .name == ("@agent-remote/adapter-" + $product) and .entry == $entry)
+                | .sha256 | select(test("^[0-9a-f]{64}$"))
+              ' "$plugin/adapter.json")
+              (
+                cd "$plugin"
+                printf '%s  %s\n' "$digest" "$entry" | sha256sum --check --strict
+                chmod 0755 "$entry"
+                tar -cJf "$out/AgentSpace-Adapter-${product^^}-$version-$platform-$arch.tar.xz" \
+                  adapter.json "$entry" LICENSE THIRD-PARTY-NOTICES.txt
+              )
+            done
+          done
+          bash scripts/desktop/native-source-package.sh "$commit" "$out"
+          cd "$out"
+          sha256sum AgentSpace-* > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+      - name: Publish the verified installers, plugins and Cargo source package
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/AgentSpace-* release/SHA256SUMS \
+            --verify-tag --title "Agent Space Rust Desktop ${GITHUB_REF_NAME#native-rust-}" \
+            --notes "Verified installers and independent Codex and DSH plugin packages for Windows x64, macOS Apple Silicon and Intel, and Linux x64. The installers include both official plugins. Linux x64 offers a portable musl desktop bundle and a statically linked musl headless gateway. The source archive is a standalone Cargo workspace for the adapter and both plugins. To install a separate plugin package, verify its SHA-256 checksum, extract it, and run agent-space-native --adapter install with the extracted directory. The automatic update feed is published separately with the desktop release key."
+  publish-source:
+    if: startsWith(github.ref_name, 'native-rust-source-v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add the Cargo source archive to the corresponding existing release
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#native-rust-source-v}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          release="native-rust-v$version"
+          test "$(gh release view "$release" --json tagName --jq .tagName)" = "$release"
+          git fetch --no-tags origin "refs/tags/$release:refs/tags/$release"
+          archive=$(bash scripts/desktop/native-source-package.sh "$release" "$RUNNER_TEMP/source")
+          file=$(basename "$archive")
+          test "$file" = "AgentSpace-Native-$version-source.tar.gz"
+          cd "$(dirname "$archive")"
+          sha256sum "$file" > "$file.sha256"
+          published=$(gh release view "$release" --json assets --jq '.assets[].name')
+          for asset in "$file" "$file.sha256"; do
+            if grep -Fxq "$asset" <<< "$published"; then
+              gh release download "$release" --pattern "$asset" --dir "$RUNNER_TEMP/existing"
+              cmp "$asset" "$RUNNER_TEMP/existing/$asset"
+            else
+              gh release upload "$release" "$asset"
+            fi
+          done

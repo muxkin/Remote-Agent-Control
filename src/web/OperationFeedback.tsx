@@ -1,4 +1,7 @@
-import { useEffect, useState } from 'react';
+import { tsxComponent } from './tsx-component';
+import { shallowRef } from 'vue';
+import { watchRender, writeRef } from './render-effects';
+
 import type { Operation } from '../shared/types';
 import { Icon } from './Icon';
 
@@ -23,71 +26,74 @@ export function operationActivity(operation?: Operation): string | undefined {
 }
 
 /** Delivery feedback is separate from task execution and from transport failures. */
-export function OperationFeedback({
-  operation,
-  onCheck,
-  onRetry,
-}: {
+export const OperationFeedback = tsxComponent(function OperationFeedback(_props: {
   operation?: Operation;
   onCheck?: () => Promise<void>;
   onRetry?: () => void;
 }) {
-  const [checking, setChecking] = useState(false),
-    [checkError, setCheckError] = useState('');
-  const id = operation?.id,
-    state = operation?.state;
-  useEffect(() => {
-    setCheckError('');
-  }, [id, state]);
-  if (!operation) return null;
-  const uncertain = state === 'uncertain';
-  const sending = ['send', 'steer', 'queue'].includes(operation.kind);
-  const failed = state === 'failed' || state === 'rejected';
-  // Normal progress belongs to the send button; only actionable problems need a banner.
-  if (!uncertain && !failed) return null;
-  const message = uncertain
-    ? `${sending ? '发送' : '操作'}结果待确认`
-    : state === 'rejected'
-      ? `未能${actions[operation.kind]}`
-      : '任务未完成';
-  const detail = uncertain
-    ? `${sending ? '草稿已保留，' : ''}请先核对状态，避免重复${sending ? '发送' : '操作'}。`
-    : operation.error || (state === 'rejected' ? '草稿已保留，可检查后重试。' : '可在操作记录中查看详情。');
-  return (
-    <div className={`delivery-feedback ${uncertain ? 'waiting' : 'failed'}`} data-operation-id={id}>
-      <span className="delivery-indicator" aria-hidden="true">
-        <Icon name={uncertain ? 'clock' : 'info'} size={16} />
-      </span>
-      <div
-        className="delivery-copy"
-        role={failed ? 'alert' : 'status'}
-        aria-live={failed ? 'assertive' : 'polite'}
-        aria-atomic="true"
-      >
-        <span>{message}</span>
-        {detail && <small>{detail}</small>}
-        {checkError && <small>{checkError}</small>}
-      </div>
-      {uncertain && onCheck && (
-        <button
-          type="button"
-          disabled={checking}
-          onClick={() => {
-            setChecking(true);
-            setCheckError('');
-            void onCheck()
-              .catch(() => setCheckError('暂时无法核对，请恢复连接后再试。'))
-              .finally(() => setChecking(false));
-          }}
+  const checkingState = shallowRef(false);
+  const setChecking = writeRef(checkingState);
+  const checkErrorState = shallowRef('');
+  const setCheckError = writeRef(checkErrorState);
+  const watchCheckError = watchRender();
+  return ({ operation, onCheck, onRetry }) => {
+    const checking = checkingState.value;
+    const checkError = checkErrorState.value;
+    const id = operation?.id,
+      state = operation?.state;
+    watchCheckError(() => {
+      setCheckError('');
+    }, [id, state]);
+    if (!operation) return null;
+    const uncertain = state === 'uncertain';
+    const sending = ['send', 'steer', 'queue'].includes(operation.kind);
+    const failed = state === 'failed' || state === 'rejected';
+    // Normal progress belongs to the send button; only actionable problems need a banner.
+    if (!uncertain && !failed) return null;
+    const message = uncertain
+      ? `${sending ? '发送' : '操作'}结果待确认`
+      : state === 'rejected'
+        ? `未能${actions[operation.kind]}`
+        : '任务未完成';
+    const detail = uncertain
+      ? `${sending ? '草稿已保留，' : ''}请先核对状态，避免重复${sending ? '发送' : '操作'}。`
+      : operation.error || (state === 'rejected' ? '草稿已保留，可检查后重试。' : '可在操作记录中查看详情。');
+    return (
+      <div class={`delivery-feedback ${uncertain ? 'waiting' : 'failed'}`} data-operation-id={id}>
+        <span class="delivery-indicator" aria-hidden="true">
+          <Icon name={uncertain ? 'clock' : 'info'} size={16} />
+        </span>
+        <div
+          class="delivery-copy"
+          role={failed ? 'alert' : 'status'}
+          aria-live={failed ? 'assertive' : 'polite'}
+          aria-atomic="true"
         >
-          {checking ? '核对中…' : '核对状态'}
-        </button>
-      )}
-      {state === 'rejected' && onRetry && (
-        <button type="button" onClick={onRetry}>
-          发送草稿
-        </button>
-      )}
-    </div>
-  );
-}
+          <span>{message}</span>
+          {detail && <small>{detail}</small>}
+          {checkError && <small>{checkError}</small>}
+        </div>
+        {uncertain && onCheck && (
+          <button
+            type="button"
+            disabled={checking}
+            onClick={() => {
+              setChecking(true);
+              setCheckError('');
+              void onCheck()
+                .catch(() => setCheckError('暂时无法核对，请恢复连接后再试。'))
+                .finally(() => setChecking(false));
+            }}
+          >
+            {checking ? '核对中…' : '核对状态'}
+          </button>
+        )}
+        {state === 'rejected' && onRetry && (
+          <button type="button" onClick={onRetry}>
+            发送草稿
+          </button>
+        )}
+      </div>
+    );
+  };
+});

@@ -1,3 +1,4 @@
+#[cfg(feature = "official-plugins")]
 use crate::{
     codex::History,
     codex_live::View,
@@ -5,15 +6,18 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "official-plugins")]
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[cfg(feature = "official-plugins")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     rows: Vec<Value>,
     fingerprint: String,
 }
 
+#[cfg(feature = "official-plugins")]
 impl Snapshot {
     pub fn read(history: &History, thread: Uuid) -> Result<Self> {
         let rows = history.native_queue(thread)?;
@@ -80,6 +84,7 @@ impl Change {
         }
     }
 
+    #[cfg(feature = "official-plugins")]
     pub fn request(
         &self,
         id: Uuid,
@@ -141,6 +146,7 @@ impl Change {
         }
     }
 
+    #[cfg(feature = "official-plugins")]
     pub fn confirmed(&self, reply: &Value) -> bool {
         let key = if self.text.is_some() { "ok" } else { "removed" };
         reply["result"][key] == true

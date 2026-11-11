@@ -319,6 +319,78 @@ try {
   }
   await screenshot('desktop');
   report.checks.responsiveNoHorizontalOverflow = true;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: '返回会话列表' }).click();
+  await tab('我的');
+  let downloadRequests = 0;
+  await page.route('**/downloads/desktop/releases.json', (route) => {
+    if (++downloadRequests === 1) return route.fulfill({ status: 503 });
+    return route.fulfill({
+      json: {
+        files: [
+          { platform: 'linux', arch: 'x64', version: '1.0.0', file: 'AgentSpace-1.0.0.AppImage', size: 2048 },
+          { platform: 'linux', arch: 'x64', version: '1.0.0', file: '../outside.AppImage', size: 2048 },
+        ],
+      },
+    });
+  });
+  await page.getByRole('button', { name: /电脑适配器/ }).click();
+  await expect(page.getByText('暂时无法读取安装包。')).toBeVisible();
+  await page.getByRole('button', { name: '重试', exact: true }).click();
+  await expect(page.locator('.donation-page a[download]')).toHaveCount(1);
+  await expect(page.getByRole('link', { name: /下载 v1.0.0/ })).toHaveAttribute(
+    'href',
+    '/downloads/desktop/linux/x64/AgentSpace-1.0.0.AppImage',
+  );
+  await page.getByRole('button', { name: '返回', exact: true }).click();
+  await expect(page.locator('.donation-page')).toHaveCount(0);
+
+  await page.route('**/support.json', (route) =>
+    route.fulfill({
+      json: {
+        platform: { name: '测试平台', url: 'http://example.invalid/', enabled: true },
+        wechat: { recipient: '测试账号', qr: '/fixture-qr.png', previewCrop: { x: 0.25, y: 0, size: 0.5 } },
+      },
+    }),
+  );
+  await page.route('**/fixture-qr.png*', (route) =>
+    new URL(route.request().url()).searchParams.has('retry')
+      ? route.fulfill({ path: 'src/web/public/app-icon-32.png' })
+      : route.fulfill({ status: 404 }),
+  );
+  await page.getByRole('button', { name: /支持项目/ }).click();
+  await expect(page.getByText('测试平台主页正在准备中。')).toBeVisible();
+  await expect(page.getByRole('link', { name: /测试平台/ })).toHaveCount(0);
+  await page.getByRole('button', { name: '重新加载赞赏码' }).click();
+  const qr = page.getByRole('img', { name: '测试账号的微信赞赏码' });
+  await qr.evaluate((image: HTMLImageElement) => image.decode());
+  await expect(qr).toHaveClass(/cropped/);
+  await page.getByRole('button', { name: '返回', exact: true }).click();
+
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByRole('button', { name: /外观/ }).click();
+  await page.getByLabel('深色', { exact: true }).check();
+  await expect(page.locator('html')).toHaveAttribute('data-color-mode', 'dark');
+  const addTheme = page.getByRole('button', { name: '添加深色主题' });
+  await addTheme.click();
+  const themeEditor = page.getByRole('dialog', { name: '添加主题' });
+  await expect(themeEditor).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(themeEditor).toHaveCount(0);
+  await expect(addTheme).toBeFocused();
+  await addTheme.click();
+  await themeEditor.getByLabel('主题名称').fill('测试深色');
+  await themeEditor.getByRole('button', { name: '保存主题' }).click();
+  await expect(page.getByRole('button', { name: '选择测试深色' })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: '返回', exact: true }).click();
+  await page.getByRole('button', { name: /外观/ }).click();
+  await expect(page.getByLabel('深色', { exact: true })).toBeChecked();
+  await expect(page.getByRole('button', { name: '选择测试深色' })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: '删除测试深色' }).click();
+  await page.getByRole('button', { name: '确认删除' }).click();
+  await expect(page.getByRole('button', { name: '选择测试深色' })).toHaveCount(0);
+  report.checks.migratedSettingsRoutes = true;
+
   report.checks.noUncaughtErrors = report.errors.length === 0;
   report.passed = Object.values(report.checks).every(Boolean);
 } catch (e) {

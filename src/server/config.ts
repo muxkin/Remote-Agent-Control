@@ -51,9 +51,10 @@ export function readConfig(): Config {
     projectRoot = parent;
   }
   const platform = platformRuntime();
+  const codexPackage = resolve(projectRoot, 'packages/adapter-codex/package.json');
   return {
     port,
-    instances: readInstances(),
+    instances: readInstances(existsSync(codexPackage) ? JSON.parse(readFileSync(codexPackage, 'utf8')).version : undefined),
     origin: url.origin,
     stateDir: resolve(process.env.POCKET_STATE_DIR ?? platform.stateDirectory()),
     platform,

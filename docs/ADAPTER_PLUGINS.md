@@ -1,6 +1,44 @@
 # 独立 Agent 接入插件
 
-网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口；产品协议和系统连接器分别位于 `packages/adapter-codex`、`packages/adapter-dsh`。默认附带两款官方插件。每个配置实例有独立 Node 宿主、配置、状态目录与订阅；宿主只连接已有 Agent。
+当前桌面网关、插件宿主及官方 Codex、DSH 插件均由 Rust 实现，源码位于 `desktop/native`。网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口。安装包附带两款独立的官方原生插件，每个实例有独立进程、配置、状态目录与订阅，连接已有 Agent。
+
+纯 Rust Ely 适配器复用 `instances.json` 和设备配对。Codex、DSH 和第三方插件统一通过独立进程接入。网关保留插件协议、操作记录及附件授权，Codex 本地 IPC 和 DSH 服务端连接由各自插件负责。 [原生安装与更新](DESKTOP_ADAPTER.md)
+
+## Rust 原生插件
+
+将当前平台的自包含可执行文件与 `adapter.json` 放在同一目录。清单包含 `sdk: 1`、`name`、确切的 `version`、`product`、正整数 `stateVersion`、入口文件名 `entry` 和入口的十六进制 `sha256`。Windows 入口使用 `.exe`。安装会校验摘要和 SDK 握手。同名同版本包不可覆盖。
+
+```sh
+agent-space-native --adapter install /absolute/path/plugin-directory
+agent-space-native --adapter list
+agent-space-native --adapter upgrade another-agent my-agent-adapter@1.1.0
+agent-space-native --adapter rollback another-agent
+agent-space-native --adapter result REQUEST_ID
+```
+
+实例沿用下方 `instances.json` 的 `id`、`name`、`plugin`、`version`、`config` 和 `secrets` 格式。首次启动绑定已安装的确切版本，此后以私有 registry 为准。升级和回滚要求插件名称、产品及 `stateVersion` 一致。每个实例保留同一个私有状态目录。
+
+网关在线时，切换会暂缓实例的新写入，等已接收的操作写回数据库，再停止旧进程并启动目标版本。目标版本完成初始化和状态握手后，网关才更新版本绑定并恢复订阅。启动失败时保留旧绑定并尝试恢复旧进程。网关离线时，请求留在本机队列，启动后处理。命令输出排队请求的 ID，可用 `result` 查询。
+
+原生 SDK 使用标准 `Content-Length` 帧传递 JSON-RPC 2.0。请求在 `params.generation` 中带进程代次，响应在顶层回显代次与请求 ID。`adapter/check` 和 `adapter/initialize` 返回 `{ "sdk": 1 }`。初始化包含 `id`、`name`、`config`、`stateDirectory`、`readOnly`、`packageVersion`，只有该实例的凭据进入其 `config`。`adapter/status` 返回 `{info,status}`。`adapter/read` 接收共享只读方法和参数。`adapter/view` 返回 `{thread,messages,observations}`，网关在已订阅时读取快照。`adapter/write` 接收会话、请求 ID 和操作，返回 `{state,turnId?,resultThreadId?}`。`adapter/media` 与 `adapter/export` 可返回实例目录内的 `{path,name}`，文件由网关加密传输。进程退出后重建连接与快照，已发出的写操作保留原请求 ID。插件以本机受信任代码运行。完整示例见 `desktop/native/examples/native-plugin-fixture.rs`。
+
+`adapter/view` 还可以附带 `streamed`、`imageLimits` 和 `continuedQuestions`。创建会话时，插件可在最终响应前发送一次 `adapter/threadCreated` JSON-RPC 通知。通知顶层回显 `generation`，`params` 包含原 JSON-RPC 请求的 `requestId` 及新会话的 `threadId`。网关收到后立即保存会话 ID。如果后续首条消息的结果未知，仍可用已保存的 ID 找回会话。
+
+初始化返回 `watchLifecycle: true` 的插件会收到带 `watchId` 的视图请求和 `adapter/unwatch`，可据此释放同一订阅的本机资源。临时下载文件可写入实例目录的 `transfers/<UUID>` 并在响应中标记 `temporary: true`，网关打开文件后清理路径。
+
+### 官方 Codex 和 DSH
+
+安装器和便携包附带官方 Codex 与 DSH 原生插件。适配器首次启动时校验清单、二进制摘要和 SDK 握手，再将插件登记到用户的私有 registry。已有的 Codex 和 DSH 实例可以直接复用原配置。适配器升级时，兼容的新版随包插件由现有监督器切换，旧版保留供回滚。每个实例对同一随包版本只尝试一次，手动切换正在排队时优先处理手动请求。
+
+正式版本也在 GitHub Releases 提供独立包及 `SHA256SUMS`。开发版可从桌面验收 CI 下载 `agent-space-adapter-codex-*` 或 `agent-space-adapter-dsh-*` 产物。解压后将目录传给 `agent-space-native --adapter install`，用 `upgrade` 和 `rollback` 在线切换。首次绑定依次采用已安装的配置版本、当前适配器版本和最近安装的官方包。交付时同时安装网关与两款官方插件，并验证实例实际启动的原生插件进程。
+
+Codex 默认实例沿用 `codex-local`、原有会话、配对和上传索引。实例可保留旧配置的 `home`、`root`、`socket`、`executable` 和 `appTools`，也可继续用原生环境变量指定路径。DSH 沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。单独运行网关时，缺失插件的实例无法访问。用 `--adapter install` 安装对应插件后重启网关，既有实例配置会用于绑定。
+
+从 v0.3.12 起，可在同一网关配置多个官方 Codex 插件实例。用各自的 `id` 和 `config.home` 选择会话目录，分别用 `config.socket` 和 `config.appTools` 指定对应桌面的会话与工具端点。具名实例在 Windows 上需要明确的 `socket` 才能启用实时控制。每个实例单独记录订阅、操作和附件，沿用旧 Node 版 `backends/<id>/uploads` 中对应设备和会话的附件。具名实例的在线升级和回滚需要支持多实例的 Codex 插件版本。
+
+源码构建使用 `cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-codex --bin agent-space-adapter-dsh`。运行 `scripts/desktop/native-plugin-package.mjs` 生成插件目录后，可分别用 `scripts/desktop/native-smoke.ts` 和 `scripts/desktop/native-dsh-smoke.ts` 验证。两条命令均接收适配器可执行文件和插件目录作为参数。
+
+下面的安装、npm 发布和在线监督器说明适用于旧 Node 网关。
 
 ```mermaid
 flowchart LR
@@ -23,10 +61,21 @@ flowchart LR
 ```json
 [
   {
+    "id": "codex-secondary",
+    "name": "第二个 Codex",
+    "plugin": "@agent-remote/adapter-codex",
+    "version": "0.3.12",
+    "config": {
+      "home": "/absolute/path/to/codex-home",
+      "socket": "/absolute/path/to/codex.sock",
+      "appTools": "/absolute/path/to/app-tools.sock"
+    }
+  },
+  {
     "id": "dsh-one",
     "name": "我的 DSH",
     "plugin": "@agent-remote/adapter-dsh",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "config": { "url": "http://127.0.0.1:3080", "version": "0.2.1-rc.5" },
     "secrets": { "token": "DSH_ONE_TOKEN" }
   },

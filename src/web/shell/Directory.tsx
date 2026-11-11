@@ -1,21 +1,14 @@
-import { useId, useRef, useState, type ReactNode } from 'react';
+import { writeRef } from '../render-effects';
+import { tsxComponent } from '../tsx-component';
+import { shallowRef, useId, type VNodeChild } from 'vue';
+
 import { Icon } from '../Icon';
 import { PageHeader } from './PageHeader';
 
 /** Shared search/filter controls for the message and contact directories. */
-export function DirectoryControls({
-  title,
-  action,
-  searchLabel,
-  query,
-  onQuery,
-  filterLabel,
-  filter,
-  onFilter,
-  options,
-}: {
+export const DirectoryControls = tsxComponent(function DirectoryControls(_props: {
   title: string;
-  action: ReactNode;
+  action: VNodeChild;
   searchLabel: string;
   query: string;
   onQuery: (value: string) => void;
@@ -24,97 +17,99 @@ export function DirectoryControls({
   onFilter: (value: string) => void;
   options: readonly (readonly [string, string])[];
 }) {
-  const [searching, setSearching] = useState(false);
+  const searchingState = shallowRef(false);
+  const setSearching = writeRef(searchingState);
   const searchId = useId();
-  const trigger = useRef<HTMLButtonElement>(null);
-  const closeSearch = () => {
-    onQuery('');
-    setSearching(false);
-    trigger.current?.focus();
-  };
-  return (
-    <>
-      <PageHeader title={title}>
-        <button
-          ref={trigger}
-          className="icon-button directory-search-toggle"
-          aria-label="搜索"
-          title={searchLabel}
-          aria-expanded={searching}
-          aria-controls={searchId}
-          onClick={() => (searching ? closeSearch() : setSearching(true))}
-        >
-          <Icon name={searching ? 'close' : 'search'} size={21} />
-        </button>
-        {action}
-      </PageHeader>
-      <div className="directory-tools">
-        {searching && (
-          <label className="directory-search" id={searchId}>
-            <Icon name="search" size={19} />
-            <input
-              aria-label={searchLabel}
-              placeholder={searchLabel}
-              value={query}
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  e.preventDefault();
-                  closeSearch();
-                }
-              }}
-              onChange={(e) => onQuery(e.target.value)}
-            />
-          </label>
-        )}
-        <div className="directory-filters" role="group" aria-label={filterLabel}>
-          {options.map(([value, label]) => (
-            <button key={value} aria-pressed={filter === value} onClick={() => onFilter(value)}>
-              {label}
-            </button>
-          ))}
+  const trigger = shallowRef<HTMLButtonElement | null>(null);
+  return ({ title, action, searchLabel, query, onQuery, filterLabel, filter, onFilter, options }) => {
+    const searching = searchingState.value;
+
+    const closeSearch = () => {
+      onQuery('');
+      setSearching(false);
+      trigger.value?.focus();
+    };
+    return (
+      <>
+        <PageHeader title={title}>
+          {() => (
+            <>
+              <button
+                ref={trigger}
+                class="icon-button directory-search-toggle"
+                aria-label="搜索"
+                title={searchLabel}
+                aria-expanded={searching}
+                aria-controls={searchId}
+                onClick={() => (searching ? closeSearch() : setSearching(true))}
+              >
+                <Icon name={searching ? 'close' : 'search'} size={21} />
+              </button>
+              {action}
+            </>
+          )}
+        </PageHeader>
+        <div class="directory-tools">
+          {searching && (
+            <label class="directory-search" id={searchId}>
+              <Icon name="search" size={19} />
+              <input
+                aria-label={searchLabel}
+                placeholder={searchLabel}
+                value={query}
+                autofocus
+                onVnodeMounted={(vnode) => (vnode.el as HTMLElement).focus()}
+                onKeydown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    closeSearch();
+                  }
+                }}
+                onInput={(e) => onQuery((e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+          )}
+          <div class="directory-filters" role="group" aria-label={filterLabel}>
+            {options.map(([value, label]) => (
+              <button key={value} aria-pressed={filter === value} onClick={() => onFilter(value)}>
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
-    </>
-  );
-}
+      </>
+    );
+  };
+});
 
 /** A single row anatomy keeps avatars, names and secondary copy aligned across directories. */
-export function DirectoryRow({
-  className = '',
-  selected,
-  avatar,
-  title,
-  preview,
-  meta,
-  badge,
-  trailing,
-  onClick,
-}: {
+export const DirectoryRow = tsxComponent(function DirectoryRow(_props: {
   className?: string;
   selected?: boolean;
-  avatar: ReactNode;
+  avatar: VNodeChild;
   title: string;
-  preview: ReactNode;
-  meta?: ReactNode;
-  badge?: ReactNode;
-  trailing?: ReactNode;
+  preview: VNodeChild;
+  meta?: VNodeChild;
+  badge?: VNodeChild;
+  trailing?: VNodeChild;
   onClick: () => void;
 }) {
-  return (
-    <button className={`directory-row ${className} ${selected ? 'selected' : ''}`} onClick={onClick}>
-      {avatar}
-      <span className="directory-row-copy">
-        <span className="directory-row-title">
-          <strong>{title}</strong>
-          {meta}
+  return ({ className = '', selected, avatar, title, preview, meta, badge, trailing, onClick }) => {
+    return (
+      <button class={`directory-row ${className} ${selected ? 'selected' : ''}`} onClick={onClick}>
+        {avatar}
+        <span class="directory-row-copy">
+          <span class="directory-row-title">
+            <strong>{title}</strong>
+            {meta}
+          </span>
+          <span class="directory-row-preview">
+            <small>{preview}</small>
+            {badge}
+          </span>
         </span>
-        <span className="directory-row-preview">
-          <small>{preview}</small>
-          {badge}
-        </span>
-      </span>
-      {trailing}
-    </button>
-  );
-}
+        {trailing}
+      </button>
+    );
+  };
+});

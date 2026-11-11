@@ -1,15 +1,21 @@
-import { useLayoutEffect } from 'react';
+import { onMounted, onScopeDispose } from 'vue';
 
 /** Fit the app to the visible area, including mobile browser chrome and the keyboard. */
 export function useAppViewport() {
-  useLayoutEffect(() => {
+  let cleanup: (() => void) | undefined;
+  onMounted(() => {
     const viewport = window.visualViewport;
     // Keep application chrome fixed; ImagePreview owns its own image transforms.
-    const preventPinch = (event: TouchEvent) => { if (event.touches.length > 1) event.preventDefault(); };
+    const preventPinch = (event: TouchEvent) => {
+      if (event.touches.length > 1) event.preventDefault();
+    };
     const preventGesture = (event: Event) => event.preventDefault();
-    const preventWheelZoom = (event: WheelEvent) => { if (event.ctrlKey || event.metaKey) event.preventDefault(); };
+    const preventWheelZoom = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) event.preventDefault();
+    };
     const preventKeyZoom = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && ['+', '-', '=', '0'].includes(event.key)) event.preventDefault();
+      if ((event.ctrlKey || event.metaKey) && ['+', '-', '=', '0'].includes(event.key))
+        event.preventDefault();
     };
     document.addEventListener('touchmove', preventPinch, { passive: false });
     document.addEventListener('gesturestart', preventGesture, { passive: false });
@@ -31,7 +37,7 @@ export function useAppViewport() {
     window.addEventListener('resize', update);
     viewport?.addEventListener('resize', update);
     viewport?.addEventListener('scroll', update);
-    return () => {
+    cleanup = () => {
       document.removeEventListener('touchmove', preventPinch);
       document.removeEventListener('gesturestart', preventGesture);
       document.removeEventListener('gesturechange', preventGesture);
@@ -44,5 +50,6 @@ export function useAppViewport() {
       document.documentElement.style.removeProperty('--app-visible-height');
       document.documentElement.style.removeProperty('--app-visible-top');
     };
-  }, []);
+  });
+  onScopeDispose(() => cleanup?.());
 }

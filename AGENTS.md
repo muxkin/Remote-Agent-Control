@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## Desktop adapter delivery
+
+- Deliver and run the pure Rust desktop adapter with independent Rust Codex and DSH plugins. Desktop runtime packages must run without bundled Node or Python.
+- Keep the desktop adapter windowless. Use the system tray for opening local browser settings and running common actions. The management server listens on loopback and the service also supports operation without a tray.
+- Run Codex and DSH through their plugin processes. Keep their product connectors out of default gateway builds.
+- Include and enable WebRTC workbench direct connections and attachment transfer in default desktop adapter builds. Relay and object storage provide fallback paths.
+- Complete missing behavior and fix compatibility problems in the Rust implementation. Continue migration toward the existing adapter's full feature set.
+- Preserve device identities, pairing records, credentials, instance configuration and attachments during migration.
+- Verify the actual executable, plugin processes, application launcher and autostart entry after switching versions. A successful build or uploaded release alone does not complete a local runtime migration.
+
 ## One application, multiple deployment runtimes
 
 - VPS/Node and Cloudflare must use the same frontend, client protocols and business logic. Do not maintain a personal-edition or Cloudflare-edition feature implementation.

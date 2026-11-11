@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, ensure};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(feature = "official-plugins")]
+use serde_json::json;
 
+#[cfg(feature = "official-plugins")]
 use crate::{codex_live::View, state::hash};
 
 const PERMISSIONS: [(&str, &str, &str); 3] = [
@@ -9,6 +12,7 @@ const PERMISSIONS: [(&str, &str, &str); 3] = [
     (":danger-full-access", "完全访问", "dangerFullAccess"),
 ];
 
+#[cfg(feature = "official-plugins")]
 pub fn controls(state: Value, live: bool) -> Value {
     let permissions: Vec<_> = PERMISSIONS
         .iter()
@@ -18,6 +22,7 @@ pub fn controls(state: Value, live: bool) -> Value {
         "actions": if live { vec!["permission"] } else { Vec::new() }, "state":state})
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn permission(settings: &Value) -> Value {
     let profile = settings["activePermissionProfile"]["id"].as_str();
     let sandbox = settings["sandboxPolicy"]["type"].as_str();
@@ -41,6 +46,7 @@ pub fn permission(settings: &Value) -> Value {
         "permissionDescription":description})
 }
 
+#[cfg(feature = "official-plugins")]
 fn approval(id: &str) -> &'static str {
     if id == ":danger-full-access" {
         "never"
@@ -75,6 +81,7 @@ pub fn permission_change(body: &Value) -> Result<Value> {
     Ok(body.clone())
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn permission_request(view: &View, input: &Value) -> Result<Value> {
     let state = &view.thread["controls"];
     ensure!(
@@ -86,6 +93,7 @@ pub fn permission_request(view: &View, input: &Value) -> Result<Value> {
     Ok(json!({"permissions":id,"approvalPolicy":approval(id),"approvalsReviewer":"user"}))
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn permission_applied(native: &Value, input: &Value) -> bool {
     PERMISSIONS.iter().any(|(id, _, sandbox)| {
         input["value"] == *id
@@ -156,6 +164,7 @@ pub fn model_change(body: &Value, catalog: &Value) -> Result<Value> {
     Ok(body.clone())
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn model_request(view: &View, input: &Value) -> Result<Value> {
     ensure!(
         view.thread["canSend"] == true || view.thread["canInterrupt"] == true,

@@ -1,3 +1,4 @@
+import { tsxComponent } from './tsx-component';
 import type { BackendIcon as IconValue } from '../shared/backends';
 import { Icon } from './Icon';
 import { backendStyle } from '../shared/backend-appearance';
@@ -13,33 +14,35 @@ const marks = {
   openclaw: { src: openclaw, icon: 'puzzle' },
 };
 
-export function BackendIcon({ icon, product = '' }: { icon: IconValue; product?: string }) {
-  const style = backendStyle(product);
-  const mark = style === 'generic' ? undefined : marks[style];
-  const official = icon.kind === 'builtin' && mark?.icon === icon.value;
-  return (
-    <span
-      className={`backend-icon surface-icon ${icon.kind}${official ? ' official' : ''}`}
-      data-agent-style={style}
-      aria-hidden="true"
-    >
-      {official ? (
-        <>
-          <img
-            className={style === 'dsh' ? 'official-mark-light' : undefined}
-            src={mark.src}
-            alt=""
-            draggable={false}
-          />
-          {style === 'dsh' && <img className="official-mark-dark" src={dshDark} alt="" draggable={false} />}
-        </>
-      ) : icon.kind === 'image' ? (
-        <img src={icon.value} alt="" draggable={false} />
-      ) : icon.kind === 'emoji' ? (
-        <span>{icon.value}</span>
-      ) : (
-        <Icon name={icon.value} size={25} />
-      )}
-    </span>
-  );
-}
+export const BackendIcon = tsxComponent(function BackendIcon(_props: { icon: IconValue; product?: string }) {
+  return ({ icon, product = '' }) => {
+    const style = backendStyle(product);
+    const mark = style === 'generic' ? undefined : marks[style];
+    const official = icon.kind === 'builtin' && mark?.icon === icon.value;
+    return (
+      <span
+        class={`backend-icon surface-icon ${icon.kind}${official ? ' official' : ''}`}
+        data-agent-style={style}
+        aria-hidden="true"
+      >
+        {official ? (
+          <>
+            <img
+              class={style === 'dsh' ? 'official-mark-light' : undefined}
+              src={mark.src}
+              alt=""
+              draggable={false}
+            />
+            {style === 'dsh' && <img class="official-mark-dark" src={dshDark} alt="" draggable={false} />}
+          </>
+        ) : icon.kind === 'image' ? (
+          <img src={icon.value} alt="" draggable={false} />
+        ) : icon.kind === 'emoji' ? (
+          <span>{icon.value}</span>
+        ) : (
+          <Icon name={icon.value} size={25} />
+        )}
+      </span>
+    );
+  };
+});

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 空间适配器</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="heading">
+      <div>
+        <h1>Agent 空间适配器</h1>
+        <p id="subtitle">通过浏览器管理这台电脑上的适配器。</p>
+      </div>
+      <span id="version" class="version"></span>
+    </header>
+    <p id="notice" class="notice" role="status">正在读取适配器状态…</p>
+    <div id="panel" hidden>
+      <section class="card connection" aria-labelledby="connection-title">
+        <div class="section-heading">
+          <h2 id="connection-title">连接服务</h2>
+          <span id="phase" class="status"></span>
+        </div>
+        <form id="connect" hidden>
+          <p>填入 Agent 空间服务地址。连接成功后，即可在这里生成手机配对码。</p>
+          <label for="origin">服务地址</label>
+          <input id="origin" name="origin" type="url" placeholder="https://…" autocomplete="url" spellcheck="false" maxlength="2048" required>
+          <label for="enrollment">接入密钥 <span class="muted">服务要求时填写</span></label>
+          <input id="enrollment" name="enrollment" type="password" maxlength="512" autocomplete="off">
+          <button type="submit" class="primary">连接服务</button>
+        </form>
+        <div id="connected" hidden>
+          <p id="origin-value" class="break"></p>
+          <div class="actions">
+            <a id="workbench" class="button" target="_blank" rel="noopener noreferrer">打开工作台</a>
+            <button id="change" type="button">切换服务</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="pair-section" class="card" aria-labelledby="pair-title" hidden>
+        <h2 id="pair-title">手机配对</h2>
+        <p>用手机相机扫描二维码，打开后点击「连接电脑」。</p>
+        <div id="pair-code" class="pair-code" hidden>
+          <img id="qr" width="184" height="184" alt="手机配对二维码" hidden>
+          <div>
+            <label for="pair-link">配对链接</label>
+            <input id="pair-link" class="break" readonly>
+            <p id="pair-expiry" class="muted"></p>
+            <button id="copy" type="button">复制链接</button>
+          </div>
+        </div>
+        <button id="pair" type="button" class="primary">生成配对码</button>
+      </section>
+
+      <section class="card" aria-labelledby="update-title">
+        <h2 id="update-title">更新</h2>
+        <p id="update-state" role="status"></p>
+        <div class="actions">
+          <button id="check" type="button">检查更新</button>
+          <button id="install" type="button" class="primary" hidden>安装更新</button>
+        </div>
+      </section>
+
+      <details class="card">
+        <summary>设置和诊断</summary>
+        <div class="details-body">
+          <form id="startup-form" hidden>
+            <label class="checkbox"><input id="startup" type="checkbox"> 登录后自动启动</label>
+          </form>
+          <form id="update-form" hidden>
+            <label class="checkbox"><input id="automatic" type="checkbox"> 自动安装已签名的更新</label>
+            <label for="update-base">自定义更新地址 <span class="muted">可选</span></label>
+            <input id="update-base" type="url" placeholder="留空以使用默认更新源" maxlength="4096" spellcheck="false">
+            <button type="submit">保存更新设置</button>
+          </form>
+          <dl class="diagnostics">
+            <div><dt>本机历史</dt><dd id="history"></dd></div>
+            <div><dt>受管 Agent</dt><dd id="agents"></dd></div>
+            <div><dt>设备通道</dt><dd>Noise 加密 · WebSocket</dd></div>
+          </dl>
+          <div class="actions">
+            <button id="copy-diagnostics" type="button">复制诊断</button>
+            <button id="quit" type="button">退出适配器</button>
+          </div>
+          <textarea id="diagnostics-text" aria-label="诊断信息" readonly hidden></textarea>
+        </div>
+      </details>
+    </div>
+    <footer>关闭此页面后，适配器会继续在后台运行。</footer>
+  </main>
+</body>
+</html>

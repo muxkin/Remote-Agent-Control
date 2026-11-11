@@ -159,7 +159,7 @@ npm run typecheck
 npm run build
 ```
 
-前端使用 React、Vite 和 TypeScript；服务端使用 Fastify、WebSocket 与 SQLite。v2 浏览器测试需要 Chrome。开发与测试说明见 [贡献指南](CONTRIBUTING.md)，部署结果与未完成的真机验收见 [验证记录](docs/VALIDATION_V2.md)。
+前端使用 Vue 3、Vite 和 TypeScript。服务端使用 Fastify、WebSocket 与 SQLite。v2 浏览器测试需要 Chrome。开发与测试说明见 [贡献指南](CONTRIBUTING.md)，部署结果与未完成的真机验收见 [验证记录](docs/VALIDATION_V2.md)。
 
 ## 许可证
 

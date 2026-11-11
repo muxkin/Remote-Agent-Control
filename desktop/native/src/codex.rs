@@ -210,7 +210,7 @@ impl History {
                 if method == "thread.read" {
                     return Ok(Some(json!({"thread": thread})));
                 }
-                let page = self.read_page(Path::new(&path), query["cursor"].as_str())?;
+                let page = self.read_page(id, Path::new(&path), query["cursor"].as_str())?;
                 Ok(Some(
                     json!({"thread": thread, "messages": page.0, "nextCursor": page.1}),
                 ))
@@ -397,12 +397,17 @@ impl History {
         if line.last() != Some(&b'\n') {
             return Ok(None);
         }
-        Ok(rollout_message(&line, offset, true)
+        Ok(rollout_message(&line, &id.to_string(), offset, true)
             .filter(|message| message["id"] == message_id)
             .map(|message| json!({"message":message})))
     }
 
-    fn read_page(&self, path: &Path, cursor: Option<&str>) -> Result<(Vec<Value>, Option<String>)> {
+    fn read_page(
+        &self,
+        id: &str,
+        path: &Path,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<Value>, Option<String>)> {
         let mut file = self.open_rollout(path)?;
         let length = file.metadata()?.len();
         let end = cursor.map(str::parse::<u64>).transpose()?.unwrap_or(length);
@@ -434,7 +439,7 @@ impl History {
         let mut messages = Vec::new();
         for line in bytes[first..].split_inclusive(|byte| *byte == b'\n') {
             if line.ends_with(b"\n") {
-                if let Some(message) = rollout_message(line, offset, false) {
+                if let Some(message) = rollout_message(line, id, offset, false) {
                     messages.push((offset, message));
                 }
             }
@@ -478,9 +483,27 @@ fn read_thread(row: &Row<'_>, names: &HashMap<String, String>) -> rusqlite::Resu
     })
 }
 
-fn rollout_message(line: &[u8], offset: u64, full: bool) -> Option<Value> {
+fn rollout_message(line: &[u8], thread: &str, offset: u64, full: bool) -> Option<Value> {
     let record: Value = serde_json::from_slice(line).ok()?;
     let message = &record["payload"];
+    if record["type"] == "event_msg"
+        && message["type"] == "item_completed"
+        && message["thread_id"] == thread
+    {
+        let item = &message["item"];
+        let text = crate::tool_activity::summary(item)?;
+        let mut projected = json!({
+            "id":format!("rollout-{offset}"),"role":"tool","text":text,"turnId":message["turn_id"],
+        });
+        if let Some(details) = crate::tool_activity::details(item) {
+            if full {
+                crate::tool_activity::apply_details(&mut projected, &details);
+            } else {
+                projected["deferred"] = json!(true);
+            }
+        }
+        return Some(projected);
+    }
     if record["type"] != "response_item" {
         return None;
     }

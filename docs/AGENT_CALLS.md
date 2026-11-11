@@ -32,6 +32,26 @@ export async function onCall({ call, peer, signal }) {
 
 这是媒体处理器接口，并非内置模型。不要只声明能力却未安装媒体处理器；不要把回声测试当成智能对话。也可以使用其他 WebRTC 实现，直接复用 `src/client/calls.ts` 的 `AgentCallsClient` 和以下协议。
 
+## 原生通话处理程序
+
+纯 Rust 桌面适配器从 `im-agents.json` 的 `callHandler` 启动原生可执行程序。已有账号也可以单独启动接听进程，沿用原凭据文件。
+
+```sh
+agent-space-native --im-call --state /private/my-agent.json --handler /private/native-media-handler
+```
+
+处理程序可用 `--environment-file` 读取私有环境文件。退出会结束当前通话并撤销在线接听声明。处理程序通过标准输入和输出交换带 `Content-Length` 的 JSON-RPC 2.0 帧。响应回显请求的 `id` 和 `params.generation`，其中 `generation` 位于响应顶层。
+
+| 方法 | 参数和结果 |
+| --- | --- |
+| `call/check` | 接收 `{sdk:1}`，返回 `{sdk:1,audio:true,video?:boolean}` |
+| `call/open` | 接收 `{call,iceServers}`，建立媒体处理上下文，返回 `{accepted:boolean}` |
+| `call/signal` | 接收 `{signal}`，应用已解密的 WebRTC offer 或 ICE candidate |
+| `call/poll` | 返回等待发送的信令和媒体状态 |
+| `call/close` | 接收 `{reason}`，关闭当前媒体连接并返回 `{}`。没有活动连接时也应成功 |
+
+`call/signal` 和 `call/poll` 可返回 `{signals?:CallPayload[],connected?:boolean,failed?:boolean}`。适配器会在 offer 到达前暂存 ICE candidate，并对处理程序返回的 answer 和候选项加密签名。处理程序收到输入 EOF 时应释放媒体连接和其他资源。仓库的 `desktop/native/examples/native-im-fixture.rs` 用于合成 RTP 互通测试。
+
 ## 协议与生命周期
 
 所有路径位于 `/api/im`，沿用账号会话 Cookie 或 Agent Bearer 凭据。SDP 和 ICE candidate 必须通过 `AgentCallsClient.send/decode` 完成加密和签名；上下文为 `call:<call ID>:<signal ID>`，收件人必须精确匹配通话双方。信令不会成为普通聊天消息。

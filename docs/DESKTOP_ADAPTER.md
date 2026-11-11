@@ -1,15 +1,129 @@
 # 电脑适配器与可迁移的更新分发
 
-## Rust + Ely 原生预览
+桌面端以纯 Rust Adapter 和独立的 Rust Codex、DSH 插件交付。功能迁移、兼容性修复和连接故障处理持续在 Rust 实现中完成。迁移验收应检查实际运行的二进制、插件进程、应用启动项和自启动项，并验证原有配对和会话访问。
 
-原生适配器位于 `desktop/native`。Windows 和 Linux 共用 Rust 网关、Noise 协议、SQLite 状态和 Ely 界面。桌面端使用 tray-icon 和 auto-launch 管理托盘与当前用户自启动。服务登记成功后会记住服务地址，接入密钥只在本次进程内使用。
+## Rust 原生适配器
+
+原生适配器位于 `desktop/native`。安装版使用独立 Rust 网关和系统托盘，支持 Codex 历史、工具活动和附件。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+
+v0.2.8 Linux 混合版安装包附带 Node 和 Python。纯 Rust 安装器的发布验收覆盖 Linux x64、Windows x64、macOS Apple Silicon 和 macOS Intel。
+
+### 原生安装包
+
+[v0.3.36 发布页](https://github.com/muxkin/Remote-Agent-Control/releases/tag/native-rust-v0.3.36)提供四个平台的安装器、独立的 Codex 和 DSH 插件包、可直接用 Cargo 构建的源码包及 `SHA256SUMS`。安装器来自同一提交的[四目标验收](https://github.com/muxkin/Remote-Agent-Control/actions/runs/42954220598)，覆盖实际安装和签名 HTTPS 更新。
+
+以下 Linux 打包说明适用于当前源码。旧版安装包的运行条件以包内说明为准。
+
+| 平台 | 安装包 | 安装方式 |
+| --- | --- | --- |
+| Windows x64 | `*-windows-x64-setup.exe` | 当前用户安装，安装后从开始菜单打开。从托盘退出适配器后可重新安装或卸载。 |
+| macOS Apple Silicon / Intel | `*-macos-arm64.dmg` / `*-macos-x64.dmg` | 将应用拖入 Applications，再打开。以 macOS 14 为构建目标。 |
+| Linux x64 musl 托盘版 | `*-linux-x64-musl-desktop.tar.zst` | 静态链接。用支持 Zstandard 的归档工具解压后运行 `./agent-space-native`，在默认浏览器完成设置。 |
+| Linux x64 DEB | `*-linux-x64.deb` | Debian 系发行版可用 `sudo apt install ./AgentSpace-Native-<版本>-linux-x64.deb` 安装。 |
+| Linux x64 网关 | `*-linux-x64-musl.tar.xz` | 解压后运行 `./agent-space-native --headless`。首次配对可添加 `--print-pair` 输出手机配对链接。 |
+
+Linux 托盘便携包可放在当前用户拥有且可写的目录，例如 `~/Applications/Agent Space`。保留 `agent-space-native` 和 `official-plugins` 的相对位置，再从该目录启动。适配器按文件所有权、目录权限和官方插件清单识别便携安装。签名自动更新由 Rust 校验和解包，在原目录替换主程序和官方插件，失败时恢复原安装文件。
+
+安装版与便携版使用同一原生状态目录。切换前先从托盘退出原进程。如果便携版已开启自启动，先关闭，再在安装版启用，使自启动指向安装位置。卸载保留身份、配对和附件数据。Windows 预览安装包没有发布者签名。macOS 预览应用使用本地临时签名（ad-hoc），未经过 Apple 公证。预览安装器通过 GitHub Releases 提供 SHA-256 校验。启用发布密钥的安装版可自动获取更新。
+
+### 接管旧状态
+
+使用默认状态目录的 v0.2.8 混合版可在正常退出并关闭旧版自启动后直接启动 Rust 安装版。若旧 Node 或混合版使用其他目录，先退出旧版，再从新安装的适配器执行：
+
+```sh
+agent-space-native --import-node-state /absolute/path/to/old-state --origin https://agent.example.com
+```
+
+导入要求新状态目录尚不存在，父目录已存在。也可通过 `POCKET_NATIVE_STATE_DIR` 指定新的私有目录。适配器在验证原主机身份和 SQLite 快照后启用新目录，保留手机配对、操作记录、实例配置、原生上传和独立 Agent 游标。原 Node 历史附件与回执按原路径读取，保留旧目录以继续访问这些文件。旧版与新适配器应分时运行，避免同一主机身份同时接入中继。
+
+省略 `--origin` 时，依次读取旧状态的已保存地址、`gateway.env` 或 Electron 设置。若来源均为空，首次启动时填写服务地址。已在原服务登记的主机使用原身份重连。
+
+从旧桌面管理器接管时，Rust 版会读取原 `settings.json` 的 `legacyGateway.environmentFile` 和 `legacyGateway.workingDirectory`。如旧文件在自定义位置，启动和导入时可设置 `POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS`。也可直接用 `POCKET_ENV_FILE` 指定私有环境文件。导入会记住外部环境文件和旧工作目录，后续托盘启动沿用原路径。相对的实例配置、Codex 路径和独立 Agent 清单按旧工作目录解析。旧环境中的中继接入密钥只用于其声明的服务地址，已配对的设备继续用原主机身份重连。
+
+只保存了上传 ID 的 Codex 和 DSH 草稿可恢复已完成的附件。恢复会核对配对设备、实例、会话和回执，预览时校验附件内容。仍在有效期内的旧上传可按分块清单或原字节偏移续传。Rust 会重验已有分块，并要求客户端补传缺失或损坏的块。续传进度写入 Rust 状态目录，保留旧目录原件。旧进程在重命名文件后退出时，可按原回执校验并恢复文件。沿用相同的七牛私有桶和前缀时，持有有效对象 ID 的客户端也可以继续导入已经上传的旧批次。
+
+### Agent 支持范围
+
+Rust 网关支持 Codex 和 DSH 会话。DSH 沿用私有 `instances.json` 中的实例 ID、连接地址与凭据变量。已迁移工作区、会话历史、实时回复、文本发送与追加、队列入队与移除、中断、改名和新建会话。连接断开后重新拉取快照。每个实例独立保存请求记录，结果不明时等待对应的 DSH 会话事件确认。新会话已创建时会立即保存其 ID，后续步骤中断后仍可找回。可通过 `POCKET_NATIVE_READ_ONLY=1` 或实例配置 `readOnly: true` 禁用写操作。DSH 也沿用旧 `gateway.env` 中的 `POCKET_READ_ONLY=1`。
+
+DSH 也兼容 `POCKET_BACKENDS_FILE` 和带 `type: "dsh"`、`tokenEnv` 的旧实例配置。设置 `POCKET_NATIVE_LEGACY_STATE` 后可读取旧目录的私有 `gateway.env` 和实例配置。当前私有配置文件仍须由当前用户控制。
+
+DSH 的模型与推理强度、权限档位、Agent 预设和计划模式使用原生目录和控制状态流。设置写入前重新读取会话状态，拒绝过期的模型或权限选择。新建会话先应用所选设置，再发送首条消息。
+
+DSH 发送和追加支持图片及普通文件。历史图片通过 DSH 的会话附件接口读取，普通文件原件按实例和会话隔离，并按 DSH 记录校验摘要。指定 `POCKET_NATIVE_LEGACY_STATE` 后也可读取旧 Node 网关保留的附件。回复中明确引用的工作区文件可经加密通道预览和下载，文件搜索使用 DSH 原生目录。
+
+DSH 支持单次工具审批、同步提问及超时后的补答。可写会话打开并同步后才接收交互卡片，卡片绑定原生连接、会话、回合和请求指纹。关闭会话时会把待处理交互交回 DSH，重连后的旧卡片不能提交。
+
+DSH 技能选择使用会话的原生目录，发送前会重新验证。会话支持压缩、显式提交反馈，以及创建、编辑、暂停、恢复、完成和清除目标。目标写入核对原生修订号。会话日志与子会话可导出为 ZIP，通过现有加密附件通道下载。
+
+原生插件可独立安装、在线升级及回滚。安装版和便携包在首次启动时自动登记所附官方 Codex 和 DSH 插件，保留现有实例 ID 和连接配置。切换适配器前先退出使用同一状态目录的旧进程。 [原生插件接入](ADAPTER_PLUGINS.md)
+
+工作台可编辑各实例的名称、说明和图标。旧 SQLite 中的外观覆盖值与修订号随状态导入，恢复默认设置时重新采用插件提供的显示信息。内置图标、Emoji 和 PNG、JPEG、WebP 图片使用同一接口，保存时会检查修订号。
+
+本机也可使用 `agent-space-native --instance list`、`show <id>`、`set <id>` 和 `reset <id>`。例如 `agent-space-native --instance set codex-local --name 工作助手 --emoji 🦄`。保存时可用 `--revision` 核对当前修订号，网页和命令行共用同一份设置。
+
+### 独立 Agent 的消息与通话
+
+沿用私有 `im-agents.json`、账号凭据和 `im-agent-progress/<id>.json`，也可通过 `POCKET_NATIVE_IM_AGENTS` 指定配置文件。保留原实例 `id` 和账号 `state`，将 `messageHandler` 或 `callHandler` 改为对应的原生可执行程序绝对路径。可选的 `environmentFile` 只给本机处理程序提供所需配置。旧 JavaScript 处理器需移植到原生接口。
+
+消息处理程序默认从标准输入接收一个 `{"sdk":1,"event":{...}}` JSON 文档，在标准输出返回 `{"replies":[{"text":"回复","clientId":"可选的稳定请求标识"}]}`。可返回空回复列表。适配器负责验签、解密、发送加密文字回复和保存游标。默认以事件序号及回复序号生成请求标识。
+
+实例配置可设置 `"messageProtocol":"rpc"`。此模式的输入输出为逐行 JSON。首行是 `{"sdk":1,"protocol":"rpc","event":{...}}`。处理程序发出一行 `{"id":"1","method":"message.send","params":{"clientId":"稳定的消息标识","text":"","options":{"state":"streaming"}}}`，适配器返回同一个 `id` 和 `result` 或 `error`。默认使用事件所在会话，也可在请求顶层传入可访问的 `conversationId`。发送选项还支持 `replyTo`、`mentions` 和已上传的 `attachmentIds`。
+
+- `message.update` 接收 `messageId`、下一个 `revision` 和完整快照 `text`。可传 `state`（`streaming`、`complete` 或 `failed`）和工具活动 `activities`。省略活动时保留上一次快照的活动。
+- `message.read` 和 `message.cancel` 接收 `messageId`，分别读取快照和取消流。用 `message.read` 检查当前流是否已被用户取消。更新发生版本冲突时返回 `error.status = 409`。
+- `message.history` 接收可选的 `before`，返回解密的历史消息与分页游标。
+- 重试 `message.send` 时复用相同的 `clientId` 和初始参数，适配器会返回现有消息的最新状态与修订号。收到 `done` 请求（`{"id":"最后一个请求","method":"done"}`）并确认处理程序成功退出后，适配器保存事件游标。
+- `attachment.upload` 接收本地绝对文件路径 `path`，以及可选的显示名称 `name` 和稳定 UUID `fileId`。文件大小为 1 字节至 10 MiB。上传成功后可将返回的 `id` 放入 `message.send` 的 `attachmentIds`。用同一个 UUID 重试时，适配器会核对所有者、会话、名称和文件内容。
+- `attachment.download` 接收 `fileId` 和目标绝对路径 `path`。适配器验签、解密并校验长度后写入私有文件。已有同内容的私有文件可以复用。需要放弃尚未发送的上传时，可用 `attachment.remove` 传入 `fileId`。
+
+- `message.send` 的 `options.interaction` 可发送 `approval` 或 `question`。填写 `recipientId`、`title` 和 `description`，提问还需填写 `questions`，可选 `expiresAt` 使用 Unix 毫秒。卡片正文和选项随消息加密。
+- `interaction.cancel` 接收 `messageId`，用于撤销尚待回答的卡片。卡片被指定用户回答、被撤销或过期后，RPC 处理器会收到 `message.updated`。回答通过验签后才会出现在 `message.interaction.response` 中。
+
+目录接口复用现有账号和群聊权限。
+
+| 方法 | 参数 |
+| --- | --- |
+| `account.me`、`account.bootstrap`、`contacts.list`、`conversations.list`、`conversation.read` | 省略 `params`。启动快照和会话列表中的最后一条消息会解密。 |
+| `account.profile.update` | `displayName` |
+| `contact.add`、`contact.update`、`contact.remove` | 添加使用 `identifier`，编辑和移除使用 `userId`。编辑可传 `remark`、`blocked`。 |
+| `conversation.direct`、`group.create`、`group.update` | 私聊使用 `userId`，建群使用 `name`、`userIds`。群管理可传 `name`、`add`、`remove`、`ownerId` 或 `closed: true`。 |
+| `conversation.markRead` | `sequence`，使用目标会话的消息序号。 |
+| `events.sync` | `cursor` 和可选的毫秒数 `wait`。事件中的消息会验签并解密。 |
+| `message.search` | `query` 和可选的分页游标 `before`。适配器在本机搜索已验签的历史，每次最多扫描 20 页，返回最多 50 条匹配和续页游标。 |
+| `stickers.list` | 省略 `params`，读取账号的已有收藏。 |
+| `sticker.save`、`sticker.download`、`sticker.remove` | 收藏使用当前会话的 `fileId`。下载使用 `stickerId` 和绝对文件路径 `path`。移除使用 `stickerId`。 |
+
+通过 `message.send` 的 `options.stickerId` 发送表情。适配器用目标会话成员的密钥重新加密图片。对同一会话、成员列表和 `clientId` 的重试可复用已上传的图片，已发送的消息会返回原消息 ID。
+
+通话处理程序负责 WebRTC 对端、编解码和模型接入。适配器负责接听状态、心跳、加密 SDP/ICE 信令和挂断。更新交接会等待正在处理的消息和通话。 [原生通话处理程序接口](AGENT_CALLS.md#原生通话处理程序)
+
+### 原生安装版自动更新
+
+原生更新代码内置 `desktop/native/update-release.pub` 的 Ed25519 公钥。安装版在「设置 → 自动更新」提供开关、独立 HTTPS 更新源和检查按钮。留空时跟随当前服务，使用 `/downloads/desktop/native/rust/<平台>/<架构>/latest.json`。保存后立即生效，切换更新源或关闭更新会清除尚未安装的旧包。便携包需手动替换。
+
+偏好保存在原生状态目录。首次使用时可从旧 Electron 的 `settings.json` 导入更新开关和独立来源，独立来源自动补上 `native/rust/`。自定义状态目录可用 `POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS` 显式指定旧文件。尚未保存偏好时，`POCKET_NATIVE_UPDATE_BASE_URL` 可指定初始来源。`POCKET_NATIVE_UPDATES=0` 在进程启动时关闭更新。
+
+更新会验证签名清单的运行时、平台、架构和版本，再下载并校验长度与 SHA-512。手机会话、直连和正在分发的写操作结束后，适配器才交接给独立的 Rust 安装进程。Linux DEB 由 apt 和 PolicyKit 授权。Windows 和 macOS 可使用发布密钥验签的安装器，macOS 同时验证应用代码签名并由系统打开更新后的应用。
+
+Windows 更新失败时会一起恢复旧主程序和随包插件。用户的私有实例配置和插件注册表位于独立状态目录。
+
+跨平台 CI 在隔离的运行器中使用一次性发布密钥和本地 HTTPS 源，验证旧版适配器可下载并应用真实安装包。验收覆盖拒绝无效证书、错误签名、损坏下载和重定向，等待活动连接退出，以及保留主机身份、已配对设备和插件配置。一次性密钥只用于验收构建。
+
+验证各平台安装和升级后，可用 `publish.mjs --native-version <版本> --rust-native` 生成签名更新清单。Windows 和 macOS 无平台签名时增加 `--release-key-only`。更新私钥留在可信发布机器。发布器回读安装器校验 SHA-512 后更新签名清单，再确认清单可读。发布中断后可以使用相同的安装包重试。每个平台和架构使用串行发布。纯 Rust 和混合版分用各自的更新路径。迁移已安装的 Linux x64 混合版时，可给 Rust 发布命令增加 `--bridge-hybrid-linux`。命令使用同一发布密钥，在纯 Rust 更新源就绪后将相同的 DEB 和签名清单提供给旧更新源。旧版用户仍按原流程在下载后确认安装并授予系统权限。自定义混合版更新根目录在首次启动时迁移到其 `rust/` 子目录。旧 Windows 和 macOS 更新器要求平台签名，使用无发布者签名或未公证的 Rust 安装器切换时需手动安装。
+
+`native-rust-v<版本>` 标签触发 GitHub Releases 分发。工作流要求同一提交已通过四个目标的验收，并核对安装器及插件二进制的 SHA-256。安装器、便携包和独立 Codex、DSH 插件随版本一起提供。网页「我的 → 电脑适配器」从当前服务读取各平台签名清单，验签并确认安装器可读取后显示下载链接。
+
+发布页的 `AgentSpace-Native-<版本>-source.tar.gz` 是独立的 Cargo 工作区，包含纯 Rust 适配器、Codex 和 DSH 插件的源码与编译所需资源。解压后在根目录执行 `cargo build --release --locked` 即可构建三个可执行文件。各平台所需工具链和系统库见包内的 `README.md`。
+
+### 本地构建与功能范围
 
 ```bash
 cd desktop/native
 cargo build --release --locked
 ```
 
-在 Linux 运行 `./target/release/agent-space-native`，在 Windows 运行 `target\release\agent-space-native.exe`。设置页可输入服务地址和接入密钥，也可用 `POCKET_NATIVE_ORIGIN` 和 `POCKET_NATIVE_ENROLLMENT` 预填。用 `--configure` 重新选择服务。登录自启动应在程序放到固定路径后开启。托盘可用时，关闭窗口会从任务栏移除窗口，连接继续运行。托盘可以重新打开界面，也可以退出适配器。登录自启动直接进入托盘。Linux 桌面入口和 Windows 可执行文件均使用 Agent 空间图标。
+安装后从应用菜单打开适配器。首次启动会打开默认浏览器，填写服务地址和可选的接入密钥后即可扫码配对。关闭浏览器后适配器继续运行。托盘菜单可以打开设置、检查更新和退出；点击应用入口也可重新打开当前适配器的设置页。在设置中可切换服务和启用登录自启动。管理页面只在本机回环地址监听。如果默认浏览器未打开，可运行 `agent-space-native --print-settings` 获得短期本机链接。服务器可继续用 `--headless --print-pair` 启动并输出配对链接。服务地址和密钥也可用 `POCKET_NATIVE_ORIGIN` 和 `POCKET_NATIVE_ENROLLMENT` 预填。
 
 默认状态目录为平台用户数据目录下的 `agent-space-native-preview`，也可用 `POCKET_NATIVE_STATE_DIR` 选择独立私有目录。Windows 会检查当前用户和 SYSTEM 的 ACL，Linux 会检查目录和文件的属主与权限。用独立目录试用，以免两个网关以同一身份争用中继。
 
@@ -17,17 +131,48 @@ Codex 目录按 `POCKET_NATIVE_CODEX_HOME`、`CODEX_HOME`、`~/.codex` 的顺序
 
 项目名称和会话归属读取 Codex 的项目表及桌面保存的显式分组。打开、新建、改名、整段会话分支和用量读取使用经过验证的桌面应用工具。模型目录来自本机 Codex 桌面缓存，模型、推理强度、速度、计划模式及会话权限随桌面状态同步。技能和插件来自当前项目及本机已启用的目录，选择后随下一条新消息发送。Linux 自动发现应用工具端点，Windows 可用 `POCKET_NATIVE_CODEX_APP_TOOLS` 指定本机 Named Pipe。
 
+实时会话和历史里的工具活动可按需查看命令、输出及可用的文件修改详情。查看过的图片归入工具活动。临时图片被清理后，如果同一会话记录中仍有与该次调用逐项匹配的图片数据，适配器可通过原有加密附件通道恢复。
+
 实时会话支持命令和文件审批、按项授权、同步与异步提问、连接器表单、计划确认及原生消息队列。审批回复需匹配当前回合和请求指纹。队列修改前重新读取桌面状态，并在收到桌面确认后同步结果。指定回复分支需要支持 `lastTurnId` 的已验证 Codex CLI。适配器默认查找 Codex 桌面自带的二进制文件，也可用 `POCKET_NATIVE_CODEX_CLI` 指定本机绝对路径。
 
-原生适配器默认尝试 WebRTC，直连和中继共用同一套 Noise 配对协议。可在私有状态目录的 `transport.env` 中设置 `POCKET_NATIVE_P2P=0` 关闭直连，或设置 `POCKET_STUN_URLS` 指定 STUN 服务。配置七牛私有桶后，无法直连时，大附件优先使用对象存储。通过 `POCKET_NATIVE_STORAGE_ENV_FILE` 引用既有网关私有配置，并用 `POCKET_NATIVE_QINIU_UPLOAD_URL` 指定桶所在区域的 HTTPS 上传源。Web 服务的 CSP 和对象存储的 CORS 需要允许该上传路径。对象上传默认按 25 MiB 分组，可用 `POCKET_NATIVE_STORAGE_BATCH_MIB` 调整到 50 MiB。支持该字段的新网页按配置分组，旧网页沿用 15 MiB。1 MiB 校验块保持兼容。
+WebRTC 工作台直连和附件直传是默认原生适配器的基础能力。直连和中继共用同一套 Noise 配对协议。可在私有状态目录的 `transport.env` 中设置 `POCKET_NATIVE_P2P=0` 关闭直连，或设置 `POCKET_STUN_URLS` 指定 STUN 服务。配置七牛私有桶后，无法直连时，大附件优先使用对象存储。适配器可沿用已启用七牛媒体存储的旧 `gateway.env`，也可用 `POCKET_NATIVE_STORAGE_ENV_FILE` 指定既有的私有配置。首次使用时按桶发现七牛区域并验证桶为私有。需要固定上传端点时仍可设置 `POCKET_NATIVE_QINIU_UPLOAD_URL`。Web 服务的 CSP 和对象存储的 CORS 需要允许该上传路径。对象上传默认按 25 MiB 分组，可用 `POCKET_NATIVE_STORAGE_BATCH_MIB` 调整到 50 MiB。支持该字段的新网页按配置分组，旧网页沿用 15 MiB。1 MiB 校验块保持兼容。自定义私有存储可通过独立原生插件接入。 [原生对象存储插件](STORAGE_ADAPTER.md#原生对象存储插件)
 
-Windows 和 Linux 的构建与协议夹具见 `.github/workflows/desktop-native.yml`。Linux 已运行窗口和协议验收。Windows x64 便携包已交叉构建，Windows 本机协议测试已加入 CI，图形运行仍待 Windows 验收。现阶段 DSH 后端、自动更新和签名安装器仍需迁移。
+### 旧版功能验收
 
-在仓库根目录运行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts`，可验证旧身份和配对、新配对、历史、原生会话控制、文件传输和重启恢复。设置 `POCKET_NATIVE_TEST_RELAY=cloudflare` 可使用同一个夹具验证 Cloudflare Worker。Linux 便携包以 Ubuntu 24.04 为构建基线，运行需要 glibc 2.39 或更新版本及系统 XCB、XKB 库。图形构建需要 XKB、Fontconfig 等系统开发库。用 `cargo build --no-default-features --release --locked` 可构建只运行网关的版本，通过 `--headless` 启动。
+以旧 Node 网关的业务协议及 v0.2.8 混合安装版为基线。下列入口使用隔离的配对、会话和服务数据。
 
-只运行网关时，可以在 Alpine 等原生 musl 构建环境中使用 `cargo build --release --locked --no-default-features --target x86_64-unknown-linux-musl` 生成静态可执行文件。跨目标构建还需要 musl C 编译器来构建 SQLite 等依赖。Ely 图形版需要动态加载系统的 Vulkan 等图形库。Alpine 上已用 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=-crt-static'` 构建并启动窗口，需要该系统的 musl 图形运行库。
+| 核对项 | 验收入口及覆盖范围 |
+| --- | --- |
+| 身份、配对、状态和配置 | [网关验收](../scripts/desktop/native-smoke.ts)验证旧设备重连、一次性配对码、操作记录、外观、草稿和上传恢复。随包插件模式也验证从旧桌面设置导入外部环境文件，重启后按原工作目录读取实例配置。 |
+| Codex 会话和附件 | 同一网关验收覆盖历史、会话操作、工具活动、审批、模型和队列。启用 Chromium 用例后，在已配对的工作台打开历史 PDF 和 PNG，验证工具活动详情、移动端审批和 5 MiB WebRTC 直传。 |
+| DSH 原生交互 | [DSH 验收](../scripts/desktop/native-dsh-smoke.ts)覆盖历史和工作区附件、发送和追加、审批和同步提问、模型权限和计划、技能、目标、反馈、ZIP 导出及断线恢复。 |
+| 独立插件 | [插件宿主验收](../scripts/desktop/native-plugin-smoke.ts)验证外部插件安装、故障恢复、在线切换及回滚。安装包验收还确认首次启动登记官方 Codex 和 DSH，随包升级后可以回滚并跨重启保留绑定。 |
+| 独立 Agent | [消息与通话验收](../scripts/desktop/native-rust-im-smoke.ts)验证复用旧身份和游标、新注册账号与旧客户端互通、流式回复、加密附件和审批。语音和视频通过 WebRTC 双向传输，Linux 另验证独立 `--im-call` 入口。 |
+| 安装与签名更新 | [安装器矩阵](../.github/workflows/desktop-native.yml)安装 DEB、挂载并检查 DMG、安装及卸载 Windows EXE。[更新验收](../scripts/desktop/native-rust-update-smoke.mjs)使用一次性发布密钥验证实际安装器交接和配对保留。[混合版过渡验收](../scripts/desktop/native-hybrid-bridge-smoke.ts)使用归档的 v0.2.8 混合 DEB 验证过渡到 v0.3.35，保留配对、迁移自定义更新源并登记随包插件。 |
+| VPS/Node 和 Cloudflare | `npm test` 和 `npm run test:cf` 包含共享的中继协议用例。`npm run check:deployments` 用相同公开参数逐文件比较两端的前端输出。网关及独立 Agent 的验收入口支持通过 `POCKET_NATIVE_TEST_RELAY=cloudflare` 切换中继。 |
 
-## 用户安装
+验收中的 Codex Socket、Windows Named Pipe、DSH 及通话对端使用测试夹具。用户实际安装的桌面应用版本、自编插件和媒体处理器需要在各自环境验证。
+
+重跑混合版过渡验收时，在未安装适配器的一次性 Linux x64 容器或虚拟机中安装仓库测试依赖和 DEB 运行依赖，并启动系统 D-Bus 以供 PolicyKit 授权。以 root 从仓库根目录运行以下命令，传入归档的 v0.2.8 DEB、新版 DEB 和构建新版 DEB 所用的 Rust 二进制。旧版适配器的更新公钥只在该环境中替换为一次性测试公钥。测试结束后销毁该环境。
+
+```sh
+POCKET_QA_DISPOSABLE_INSTALL=1 node --import tsx scripts/desktop/native-hybrid-bridge-smoke.ts \
+  /path/to/AgentSpace-Native-0.2.8-linux-x64.deb \
+  /path/to/AgentSpace-Native-0.3.35-linux-x64.deb \
+  /path/to/agent-space-native
+```
+
+从仓库根目录执行 `POCKET_NATIVE_TEST_IPC=1 node --import tsx scripts/desktop/native-smoke.ts <适配器路径> <Codex 插件目录>` 可复跑网关验收。验收已安装的套件时，设置 `POCKET_NATIVE_TEST_BUNDLED_PLUGINS=1`，省略插件目录。DEB 以 Ubuntu 22.04 为构建基线，要求 x86-64、glibc 2.35 或更新版本。打包时检查 DEB 主程序的 glibc 符号版本。
+
+要验证网页中的历史 PDF、PNG 和工具活动，先执行 `npm run check:deployments` 生成 Node 侧测试前端，再用 `POCKET_NATIVE_TEST_BROWSER_EXECUTABLE` 指定带内置 PDF 阅读器的完整 Chromium 可执行文件，运行上述网关验收。用 `POCKET_NATIVE_TEST_BROWSER_MEDIA_DIR` 指定已有目录即可保存预览截图。
+
+Linux 网关与官方插件分别构建。在 Alpine 上用 `cargo build --release --locked --target x86_64-unknown-linux-musl --no-default-features --bin agent-space-native` 构建网关。用相同参数加上 `--features official-plugins`，将目标改为 `--bin agent-space-adapter-codex --bin agent-space-adapter-dsh`，即可构建两款插件。musl 网关包检查三个 ELF 文件均无动态加载器及共享库依赖。Linux 托盘包与网关包使用同一批静态插件。交叉构建时需要 musl C 编译器编译 SQLite 等依赖。
+
+网关首次启动时可用 `POCKET_NATIVE_ORIGIN` 设置服务地址。解包时保留 `agent-space-native` 和 `official-plugins` 的相对位置。网关包通过替换完整目录升级，状态保存在原生状态目录。独立试用可用 `POCKET_NATIVE_STATE_DIR` 指定新的私有目录。
+
+musl 托盘包采用静态链接的默认构建 `cargo build --release --locked --target x86_64-unknown-linux-musl --bin agent-space-native`。托盘使用桌面会话的 D-Bus。托盘包通过 `publish.mjs --rust-native --platform linux --arch x64-musl` 选择签名更新源，已安装的 DEB 继续读取 `linux/x64` 更新源。切换安装形式时先退出原进程并关闭其自启动，再从新目录启动并开启自启动。默认状态目录、设备身份和配对沿用原安装。
+
+## 原有 Electron 安装版
 
 在网页“我的 → 电脑适配器”选择已发布的平台安装包。Windows 使用每用户 NSIS 安装程序，macOS 使用 DMG，Linux 使用 AppImage（首次运行需允许执行）。安装包内置 Node、Python、编译后的 Gateway 和官方插件，不要求用户克隆源码、安装 npm 依赖或手动升级插件。
 
@@ -107,4 +252,4 @@ POCKET_DESKTOP_RELEASE_ROOT=/srv/agent-releases
 
 Codex 用量通过桌面原生 `get_usage_limits` 读取，展示账户共享额度和重置时间，不传递账户 ID、重置券标识或登录凭据。缺失窗口表示不可用，不显示为 0%。当前实测的工具只提供 Codex 额度，未确认独立 Dot 额度接口；不推算或伪造 Dot 数据。
 
-历史附件在完整的所属 rollout（包括 zstd）中逐条授权，不再仅依赖最新一页或桌面 owner。成功读取过且不超过 32 MiB 的附件保留在本机私有缓存，按实例和会话隔离，总上限为 128 个文件、256 MiB，淘汰最久未使用的文件。原文件已经删除且从未缓存的附件无法恢复，页面明确提示重新发送。
+历史附件在完整的所属 rollout（包括 zstd）中按消息里出现的文件引用读取。相对路径以会话工作目录解析，绝对路径直接定位文件。成功读取过且不超过 32 MiB 的附件保留在本机私有缓存，按实例和会话隔离，总上限为 128 个文件、256 MiB，淘汰最久未使用的文件。原文件已经删除且从未缓存的附件无法恢复，页面明确提示重新发送。

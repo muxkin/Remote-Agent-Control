@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import vue from '@vitejs/plugin-vue';
+import vueJsx from '@vitejs/plugin-vue-jsx';
 import { defineConfig } from 'vite';
 import './scripts/env.mjs';
 import { assetSettings } from './src/shared/assets';
@@ -26,7 +28,7 @@ export default defineConfig(() => {
     /^version = "([0-9.]+)"$/m,
   )?.[1];
   if (!nativeVersion) throw new Error('Missing native adapter version');
-  hash.update(nativeVersion);
+  hash.update(nativeVersion).update(readFileSync('desktop/native/update-release.pub'));
   const buildId = hash.digest('hex').slice(0, 16);
   const themeBoot = readFileSync('src/web/theme/boot.js', 'utf8');
   const startup = readFileSync('src/web/startup.js', 'utf8');
@@ -48,19 +50,21 @@ export default defineConfig(() => {
         output: {
           manualChunks(id) {
             // Stable foundations keep their cache across application-only releases.
-            if (/\/node_modules\/(react|react-dom|scheduler)\//.test(id)) return 'react-vendor';
+            if (/\/node_modules\/(?:@vue\/|vue\/)/.test(id)) return 'vue-vendor';
             if (id.includes('/node_modules/@material/material-color-utilities/')) return 'theme-vendor';
           },
         },
       },
     },
     plugins: [
+      vue(),
+      vueJsx(),
       {
         name: 'theme-prepaint',
         transformIndexHtml: {
           order: 'post',
           handler(html, context) {
-            // A classic, blocking script paints saved colors before the CSS/React bundles.
+            // A classic, blocking script paints saved colors before the CSS and application bundles.
             // Keep the small boot scripts and initial stylesheet independent of CDN failures.
             const src = context.server ? '/theme/boot.js' : `/${themeBootFile}`;
             const recoverySrc = context.server ? '/startup.js' : `/${startupFile}`;

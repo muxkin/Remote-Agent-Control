@@ -1,6 +1,7 @@
-import { cp, mkdir, readFile, writeFile, realpath, readdir } from 'node:fs/promises';
+import { cp, mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isBuiltin } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import Arborist from '@npmcli/arborist';
 import { manual as remove } from 'rimraf';
@@ -20,8 +21,23 @@ execFileSync(executable, [
   '-c',
   'import socket,struct,json,ctypes,plistlib; assert __import__("sys").version_info >= (3,11)',
 ]);
-for (const file of ['dist/server/main.js', 'dist/web/index.html', 'dist/adapters/SHA256SUMS'])
+// The gateway does not serve HTTP or web pages. Only package its entry and the adapter
+// host it launches, plus the one branded asset used by the desktop manager.
+const entries = [
+  'dist/server/main.js',
+  'dist/server/adapters/host.js',
+  'dist/server/adapters/cli.js',
+  'dist/server/desktop-im-agent.js',
+  'dist/server/desktop-im-cli.js',
+  'dist/server/desktop-call-cli.js',
+];
+const resources = [...entries, 'dist/web/app-icon-192.png'];
+for (const file of [...resources, 'dist/server/build-meta.json', 'dist/adapters/SHA256SUMS'])
   if (!existsSync(file)) throw Error(`Build the application first: missing ${file}`);
+const { outputs } = JSON.parse(await readFile('dist/server/build-meta.json', 'utf8'));
+const builtEntries = new Map(
+  Object.entries(outputs).map(([path, metadata]) => [path.replaceAll('\\', '/'), metadata]),
+);
 await remove(target);
 await mkdir(target, { recursive: true });
 const manifest = JSON.parse(await readFile('package.json', 'utf8'));
@@ -29,21 +45,20 @@ delete manifest.devDependencies;
 delete manifest.workspaces;
 delete manifest.scripts;
 const used = new Set();
-async function imports(directory) {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) await imports(path);
-    else if (entry.name.endsWith('.js')) {
-      const code = await readFile(path, 'utf8');
-      for (const match of code.matchAll(/(?:from\s*|import\s*\(|require\s*\()(['"])([^'"\n]+)\1/g)) {
-        const id = match[2];
-        if (id.startsWith('.') || id.startsWith('node:')) continue;
-        used.add(id.startsWith('@') ? id.split('/').slice(0, 2).join('/') : id.split('/')[0]);
-      }
-    }
+for (const entry of entries) {
+  const imports = builtEntries.get(entry)?.imports;
+  if (!imports) throw Error(`No dependency metadata for desktop entry ${entry}`);
+  for (const { path, external } of imports) {
+    if (isBuiltin(path)) continue;
+    const name = path
+      .split('/')
+      .slice(0, path.startsWith('@') ? 2 : 1)
+      .join('/');
+    if (!external || !Object.hasOwn(manifest.dependencies, name))
+      throw Error(`Desktop entry ${entry} has an undeclared dependency: ${path}`);
+    used.add(name);
   }
 }
-await imports('dist/server');
 manifest.dependencies = Object.fromEntries(
   Object.entries(manifest.dependencies).filter(([name]) => used.has(name)),
 );
@@ -57,10 +72,21 @@ await new Arborist({
   workspacesEnabled: false,
   packageLock: true,
 }).reify();
-for (const path of ['dist/server', 'dist/web', 'dist/adapters'])
-  await cp(join(source, path), join(target, path), { recursive: true });
+for (const path of resources) {
+  await mkdir(join(target, dirname(path)), { recursive: true });
+  await cp(join(source, path), join(target, path));
+}
+await cp(join(source, 'dist/adapters'), join(target, 'dist/adapters'), { recursive: true });
 await mkdir(join(target, 'scripts'), { recursive: true });
-await cp('scripts/env.mjs', join(target, 'scripts/env.mjs'));
+for (const file of [
+  'env.mjs',
+  'native-manager.mjs',
+  'native-im.mjs',
+  'native-update.mjs',
+  'native-update-apply.mjs',
+]) {
+  await cp(join('scripts', file === 'env.mjs' ? '' : 'desktop', file), join(target, 'scripts', file));
+}
 for (const name of ['sdk', 'codex', 'dsh']) {
   const path = `packages/adapter-${name}`;
   await mkdir(join(target, path), { recursive: true });
@@ -68,10 +94,13 @@ for (const name of ['sdk', 'codex', 'dsh']) {
     await cp(join(source, path, file), join(target, path, file), { recursive: true });
 }
 await mkdir(join(target, 'runtime'), { recursive: true });
-await cp(
-  await realpath(process.execPath),
-  join(target, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node'),
-);
+const node = await realpath(process.execPath);
+await cp(node, join(target, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node'));
+for (const license of [join(dirname(node), 'LICENSE'), join(dirname(node), '../LICENSE')]) {
+  if (!existsSync(license)) continue;
+  await cp(license, join(target, 'runtime/LICENSE'));
+  break;
+}
 await cp(resolve(python), join(target, 'python'), {
   recursive: true,
   verbatimSymlinks: true,

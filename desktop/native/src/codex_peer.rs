@@ -2,7 +2,6 @@ use anyhow::Result;
 #[cfg(unix)]
 use anyhow::{Context, bail, ensure};
 use std::{
-    env,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -16,39 +15,72 @@ pub type Stream = Box<dyn Transport>;
 pub struct Endpoint {
     socket: PathBuf,
     executable: Option<PathBuf>,
+    app_tools: Option<PathBuf>,
+    #[cfg(unix)]
+    discover_tools: bool,
 }
 
 impl Endpoint {
-    pub fn discover(home: &Path) -> Option<Self> {
-        let socket = env::var_os("POCKET_NATIVE_CODEX_SOCKET")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                if cfg!(windows) {
-                    PathBuf::from(r"\\.\pipe\codex-ipc")
+    pub fn discover(
+        home: &Path,
+        options: &crate::codex_service::Options,
+        named: bool,
+    ) -> Option<Self> {
+        if cfg!(windows) && named && options.socket.is_none() {
+            return None;
+        }
+        let socket = options.socket.clone().unwrap_or_else(|| {
+            if cfg!(windows) {
+                PathBuf::from(r"\\.\pipe\codex-ipc")
+            } else {
+                home.join("ipc/ipc.sock")
+            }
+        });
+        let executable = options.executable.clone().or_else(|| {
+            if let Some(root) = &options.root {
+                let candidates = if cfg!(target_os = "macos") {
+                    ["Contents/MacOS/Codex", "Contents/MacOS/ChatGPT"]
+                } else if cfg!(windows) {
+                    ["Codex.exe", "ChatGPT.exe"]
                 } else {
-                    home.join("ipc/ipc.sock")
-                }
-            });
-        let executable = env::var_os("POCKET_NATIVE_CODEX_EXECUTABLE")
-            .map(PathBuf::from)
-            .or_else(|| {
-                if cfg!(target_os = "linux") {
-                    Some(PathBuf::from("/usr/lib/chatgpt/ChatGPT"))
-                } else if cfg!(target_os = "macos") {
-                    let candidates = [
-                        "/Applications/Codex.app/Contents/MacOS/Codex",
-                        "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
-                    ]
+                    ["ChatGPT", "Codex"]
+                };
+                return candidates
                     .into_iter()
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_file())
-                    .collect::<Vec<_>>();
-                    (candidates.len() == 1).then(|| candidates[0].clone())
-                } else {
-                    None
-                }
-            });
-        Some(Self { socket, executable })
+                    .map(|name| root.join(name))
+                    .find(|path| path.is_file())
+                    .or_else(|| Some(root.join(candidates[0])));
+            }
+            if cfg!(target_os = "linux") {
+                Some(PathBuf::from("/usr/lib/chatgpt/ChatGPT"))
+            } else if cfg!(target_os = "macos") {
+                let candidates = [
+                    Some(PathBuf::from(
+                        "/Applications/Codex.app/Contents/MacOS/Codex",
+                    )),
+                    Some(PathBuf::from(
+                        "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+                    )),
+                    dirs::home_dir()
+                        .map(|home| home.join("Applications/Codex.app/Contents/MacOS/Codex")),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|path| path.canonicalize().ok())
+                .filter(|path| path.is_file())
+                .collect::<std::collections::BTreeSet<_>>();
+                (candidates.len() == 1).then(|| candidates.into_iter().next().unwrap())
+            } else {
+                None
+            }
+        });
+        Some(Self {
+            socket,
+            executable,
+            app_tools: options.app_tools.clone(),
+            #[cfg(unix)]
+            discover_tools: !named,
+        })
     }
 
     pub fn executable(&self) -> Option<&Path> {
@@ -60,13 +92,16 @@ impl Endpoint {
     }
 
     pub async fn open_app_tools(&self) -> Result<Stream> {
-        let socket = env::var_os("POCKET_NATIVE_CODEX_APP_TOOLS").map(PathBuf::from);
+        let socket = self.app_tools.clone();
         #[cfg(unix)]
         let socket = socket.or_else(|| {
+            if !self.discover_tools {
+                return None;
+            }
             let root = if cfg!(target_os = "linux") {
                 PathBuf::from("/tmp")
             } else {
-                env::temp_dir()
+                std::env::temp_dir()
             };
             let uid = rustix::process::geteuid().as_raw();
             let candidates: Vec<_> = [
@@ -92,6 +127,9 @@ impl Endpoint {
             socket: socket
                 .ok_or_else(|| anyhow::anyhow!("本机桌面应用工具不可用或存在多个端点"))?,
             executable: self.executable.clone(),
+            app_tools: None,
+            #[cfg(unix)]
+            discover_tools: false,
         };
         tokio::time::timeout(Duration::from_secs(5), endpoint.connect(true)).await?
     }
@@ -206,7 +244,29 @@ fn verify_unix(stream: &tokio::net::UnixStream, expected: &Path, uid: u32) -> Re
     Ok(())
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn verify_unix(stream: &tokio::net::UnixStream, expected: &Path, uid: u32) -> Result<()> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+
+    let credentials = stream.peer_cred()?;
+    ensure!(credentials.uid() == uid, "Codex 对端用户不匹配");
+    let pid = credentials
+        .pid()
+        .filter(|pid| *pid > 0)
+        .context("无法读取 Codex 对端进程")?;
+    let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // The kernel returns the executable path for the PID attached to the connected socket.
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    ensure!(length > 0, "无法读取 Codex 对端程序");
+    let peer = Path::new(std::ffi::OsStr::from_bytes(
+        CStr::from_bytes_until_nul(&buffer)?.to_bytes(),
+    ));
+    ensure!(peer == expected.canonicalize()?, "Codex 对端程序不匹配");
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn verify_unix(_stream: &tokio::net::UnixStream, _expected: &Path, _uid: u32) -> Result<()> {
     bail!("本平台的 Codex IPC 身份校验尚不可用")
 }

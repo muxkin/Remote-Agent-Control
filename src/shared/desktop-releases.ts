@@ -2,9 +2,45 @@ export interface ReleaseStore {
   head(key: string): Promise<{ size: number; etag: string } | null>;
   read(key: string, range?: { offset: number; length: number }): Promise<ReadableStream<Uint8Array> | null>;
 }
+
+export const nativeInstallerTargets = [
+  { platform: 'win32', arch: 'x64', suffix: 'windows-x64-setup.exe' },
+  { platform: 'darwin', arch: 'arm64', suffix: 'macos-arm64.dmg' },
+  { platform: 'darwin', arch: 'x64', suffix: 'macos-x64.dmg' },
+  { platform: 'linux', arch: 'x64', suffix: 'linux-x64.deb' },
+] as const;
+
+export const linuxMuslInstallerTarget = {
+  platform: 'linux', arch: 'x64-musl', suffix: 'linux-x64-musl-desktop.tar.zst',
+} as const;
+
+export type NativeInstallerTarget = (typeof nativeInstallerTargets)[number] | typeof linuxMuslInstallerTarget;
+
 export function releaseKey(path: string) {
   const name = path.replace(/^\/downloads\/desktop\//, '');
   if (name === 'releases.json') return `desktop-releases/${name}`;
+  if (
+    /^native\/rust\/linux\/x64-musl\/(?:latest\.json|AgentSpace-Native-\d{1,6}\.\d{1,6}\.\d{1,6}-linux-x64-musl-desktop\.tar\.zst)$/.test(
+      name,
+    )
+  )
+    return `desktop-releases/${name}`;
+  if (
+    /^native\/preview\/linux\/x64\/(?:preview\.json|AgentSpace-Native-\d{1,6}\.\d{1,6}\.\d{1,6}-linux-x64\.(?:deb|tar\.xz))$/.test(
+      name,
+    )
+  )
+    return `desktop-releases/${name}`;
+  const native =
+    /^native\/(?:rust\/)?(linux\/x64|win32\/x64|darwin\/(?:arm64|x64))\/(latest\.json|AgentSpace-Native-\d+\.\d+\.\d+-([a-z0-9.-]+))$/.exec(
+      name,
+    );
+  if (native) {
+    const suffix = nativeInstallerTargets.find(
+      ({ platform, arch }) => `${platform}/${arch}` === native[1],
+    )?.suffix;
+    return native[2] === 'latest.json' || native[3] === suffix ? `desktop-releases/${name}` : null;
+  }
   if (
     !/^(linux|darwin|win32)\/(x64|arm64)\/(?:latest(?:-mac|-linux)?\.yml|AgentSpace-[0-9][A-Za-z0-9._-]*\.(?:exe|dmg|zip|AppImage)(?:\.blockmap)?|SHA256SUMS)$/.test(
       name,

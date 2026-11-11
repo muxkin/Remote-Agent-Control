@@ -56,15 +56,14 @@ impl Store {
         private_directory(directory)?;
         ensure!(
             !directory.join("adapters/supervisor.json").exists(),
-            "此目录属于现有适配器。原型需要独立状态目录"
+            "旧版适配器仍持有此目录的监督器记录，请正常退出后重试"
         );
-        let lock = private_file(&directory.join("native.lock"), true)?;
-        lock.try_lock().context("已有原生适配器使用此状态目录")?;
+        let lock = lock_directory(directory)?;
         let identity_path = directory.join("device-identity-v2.json");
         let identity = if identity_path.exists() {
             use std::io::Read;
             let mut input = String::new();
-            private_file(&identity_path, false)?
+            state_identity_file(directory, &identity_path)?
                 .take(8192)
                 .read_to_string(&mut input)?;
             let document: IdentityFile = serde_json::from_str(&input)?;
@@ -100,18 +99,7 @@ impl Store {
         };
         let path = directory.join("state.sqlite");
         drop(private_file(&path, true)?);
-        // SQLite creates these with the database mode. Refuse any pre-existing unsafe sidecars.
-        for name in [
-            "state.sqlite-wal",
-            "state.sqlite-shm",
-            "state.sqlite-journal",
-        ] {
-            let sidecar = directory.join(name);
-            if fs::symlink_metadata(&sidecar).is_ok() {
-                drop(private_file(&sidecar, false)?);
-            }
-        }
-        let db = Connection::open(path)?;
+        let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(3))?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -130,16 +118,22 @@ impl Store {
                result_thread_id TEXT, backend_id TEXT NOT NULL DEFAULT 'codex-local',
                PRIMARY KEY(backend_id,id)
              );
-             CREATE INDEX IF NOT EXISTS operations_by_conversation ON operations(backend_id,thread_id,device_id,created);
              CREATE TABLE IF NOT EXISTS native_uploads (
                id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL,
                manifest TEXT NOT NULL, present TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0,
                expires INTEGER NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS native_storage_objects (
-               id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, transfer TEXT NOT NULL,
-               indices TEXT NOT NULL, download INTEGER NOT NULL, expires INTEGER NOT NULL
+             CREATE TABLE IF NOT EXISTS legacy_upload_progress (
+               id TEXT PRIMARY KEY, device TEXT NOT NULL, thread TEXT NOT NULL, sha256 TEXT NOT NULL,
+               size INTEGER NOT NULL, offset INTEGER NOT NULL, expires INTEGER NOT NULL
              );",
+        )?;
+        crate::appearance::initialize(&db)?;
+        crate::storage::initialize_receipts(&mut db)?;
+        migrate_operations(&mut db)?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS operations_by_conversation ON operations(backend_id,thread_id,device_id,created)",
+            [],
         )?;
         db.execute("UPDATE operations SET state='uncertain',error='网关重启，等待原实例状态确认',updated=?1 WHERE state='dispatching'", [now()])?;
         db.execute("UPDATE operations SET state='rejected',error='网关在发送前退出',updated=?1 WHERE state='received'", [now()])?;
@@ -243,6 +237,98 @@ impl Store {
     }
 }
 
+fn migrate_operations(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let columns = {
+        let mut query = tx.prepare("PRAGMA table_info(operations)")?;
+        query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, u32>(5)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !columns.iter().any(|(name, _)| name == "result_thread_id") {
+        tx.execute(
+            "ALTER TABLE operations ADD COLUMN result_thread_id TEXT",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|(name, _)| name == "backend_id") {
+        tx.execute(
+            "ALTER TABLE operations ADD COLUMN backend_id TEXT NOT NULL DEFAULT 'codex-local'",
+            [],
+        )?;
+    }
+    if columns.iter().filter(|(_, key)| *key > 0).count() == 1 {
+        tx.execute_batch(
+            "ALTER TABLE operations RENAME TO operations_legacy;
+             CREATE TABLE operations (
+               id TEXT NOT NULL, device_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+               kind TEXT NOT NULL, fingerprint TEXT NOT NULL, state TEXT NOT NULL,
+               turn_id TEXT, error TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL,
+               result_thread_id TEXT, backend_id TEXT NOT NULL DEFAULT 'codex-local',
+               PRIMARY KEY(backend_id,id)
+             );
+             INSERT INTO operations
+               SELECT id,device_id,thread_id,kind,fingerprint,state,turn_id,error,created,updated,
+                      result_thread_id,backend_id
+               FROM operations_legacy;
+             DROP TABLE operations_legacy;",
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn lock_directory(directory: &Path) -> Result<File> {
+    private_directory(directory)?;
+    let lock = private_file(&directory.join("native.lock"), true)?;
+    lock.try_lock().context("已有原生适配器使用此状态目录")?;
+    let identity = directory.join("device-identity-v2.json");
+    match fs::symlink_metadata(&identity) {
+        Ok(_) => drop(state_identity_file(directory, &identity).context("检查设备身份")?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    verify_database_paths(directory)?;
+    Ok(lock)
+}
+
+fn state_identity_file(directory: &Path, path: &Path) -> Result<File> {
+    if crate::migration::source() == Some(directory) {
+        return legacy_private_file(path);
+    }
+    private_file(path, false)
+}
+
+pub(crate) fn verify_database_paths(directory: &Path) -> Result<()> {
+    let database = directory.join("state.sqlite");
+    match fs::symlink_metadata(&database) {
+        Ok(_) => drop(private_file(&database, false).context("检查 state.sqlite")?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for name in [
+        "state.sqlite-wal",
+        "state.sqlite-shm",
+        "state.sqlite-journal",
+    ] {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                #[cfg(windows)]
+                crate::windows::private_sqlite_sidecar(&path)
+                    .with_context(|| format!("检查 {name}"))?;
+                #[cfg(not(windows))]
+                drop(private_file(&path, false)?);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -278,11 +364,22 @@ pub(crate) fn private_directory(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 pub(crate) fn private_file(path: &Path, create: bool) -> Result<File> {
+    open_private_file(path, create, false)
+}
+
+#[cfg(unix)]
+pub(crate) fn create_private_file(path: &Path) -> Result<File> {
+    open_private_file(path, true, true)
+}
+
+#[cfg(unix)]
+fn open_private_file(path: &Path, create: bool, exclusive: bool) -> Result<File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(create)
         .create(create)
+        .create_new(exclusive)
         .mode(0o600)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)?;
@@ -297,7 +394,14 @@ pub(crate) fn private_file(path: &Path, create: bool) -> Result<File> {
 }
 
 #[cfg(windows)]
-pub(crate) use crate::windows::{private_directory, private_file};
+pub(crate) use crate::windows::{
+    create_private_file, legacy_private_file, private_directory, private_file,
+};
+
+#[cfg(not(windows))]
+pub(crate) fn legacy_private_file(path: &Path) -> Result<File> {
+    private_file(path, false)
+}
 
 #[cfg(not(any(unix, windows)))]
 fn private_directory(_: &Path) -> Result<()> {
@@ -307,6 +411,10 @@ fn private_directory(_: &Path) -> Result<()> {
 #[cfg(not(any(unix, windows)))]
 fn private_file(_: &Path, _: bool) -> Result<File> {
     bail!("此预览尚未实现 Windows 的私有文件 ACL")
+}
+
+pub(crate) fn default_directory() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|path| path.join("agent-space-native-preview"))
 }
 
 pub fn saved_origin(directory: &Path) -> Result<Option<String>> {

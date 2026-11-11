@@ -28,6 +28,17 @@ it('serves full and range downloads, HEAD and cache validation with the shared r
     store,
   );
   expect(manifest.headers.get('Cache-Control')).toBe('no-cache');
+  const musl = '/downloads/desktop/native/rust/linux/x64-musl/';
+  const archive = 'AgentSpace-Native-0.3.37-linux-x64-musl-desktop.tar.zst';
+  expect(releaseKey(musl + 'latest.json')).toBe('desktop-releases/native/rust/linux/x64-musl/latest.json');
+  const portable = await desktopRelease(
+    new Request('https://example.com' + musl + archive, { headers: { Range: 'bytes=1-2' } }),
+    store,
+  );
+  expect(portable.status).toBe(206);
+  expect(await portable.text()).toBe('12');
+  expect(releaseKey(musl.replace('/rust/', '/') + archive)).toBeNull();
+  expect(releaseKey(musl + 'AgentSpace-Native-0.3.37-linux-x64.deb')).toBeNull();
 });
 it('does not expose private media keys or arbitrary paths', async () => {
   for (const path of [

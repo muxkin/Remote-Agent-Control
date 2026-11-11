@@ -33,6 +33,7 @@ export async function runAgentCallListener(
   handler: AgentCallHandler,
   signal: AbortSignal,
   onState?: (state: 'ready' | 'offline' | 'call-failed') => void,
+  lifecycle?: { canAnswer(): boolean; active(value: boolean): void },
 ) {
   const agentId = calls.messaging.account.user?.id;
   if (!agentId || handler.capabilities.audio !== true || typeof handler.onCall !== 'function')
@@ -157,13 +158,16 @@ export async function runAgentCallListener(
           await calls.ready(video, true, signal);
           advertised = Date.now();
         }
-        if (!active) {
+        if (!active && lifecycle?.canAnswer() !== false) {
           const { calls: pending } = await calls.list(signal);
           const call = pending.find((item) => item.state === 'ringing' && item.agentId === agentId);
-          if (call)
+          if (call && lifecycle?.canAnswer() !== false) {
+            lifecycle?.active(true);
             active = answer(call).finally(() => {
               active = undefined;
+              lifecycle?.active(false);
             });
+          }
         }
         if (!online) onState?.('ready');
         online = true;

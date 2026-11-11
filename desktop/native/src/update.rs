@@ -1,0 +1,1017 @@
+use crate::{
+    gateway::{Database, Snapshot},
+    migration::GatewayEnvironment,
+    state::{lock_directory, now, private_directory, private_file},
+    update_preferences::{Preferences, https_base},
+};
+use anyhow::{Context, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use reqwest::{Client as Http, ClientBuilder};
+use ring::signature::{ED25519, UnparsedPublicKey};
+use serde::Deserialize;
+use sha2::{Digest, Sha512};
+use std::{
+    env, fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{mpsc, oneshot, watch},
+    time::{interval, sleep_until},
+};
+use url::Url;
+use uuid::Uuid;
+
+const MAX_MANIFEST: usize = 16 * 1024;
+const MAX_PACKAGE: u64 = 512 * 1024 * 1024;
+const CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+const QUIET_PERIOD: Duration = Duration::from_secs(20);
+const KEY: &str = include_str!("../update-release.pub");
+const SPKI_HEADER: &[u8] = b"\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00";
+
+pub(crate) const APPLY_FLAG: &str = "--apply-native-update";
+
+pub(crate) enum UpdateCommand {
+    Check,
+    Install,
+    Configure(Preferences, oneshot::Sender<Result<()>>),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct Target {
+    platform: &'static str,
+    arch: &'static str,
+    suffix: &'static str,
+}
+
+fn target() -> Option<Target> {
+    let (platform, arch, suffix) = match (env::consts::OS, env::consts::ARCH) {
+        ("linux", "x86_64") if cfg!(target_env = "musl") => {
+            ("linux", "x64-musl", "linux-x64-musl-desktop.tar.zst")
+        }
+        ("linux", "x86_64") => ("linux", "x64", "linux-x64.deb"),
+        ("windows", "x86_64") => ("win32", "x64", "windows-x64-setup.exe"),
+        ("macos", "x86_64") => ("darwin", "x64", "macos-x64.dmg"),
+        ("macos", "aarch64") => ("darwin", "arm64", "macos-arm64.dmg"),
+        _ => return None,
+    };
+    Some(Target {
+        platform,
+        arch,
+        suffix,
+    })
+}
+
+#[derive(Deserialize)]
+struct Envelope {
+    payload: String,
+    signature: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct Release {
+    format: u32,
+    runtime: String,
+    version: String,
+    platform: String,
+    arch: String,
+    file: String,
+    size: u64,
+    sha512: String,
+    publisher: Option<String>,
+}
+
+fn version(text: &str) -> Option<[u32; 3]> {
+    let parts: [&str; 3] = text.split('.').collect::<Vec<_>>().try_into().ok()?;
+    let mut result = [0; 3];
+    for (number, part) in result.iter_mut().zip(parts) {
+        if part.len() > 6
+            || !part.bytes().all(|byte| byte.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0'))
+        {
+            return None;
+        }
+        *number = part.parse().ok()?;
+    }
+    Some(result)
+}
+
+fn verify_manifest(
+    data: &[u8],
+    key: &[u8],
+    current: &str,
+    target: Target,
+) -> Result<Option<Release>> {
+    ensure!(data.len() <= MAX_MANIFEST, "更新清单过大");
+    let document: Envelope = serde_json::from_slice(data)?;
+    let payload = STANDARD.decode(document.payload)?;
+    let signature = STANDARD.decode(document.signature)?;
+    UnparsedPublicKey::new(&ED25519, key)
+        .verify(&payload, &signature)
+        .map_err(|_| anyhow::anyhow!("更新清单签名无效"))?;
+    let release: Release = serde_json::from_slice(&payload)?;
+    let installed = version(current).context("当前版本无效")?;
+    let next = version(&release.version).context("更新版本无效")?;
+    ensure!(
+        release.format == 1
+            && release.runtime == "rust"
+            && release.platform == target.platform
+            && release.arch == target.arch
+            && release.file == format!("AgentSpace-Native-{}-{}", release.version, target.suffix)
+            && (1..=MAX_PACKAGE).contains(&release.size)
+            && release.sha512.len() == 128
+            && release
+                .sha512
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            && match release.publisher.as_deref() {
+                None => true,
+                Some("release-key") => target.platform != "linux",
+                _ => false,
+            },
+        "更新包不符合原生安装规范"
+    );
+    Ok((next > installed).then_some(release))
+}
+
+fn pinned_manifest(data: &[u8], target: Target) -> Result<Option<Release>> {
+    let der = STANDARD.decode(
+        KEY.lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect::<String>(),
+    )?;
+    let key = der
+        .strip_prefix(SPKI_HEADER)
+        .filter(|raw| raw.len() == 32)
+        .context("发布公钥无效")?;
+    verify_manifest(data, key, env!("CARGO_PKG_VERSION"), target)
+}
+
+struct Activity {
+    clients: usize,
+    quiet_since: Instant,
+    draining: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct UpdateGate(Arc<Mutex<Activity>>);
+
+impl Default for UpdateGate {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(Activity {
+            clients: 0,
+            quiet_since: Instant::now(),
+            draining: false,
+        })))
+    }
+}
+
+pub(crate) struct Client(UpdateGate);
+
+impl UpdateGate {
+    pub(crate) fn admit(&self) -> Option<Client> {
+        let mut activity = self.0.lock().expect("update activity poisoned");
+        if activity.draining {
+            return None;
+        }
+        activity.clients += 1;
+        Some(Client(self.clone()))
+    }
+
+    fn drain(&self, db: &Database) -> Result<bool> {
+        let mut activity = self.0.lock().expect("update activity poisoned");
+        if activity.draining
+            || activity.clients > 0
+            || activity.quiet_since.elapsed() < QUIET_PERIOD
+        {
+            return Ok(false);
+        }
+        let busy: bool = db.lock().expect("database poisoned").db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE state IN ('received','dispatching'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if !busy {
+            activity.draining = true;
+        }
+        Ok(!busy)
+    }
+
+    fn resume(&self) {
+        self.0.lock().expect("update activity poisoned").draining = false;
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        let mut activity = self.0.0.lock().expect("update activity poisoned");
+        activity.clients -= 1;
+        if activity.clients == 0 {
+            activity.quiet_since = Instant::now();
+        }
+    }
+}
+
+fn feed(origin: &Url, target: Target, base: Option<&str>) -> Result<Url> {
+    let mut result = https_base(match base {
+        Some(value) => Url::parse(value)?,
+        None => origin.join("/downloads/desktop/native/rust/")?,
+    })?;
+    result
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("更新地址无效"))?
+        .pop_if_empty()
+        .extend([target.platform, target.arch, ""]);
+    Ok(result)
+}
+
+struct Staged {
+    release: Release,
+    directory: StagingDirectory,
+}
+
+struct StagingDirectory(Option<PathBuf>);
+
+impl StagingDirectory {
+    fn new(parent: &Path) -> Result<Self> {
+        let path = parent.join(format!(".native-update-{}", Uuid::new_v4()));
+        private_directory(&path)?;
+        Ok(Self(Some(path)))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("active staging directory")
+    }
+
+    fn keep(mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn client_builder() -> ClientBuilder {
+    Http::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(900))
+}
+
+struct UpdateSource {
+    client: Http,
+    base: Url,
+    target: Target,
+}
+
+async fn stage(source: &UpdateSource, directory: &Path) -> Result<Option<Staged>> {
+    let UpdateSource {
+        client,
+        base,
+        target,
+    } = source;
+    let mut response = client
+        .get(base.join("latest.json")?)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await?;
+    ensure!(response.status().is_success(), "无法读取更新清单");
+    let mut manifest = Vec::new();
+    while let Some(part) = response.chunk().await? {
+        ensure!(manifest.len() + part.len() <= MAX_MANIFEST, "更新清单过大");
+        manifest.extend_from_slice(&part);
+    }
+    let Some(release) = pinned_manifest(&manifest, *target)? else {
+        return Ok(None);
+    };
+    if let Ok(mut old) = private_file(&directory.join("native-update-attempt.json"), false) {
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut old).take(4096).read_to_end(&mut bytes)?;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            ensure!(
+                value["version"] != release.version
+                    || value["time"].as_i64().is_none_or(
+                        |time| now().saturating_sub(time) >= CHECK_INTERVAL.as_millis() as i64
+                    ),
+                "上次安装未生效，将稍后重试"
+            );
+        }
+    }
+    let temporary = StagingDirectory::new(directory)?;
+    let manifest_file = temporary.path().join("latest.json");
+    private_file(&manifest_file, true)?.write_all(&manifest)?;
+    let path = temporary.path().join(&release.file);
+    let mut output = tokio::fs::File::from_std(private_file(&path, true)?);
+    let mut response = client.get(base.join(&release.file)?).send().await?;
+    ensure!(response.status().is_success(), "无法下载更新包");
+    if let Some(length) = response.content_length() {
+        ensure!(length == release.size, "更新包长度无效");
+    }
+    let mut size = 0;
+    let mut digest = Sha512::new();
+    while let Some(part) = response.chunk().await? {
+        size += part.len() as u64;
+        ensure!(size <= release.size, "更新包长度无效");
+        output.write_all(&part).await?;
+        digest.update(&part);
+    }
+    ensure!(
+        size == release.size && format!("{:x}", digest.finalize()) == release.sha512,
+        "更新包校验失败"
+    );
+    output.sync_all().await?;
+    Ok(Some(Staged {
+        release,
+        directory: temporary,
+    }))
+}
+
+fn detached(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0200 | 0x0000_0008);
+    }
+    command
+}
+
+fn handoff(staged: &Staged, executable: &Path, directory: &Path, headless: bool) -> Result<()> {
+    let helper = staged
+        .directory
+        .path()
+        .join(if cfg!(windows) { "apply.exe" } else { "apply" });
+    fs::copy(executable, &helper)?;
+    let mut command = detached(&helper);
+    command
+        .arg(APPLY_FLAG)
+        .arg(executable)
+        .arg(staged.directory.path())
+        .env("POCKET_NATIVE_STATE_DIR", directory)
+        .env_remove("POCKET_NATIVE_ENROLLMENT")
+        .env_remove("POCKET_RELAY_ENROLLMENT");
+    if headless {
+        command.arg("--headless");
+    }
+    command.spawn()?;
+    Ok(())
+}
+
+pub(crate) fn run(
+    origin: Url,
+    executable: PathBuf,
+    directory: PathBuf,
+    db: Database,
+    gate: UpdateGate,
+    commands: mpsc::Receiver<UpdateCommand>,
+    status: watch::Sender<Snapshot>,
+    environment: &GatewayEnvironment,
+    headless: bool,
+) -> impl Future<Output = ()> + use<> {
+    // Migrate the signed feed before the gateway can advertise that it is online.
+    let prepared = (|| {
+        let target = target()
+            .filter(|_| crate::update_install::installed(&executable))
+            .ok_or("此版本需要手动更新")?;
+        remove_expired_staging(&directory);
+        if env::var("POCKET_NATIVE_UPDATES").as_deref() == Ok("0") {
+            return Err("自动更新已通过环境变量关闭");
+        }
+        let preferences = Preferences::load(&directory, &origin, environment)
+            .map_err(|_| "无法读取更新设置，请检查状态目录及旧版配置")?;
+        Ok((target, preferences))
+    })();
+    async move {
+        let (target, preferences) = match prepared {
+            Ok(values) => values,
+            Err(message) => {
+                status.send_modify(|snapshot| snapshot.update = message.to_owned());
+                return;
+            }
+        };
+        let Ok(client) = client_builder().build() else {
+            status.send_modify(|snapshot| snapshot.update = "无法初始化更新连接".into());
+            return;
+        };
+        Updater {
+            origin,
+            client,
+            target,
+            executable,
+            directory,
+            db,
+            gate,
+            headless,
+        }
+        .run(preferences, commands, status)
+        .await;
+    }
+}
+
+struct Updater {
+    origin: Url,
+    client: Http,
+    target: Target,
+    executable: PathBuf,
+    directory: PathBuf,
+    db: Database,
+    gate: UpdateGate,
+    headless: bool,
+}
+
+impl Updater {
+    async fn run(
+        self,
+        mut preferences: Preferences,
+        mut commands: mpsc::Receiver<UpdateCommand>,
+        status: watch::Sender<Snapshot>,
+    ) {
+        let manual = crate::update_install::requires_authorization(&self.executable);
+        let mut check_at = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut download = None;
+        let mut staged = None;
+        let mut requested = false;
+        let mut apply = interval(Duration::from_secs(15));
+        let start_download = |preferences: &Preferences| {
+            let base = feed(&self.origin, self.target, preferences.base.as_deref());
+            let client = self.client.clone();
+            let target = self.target;
+            let directory = self.directory.as_path();
+            status.send_modify(|snapshot| {
+                snapshot.update = "正在检查或下载更新".into();
+                snapshot.update_checking = true;
+            });
+            Box::pin(async move {
+                stage(
+                    &UpdateSource {
+                        client,
+                        target,
+                        base: base?,
+                    },
+                    directory,
+                )
+                .await
+            })
+        };
+        status.send_modify(|snapshot| set_preferences(snapshot, &preferences));
+        loop {
+            tokio::select! {
+                biased;
+                command = commands.recv() => match command {
+                    None => return,
+                    Some(UpdateCommand::Check)
+                        if download.is_none() && staged.is_none() =>
+                    {
+                        download = Some(start_download(&preferences));
+                    }
+                    Some(UpdateCommand::Configure(next, response)) => {
+                        let result = next.save(&self.directory).context("无法保存更新设置");
+                        if result.is_ok() && next != preferences {
+                            drop(download.take());
+                            drop(staged.take());
+                            requested = false;
+                            preferences = next;
+                            check_at = tokio::time::Instant::now();
+                            status.send_modify(|snapshot| set_preferences(snapshot, &preferences));
+                        }
+                        let _ = response.send(result);
+                    }
+                    Some(UpdateCommand::Install) if staged.is_some() && (manual || !preferences.auto_update) => {
+                        requested = true;
+                        apply.reset_immediately();
+                        status.send_modify(|snapshot| {
+                            snapshot.update = if manual { "等待连接空闲后请求系统安装授权" } else { "等待连接空闲后安装" }.into();
+                            snapshot.manual_update = false;
+                        });
+                    }
+                    Some(_) => {}
+                },
+                result = async { download.as_mut().expect("active update check").await },
+                    if download.is_some() =>
+                {
+                    download = None;
+                    check_at = tokio::time::Instant::now() + CHECK_INTERVAL;
+                    let message = match result {
+                        Ok(Some(package)) => {
+                            let message = format!(
+                                "已下载 v{}，{}",
+                                package.release.version,
+                                if manual { "安装需要系统授权" } else if !preferences.auto_update { "可手动安装" } else { "等待连接空闲后安装" }
+                            );
+                            staged = Some(package);
+                            apply.reset_immediately();
+                            message
+                        }
+                        Ok(None) => "已是最新版本".into(),
+                        Err(_error) => {
+                            #[cfg(test)]
+                            eprintln!("Signed-update fixture download failed: {_error:#}");
+                            if preferences.auto_update { "检查或下载更新失败，将在后台重试" } else { "检查或下载更新失败，请重试" }.into()
+                        }
+                    };
+                    status.send_modify(|snapshot| {
+                        snapshot.update = message;
+                        snapshot.update_checking = false;
+                        snapshot.manual_update = staged.is_some() && (manual || !preferences.auto_update);
+                    });
+                }
+                _ = sleep_until(check_at), if preferences.auto_update && download.is_none() && staged.is_none() => {
+                    download = Some(start_download(&preferences));
+                }
+                _ = apply.tick(), if staged.is_some() && ((!manual && preferences.auto_update) || requested) => {
+                    if !self.gate.drain(&self.db).unwrap_or(false) {
+                        continue;
+                    }
+                    let package = staged.as_ref().expect("downloaded update");
+                    match handoff(package, &self.executable, &self.directory, self.headless) {
+                        Ok(()) => {
+                            staged.take().expect("downloaded update").directory.keep();
+                            status.send_modify(|snapshot| snapshot.exit_for_update = true);
+                            return;
+                        }
+                        Err(_) => {
+                            self.gate.resume();
+                            status.send_modify(|snapshot| {
+                                snapshot.update = "安装未启动，将在后台重试".into();
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn set_preferences(snapshot: &mut Snapshot, preferences: &Preferences) {
+    snapshot.update_preferences = Some(preferences.clone());
+    snapshot.update_checking = false;
+    snapshot.manual_update = false;
+    snapshot.update = if preferences.auto_update {
+        "自动更新已启用，等待检查"
+    } else {
+        "自动更新已关闭"
+    }
+    .into();
+}
+
+fn remove_expired_staging(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .ok()
+            .filter(|metadata| metadata.is_dir())
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(48 * 60 * 60));
+        if old
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".native-update-"))
+        {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+pub(crate) fn apply(
+    executable: &Path,
+    stage: &Path,
+    directory: &Path,
+    headless: bool,
+) -> Result<()> {
+    ensure!(crate::update_install::installed(executable), "安装位置无效");
+    let directory = directory.canonicalize()?;
+    let stage = stage.canonicalize()?;
+    ensure!(
+        stage.parent() == Some(directory.as_path())
+            && stage
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".native-update-")),
+        "更新暂存目录无效"
+    );
+    private_directory(&stage)?;
+    let lock = (0..120)
+        .find_map(|_| match lock_directory(&directory) {
+            Ok(lock) => Some(lock),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(250));
+                None
+            }
+        })
+        .context("等待适配器安全退出超时")?;
+    let result = (|| {
+        let mut data = Vec::new();
+        private_file(&stage.join("latest.json"), false)?
+            .take((MAX_MANIFEST + 1) as u64)
+            .read_to_end(&mut data)?;
+        let release = pinned_manifest(&data, target().context("更新平台不支持")?)?
+            .context("更新版本已过期")?;
+        let artifact = stage.join(&release.file);
+        let mut file = private_file(&artifact, false)?;
+        let mut hash = Sha512::new();
+        let size = std::io::copy(
+            &mut Read::by_ref(&mut file).take(release.size + 1),
+            &mut hash,
+        )?;
+        ensure!(
+            size == release.size && format!("{:x}", hash.finalize()) == release.sha512,
+            "更新包校验失败"
+        );
+        drop(file);
+        let record = directory.join(format!(".native-update-attempt-{}.part", Uuid::new_v4()));
+        let temporary = tempfile::TempPath::try_from_path(&record)?;
+        let mut attempt = private_file(&record, true)?;
+        serde_json::to_writer(
+            &mut attempt,
+            &serde_json::json!({"version":release.version,"time":now()}),
+        )?;
+        attempt.sync_all()?;
+        drop(attempt);
+        temporary.persist(directory.join("native-update-attempt.json"))?;
+        crate::update_install::replace(
+            executable,
+            &artifact,
+            &stage,
+            release.publisher.as_deref() == Some("release-key"),
+        )
+    })();
+    drop(lock);
+    let relaunched = crate::update_install::restart(executable, &directory, headless);
+    // Windows keeps the running helper executable mapped. Remove what can be deleted.
+    let _ = fs::remove_dir_all(stage);
+    result.and(relaunched)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+    use serde_json::{Value, json};
+    use tokio::time::sleep;
+
+    const LINUX: Target = Target {
+        platform: "linux",
+        arch: "x64",
+        suffix: "linux-x64.deb",
+    };
+
+    fn sign(key: &Ed25519KeyPair, value: &Value) -> Vec<u8> {
+        let payload = serde_json::to_vec(value).unwrap();
+        serde_json::to_vec(&json!({
+            "payload": STANDARD.encode(&payload),
+            "signature": STANDARD.encode(key.sign(&payload)),
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed fixture and the isolated HTTPS release server"]
+    async fn installed_release_smoke() -> Result<()> {
+        crate::install_tls()?;
+        let target = target().context("更新平台不支持")?;
+        let origin = Url::parse(&env::var("POCKET_QA_UPDATE_ORIGIN")?)?;
+        let directory =
+            PathBuf::from(env::var_os("POCKET_QA_UPDATE_STATE").context("missing state")?);
+        let executable =
+            PathBuf::from(env::var_os("POCKET_QA_UPDATE_EXE").context("missing installer path")?);
+        let expected = env::var("POCKET_QA_UPDATE_SHA512")?;
+        let release_version = env::var("POCKET_QA_UPDATE_VERSION")?;
+        ensure!(
+            env!("CARGO_PKG_VERSION") == "0.0.0",
+            "需要隔离的旧版测试构建"
+        );
+        ensure!(
+            crate::update_install::installed(&executable),
+            "测试适配器安装位置无效"
+        );
+        let manual = crate::update_install::requires_authorization(&executable);
+        let root = env::var_os("POCKET_QA_UPDATE_CA").context("missing fixture CA")?;
+        let certificate = reqwest::Certificate::from_pem(&fs::read(root)?)?;
+        let source = |name: &str, trust_fixture: bool| -> Result<UpdateSource> {
+            let base = if name == "good" {
+                feed(&origin, target, None)?
+            } else {
+                origin.join(&format!("{name}/{}/{}/", target.platform, target.arch))?
+            };
+            let mut builder = client_builder().no_proxy();
+            if trust_fixture {
+                builder = builder.add_root_certificate(certificate.clone());
+            }
+            Ok(UpdateSource {
+                client: builder.build()?,
+                base,
+                target,
+            })
+        };
+        let mut store = crate::state::Store::open(&directory)?;
+        let pairing = store.mint_pairing(None)?;
+        let peer = libp2p_identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        store.pair(
+            &crate::state::hash(&pairing.code),
+            "Existing paired fixture",
+            peer,
+        )?;
+        let device = store.device(peer)?.context("测试配对未完成")?;
+        let identity = fs::read(directory.join("device-identity-v2.json"))?;
+        let config = directory.join("instances.json");
+        private_file(&config, true)?.write_all(b"[]")?;
+        for (name, trust_fixture) in [
+            ("good", false),
+            ("foreign", true),
+            ("corrupt", true),
+            ("redirect", true),
+        ] {
+            ensure!(
+                stage(&source(name, trust_fixture)?, &directory)
+                    .await
+                    .is_err(),
+                "更新接受了无效的测试来源 {name}"
+            );
+        }
+        ensure!(
+            !fs::read_dir(&directory)?.flatten().any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".native-update-")),
+            "失败的更新保留了不可信暂存文件"
+        );
+        let before = Sha512::digest(fs::read(&executable)?);
+        let gate = UpdateGate::default();
+        let active = gate.admit().context("测试连接未接入")?;
+        let db = Arc::new(Mutex::new(store));
+        let (requests, commands) = mpsc::channel(8);
+        let (status, mut updates) = watch::channel(Snapshot::default());
+        let updater = Updater {
+            origin: origin.clone(),
+            client: source("good", true)?.client,
+            target,
+            executable: executable.clone(),
+            directory: directory.clone(),
+            db: db.clone(),
+            gate,
+            headless: false,
+        };
+        let settings = |enabled, path: &str| Preferences::new(enabled, origin.join(path)?.as_str());
+        let configure = |preferences| {
+            let requests = requests.clone();
+            async move {
+                let (reply, saved) = oneshot::channel();
+                requests
+                    .send(UpdateCommand::Configure(preferences, reply))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+                saved.await?
+            }
+        };
+        let work = tokio::spawn(updater.run(settings(true, "partial/")?, commands, status));
+        requests
+            .send(UpdateCommand::Check)
+            .await
+            .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+        let partial = tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                if let Some(path) = fs::read_dir(&directory)?.flatten().find_map(|entry| {
+                    let path = entry.path();
+                    if !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".native-update-")
+                    {
+                        return None;
+                    }
+                    let entries = fs::read_dir(&path).ok()?;
+                    entries
+                        .flatten()
+                        .any(|file| {
+                            file.file_name()
+                                .to_string_lossy()
+                                .starts_with("AgentSpace-Native-")
+                                && fs::File::open(file.path())
+                                    .and_then(|mut file| file.read_exact(&mut [0_u8]))
+                                    .is_ok()
+                        })
+                        .then_some(path)
+                }) {
+                    return Ok::<_, std::io::Error>(path);
+                }
+                sleep(Duration::from_millis(40)).await;
+            }
+        })
+        .await
+        .with_context(|| format!("旧源未开始下载，状态为 {}", updates.borrow().update))??;
+        configure(settings(true, "abandoned/")?).await?;
+        tokio::time::timeout(
+            Duration::from_secs(35),
+            updates.wait_for(|snapshot| snapshot.update.starts_with("已下载")),
+        )
+        .await??;
+        ensure!(!partial.exists(), "改源后保留了旧源未完成的下载");
+        if manual {
+            requests
+                .send(UpdateCommand::Install)
+                .await
+                .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+        }
+        configure(settings(false, "abandoned/")?).await?;
+        ensure!(
+            !updates.borrow().manual_update && !updates.borrow().update_checking,
+            "关闭更新后仍可安装旧源已下载的包"
+        );
+        ensure!(
+            !fs::read_dir(&directory)?.flatten().any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".native-update-")),
+            "关闭更新后保留了下载包"
+        );
+        requests
+            .send(UpdateCommand::Check)
+            .await
+            .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+        configure(Preferences::default()).await?;
+        tokio::time::timeout(
+            Duration::from_secs(50),
+            updates.wait_for(|snapshot| snapshot.update.starts_with("已下载")),
+        )
+        .await??;
+        ensure!(
+            updates.borrow().manual_update == manual,
+            "安装授权模式与平台不符"
+        );
+        if manual {
+            requests
+                .send(UpdateCommand::Install)
+                .await
+                .map_err(|_| anyhow::anyhow!("测试更新器已退出"))?;
+        }
+        // Hold the client through the next installation check after downloading.
+        sleep(Duration::from_secs(17)).await;
+        ensure!(!updates.borrow().exit_for_update, "更新中断了活动连接");
+        ensure!(
+            Sha512::digest(fs::read(&executable)?) == before,
+            "活动连接期间安装了更新"
+        );
+        drop(active);
+        tokio::time::timeout(
+            Duration::from_secs(55),
+            updates.wait_for(|snapshot| snapshot.exit_for_update),
+        )
+        .await??;
+        work.await?;
+        // The copied installer helper must wait for the process-wide state lock.
+        ensure!(
+            Sha512::digest(fs::read(&executable)?) == before,
+            "助手未等待旧版退出"
+        );
+        drop(db);
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                if fs::read(&executable)
+                    .ok()
+                    .is_some_and(|bytes| format!("{:x}", Sha512::digest(bytes)) == expected)
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(300)).await;
+            }
+        })
+        .await
+        .context("系统安装器没有替换可执行文件")?;
+        let management = directory.join("management.json");
+        let port = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(port) = fs::read(&management)
+                    .ok()
+                    .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
+                    .and_then(|instance| instance["port"].as_u64())
+                {
+                    return port;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("更新后未启动本机设置服务")?;
+        let page = reqwest::Client::builder()
+            .no_proxy()
+            .build()?
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        ensure!(page.contains("Agent 空间适配器"), "更新后设置页不可用");
+        let record: Value = serde_json::from_reader(private_file(
+            &directory.join("native-update-attempt.json"),
+            false,
+        )?)?;
+        ensure!(record["version"] == release_version, "更新尝试记录无效");
+        ensure!(
+            fs::read(directory.join("device-identity-v2.json"))? == identity,
+            "更新改变了主机身份"
+        );
+        ensure!(fs::read(config)? == b"[]", "更新改变了插件配置");
+        let check = rusqlite::Connection::open_with_flags(
+            directory.join("state.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let ticket: String = check.query_row(
+            "SELECT route_ticket FROM device_keys WHERE peer_id=?1 AND device_id=?2",
+            rusqlite::params![peer.to_string(), device.id],
+            |row| row.get(0),
+        )?;
+        ensure!(ticket == device.ticket, "更新改变了配对数据");
+        println!(
+            "Signed HTTPS update installed on {}/{} and preserved paired state",
+            target.platform, target.arch
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blocks_new_clients_while_draining_and_waits_for_in_flight_operations() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("state");
+        let db = Arc::new(Mutex::new(crate::state::Store::open(&directory).unwrap()));
+        let gate = UpdateGate::default();
+        let age = || gate.0.lock().unwrap().quiet_since = Instant::now() - QUIET_PERIOD;
+        age();
+        let client = gate.admit().unwrap();
+        assert!(!gate.drain(&db).unwrap());
+        drop(client);
+        assert!(!gate.drain(&db).unwrap());
+        age();
+        db.lock()
+            .unwrap()
+            .db
+            .execute(
+                "INSERT INTO operations
+             (id,device_id,thread_id,kind,fingerprint,state,created,updated)
+             VALUES ('id','device','thread','send','hash','dispatching',0,0)",
+                [],
+            )
+            .unwrap();
+        assert!(!gate.drain(&db).unwrap());
+        db.lock()
+            .unwrap()
+            .db
+            .execute("UPDATE operations SET state='accepted'", [])
+            .unwrap();
+        assert!(gate.drain(&db).unwrap());
+        assert!(gate.admit().is_none());
+        gate.resume();
+        assert!(gate.admit().is_some());
+    }
+
+    #[test]
+    fn accepts_only_newer_rust_builds_for_the_installed_platform() {
+        let rng = SystemRandom::new();
+        let document = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap();
+        let raw = key.public_key().as_ref();
+        let mut metadata = json!({
+            "format":1,"runtime":"rust","version":"0.3.1","platform":"linux","arch":"x64",
+            "file":"AgentSpace-Native-0.3.1-linux-x64.deb","size":5,"sha512":"f".repeat(128)
+        });
+        assert!(
+            verify_manifest(&sign(&key, &metadata), raw, "0.3.0", LINUX)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            verify_manifest(&sign(&key, &metadata), raw, "0.3.1", LINUX)
+                .unwrap()
+                .is_none()
+        );
+        assert!(verify_manifest(&sign(&key, &metadata), &[0; 32], "0.3.0", LINUX).is_err());
+        metadata.as_object_mut().unwrap().remove("runtime");
+        assert!(verify_manifest(&sign(&key, &metadata), raw, "0.3.0", LINUX).is_err());
+        metadata["runtime"] = json!("rust");
+        metadata["file"] = json!("../AgentSpace-Native-0.3.1-linux-x64.deb");
+        assert!(verify_manifest(&sign(&key, &metadata), raw, "0.3.0", LINUX).is_err());
+    }
+}

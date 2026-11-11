@@ -1,3 +1,4 @@
+#[cfg(feature = "official-plugins")]
 use crate::{
     app_tools::{self, AppTools, Tool},
     codex::History,
@@ -5,8 +6,11 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "official-plugins")]
 use serde_json::json;
+#[cfg(feature = "official-plugins")]
 use std::{sync::Arc, time::Duration};
+#[cfg(feature = "official-plugins")]
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -22,7 +26,7 @@ pub struct Request {
     last_turn_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub enum Change {
     Open,
     Rename(String),
@@ -119,6 +123,7 @@ impl Change {
         }
     }
 
+    #[cfg(feature = "official-plugins")]
     pub async fn execute(
         self,
         desktop: Desktop,
@@ -136,7 +141,7 @@ impl Change {
         };
         if matches!(self, Self::Open) {
             let Some(live) = &live else {
-                return Outcome::Rejected("请先在工作台选择会话");
+                return Outcome::Rejected("请先在工作台选择会话".into());
             };
             if ready(&live.view.borrow()) {
                 return Outcome::Completed(None);
@@ -149,13 +154,13 @@ impl Change {
             .ok()
             .and_then(Result::ok);
         let Some(anchor) = anchor else {
-            return Outcome::Rejected("找不到本机会话");
+            return Outcome::Rejected("找不到本机会话".into());
         };
         let tools = desktop.tools;
         let (tool, arguments) = match self {
             Self::ForkReply(turn) => {
                 if !live.is_some_and(|live| live.has_reply(&turn)) {
-                    return Outcome::Rejected("所选回复不在实时会话中，请刷新后重试");
+                    return Outcome::Rejected("所选回复不在实时会话中，请刷新后重试".into());
                 }
                 return desktop
                     .reply_fork
@@ -197,7 +202,9 @@ impl Change {
                             })
                     });
                     if !valid {
-                        return Outcome::Rejected("模型或推理强度不在桌面目录中，请重新选择");
+                        return Outcome::Rejected(
+                            "模型或推理强度不在桌面目录中，请重新选择".into(),
+                        );
                     }
                 }
                 let mut args = json!({"prompt":prompt,"target":{"type":"projectless"}});
@@ -208,13 +215,13 @@ impl Change {
                 }
                 if let Some(id) = project_id {
                     let Ok(projects) = projects(&tools, history, &anchor).await else {
-                        return Outcome::Rejected("无法读取桌面项目，请重新选择");
+                        return Outcome::Rejected("无法读取桌面项目，请重新选择".into());
                     };
                     let Some(project) = projects
                         .iter()
                         .find(|project| project.id == id || project.desktop_id == id)
                     else {
-                        return Outcome::Rejected("所选桌面项目已不可用");
+                        return Outcome::Rejected("所选桌面项目已不可用".into());
                     };
                     args["target"] = json!({"type":"project","projectId":project.desktop_id,"environment":{"type":"local"}});
                 }
@@ -222,7 +229,7 @@ impl Change {
             }
         };
         let Ok(mut stream) = tools.connect(tool).await else {
-            return Outcome::Rejected("Codex 桌面未提供此操作");
+            return Outcome::Rejected("Codex 桌面未提供此操作".into());
         };
         let reply = app_tools::call(&mut stream, &anchor, request, tool, arguments).await;
         if matches!(tool, Tool::Open) {
@@ -254,6 +261,7 @@ impl Change {
     }
 }
 
+#[cfg(feature = "official-plugins")]
 #[derive(Serialize)]
 pub struct Project {
     id: String,
@@ -262,6 +270,7 @@ pub struct Project {
     desktop_id: String,
 }
 
+#[cfg(feature = "official-plugins")]
 pub async fn projects(tools: &AppTools, history: History, anchor: &str) -> Result<Vec<Project>> {
     let mut stream = tools.connect(Tool::Projects).await?;
     let result = timeout(

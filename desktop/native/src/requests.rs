@@ -1,16 +1,27 @@
+#[cfg(feature = "official-plugins")]
 use crate::{
     codex_live::{View, native_text, ordered},
     state::hash,
 };
-use anyhow::{Context, Result, bail, ensure};
+#[cfg(feature = "official-plugins")]
+use anyhow::{Context, bail};
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashSet};
+#[cfg(feature = "official-plugins")]
+use serde_json::json;
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+#[cfg(feature = "official-plugins")]
+use std::collections::HashSet;
+#[cfg(feature = "official-plugins")]
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(feature = "official-plugins")]
 const DECISIONS: &[&str] = &["accept", "acceptForSession", "decline", "cancel"];
+#[cfg(feature = "official-plugins")]
 const PREFIX: &str = "<send_user_message_question_reply>\n";
+#[cfg(feature = "official-plugins")]
 const SUFFIX: &str = "\n</send_user_message_question_reply>";
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -31,6 +42,49 @@ pub struct Response {
 }
 
 impl Response {
+    #[cfg(feature = "official-plugins")]
+    pub(crate) fn dsh_value(&self, shown: &Value) -> Result<Value> {
+        ensure!(
+            shown["id"] == self.target_request_id
+                && shown["turnId"] == self.expected_turn_id
+                && shown["fingerprint"] == self.expected_fingerprint
+                && shown["actionable"] == true,
+            "DSH 请求已处理或内容已变化"
+        );
+        if shown["kind"] == "command" {
+            return Ok(json!(match self.decision.as_deref() {
+                Some("accept") => "allowed-once",
+                Some("decline") => "rejected",
+                Some("cancel") => "cancelled",
+                _ => bail!("不支持此 DSH 审批选项"),
+            }));
+        }
+        ensure!(
+            matches!(shown["kind"].as_str(), Some("question" | "async-question")),
+            "DSH 问题不可用"
+        );
+        let answers = self.checked_answers(shown)?;
+        let questions = shown["questions"].as_array().context("DSH 问题不可用")?;
+        let mut rows = Vec::with_capacity(answers.len());
+        for ((id, values), question) in answers.into_iter().zip(questions) {
+            ensure!(
+                question["multiSelect"] == true || values.len() == 1,
+                "此问题只接受一项回答"
+            );
+            let options = question["options"].as_array().context("DSH 问题选项无效")?;
+            let (selected, custom): (Vec<_>, Vec<_>) = values.iter().partition(|value| {
+                options
+                    .iter()
+                    .any(|option| option["label"].as_str() == Some(value.as_str()))
+            });
+            rows.push(json!({
+                "id":id, "selected":selected,
+                "custom":custom.into_iter().map(String::as_str).collect::<Vec<_>>().join("\n")
+            }));
+        }
+        Ok(json!({"answers":rows}))
+    }
+
     pub fn validate(&self) -> Result<()> {
         let forms = [
             self.decision.is_some(),
@@ -71,6 +125,7 @@ impl Response {
         Ok(())
     }
 
+    #[cfg(feature = "official-plugins")]
     pub fn native(&self, id: Uuid, view: &View) -> Result<(&'static str, u32, Value)> {
         let shown = view.thread["requests"]
             .as_array()
@@ -223,6 +278,7 @@ impl Response {
         Ok((method, 1, body))
     }
 
+    #[cfg(feature = "official-plugins")]
     fn follow_up(&self, id: Uuid, text: &str, mode: Option<Value>) -> (&'static str, u32, Value) {
         let mut request =
             json!({"threadId":id,"input":text_input(text),"clientUserMessageId":self.request_id});
@@ -238,6 +294,7 @@ impl Response {
         )
     }
 
+    #[cfg(feature = "official-plugins")]
     fn checked_answers<'a>(&'a self, shown: &'a Value) -> Result<Vec<(&'a str, &'a Vec<String>)>> {
         let questions = shown["questions"].as_array().context("问题已过期")?;
         let answers = self.answers.as_ref().context("缺少回答")?;
@@ -260,6 +317,7 @@ impl Response {
             .collect()
     }
 
+    #[cfg(feature = "official-plugins")]
     fn async_reply(&self, shown: &Value) -> Result<String> {
         let answers = self.checked_answers(shown)?;
         ensure!(
@@ -273,6 +331,7 @@ impl Response {
     }
 }
 
+#[cfg(feature = "official-plugins")]
 fn text_input(text: &str) -> Value {
     json!([{"type":"text","text":text,"text_elements":[]}])
 }
@@ -281,6 +340,7 @@ fn bounded(text: &str, limit: usize) -> bool {
     !text.is_empty() && text.encode_utf16().count() <= limit
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn pending(state: &Value) -> Vec<Value> {
     let rows = &state["requests"];
     let values: Vec<_> = match rows {
@@ -297,6 +357,7 @@ pub fn pending(state: &Value) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(feature = "official-plugins")]
 pub(crate) fn request_id(request: &Value) -> Option<String> {
     match &request["id"] {
         Value::String(id) if bounded(id, 500) => Some(id.clone()),
@@ -305,6 +366,7 @@ pub(crate) fn request_id(request: &Value) -> Option<String> {
     }
 }
 
+#[cfg(feature = "official-plugins")]
 struct Permission {
     id: String,
     key: &'static str,
@@ -313,6 +375,7 @@ struct Permission {
     value: Value,
 }
 
+#[cfg(feature = "official-plugins")]
 fn permission_options(permissions: &Value) -> Vec<Permission> {
     let mut choices = Vec::new();
     for key in ["network", "fileSystem"] {
@@ -356,6 +419,7 @@ fn permission_options(permissions: &Value) -> Vec<Permission> {
     choices
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn normalize(request: &Value, items: &[&Value]) -> Value {
     let p = &request["params"];
     let item = items
@@ -530,6 +594,7 @@ pub fn normalize(request: &Value, items: &[&Value]) -> Value {
     Value::Object(options)
 }
 
+#[cfg(feature = "official-plugins")]
 fn replies(raw: &str) -> Vec<Value> {
     let Some(body) = raw
         .trim()
@@ -545,6 +610,7 @@ fn replies(raw: &str) -> Vec<Value> {
     }
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn display_reply(text: String) -> String {
     let rows = replies(&text);
     if rows.is_empty() {
@@ -563,6 +629,7 @@ pub fn display_reply(text: String) -> String {
     }
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn asynchronous(turns: &[&Value]) -> Vec<Value> {
     let mut pending = BTreeMap::new();
     let mut answered = HashSet::new();

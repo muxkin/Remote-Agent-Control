@@ -1,7 +1,9 @@
 use crate::{
     files::BLOCK,
     gateway::Database,
-    state::{now, private_file},
+    history_media::legacy_upload_receipt,
+    migration::GatewayEnvironment,
+    state::{legacy_private_file, now, private_file},
 };
 use anyhow::{Context, Result, ensure};
 use base64::{
@@ -21,25 +23,47 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 use url::Url;
 use uuid::Uuid;
 
+mod discovery;
+mod import;
+mod plugin;
+mod receipts;
+use discovery::Endpoints;
+use plugin::NativeStorage;
+pub(crate) use receipts::initialize as initialize_receipts;
+
+const GRANT_TTL_MS: i64 = 900_000;
+const OBJECT_TTL_MS: i64 = 86_400_000;
+
 #[derive(Clone)]
 pub struct Storage {
-    inner: Arc<Qiniu>,
+    inner: Arc<Transport>,
+}
+
+struct Transport {
+    http: Client,
+    provider: Provider,
+    prefix: String,
+    batch: usize,
+    jobs: Semaphore,
+}
+
+enum Provider {
+    Qiniu(Qiniu),
+    Plugin(NativeStorage),
 }
 
 struct Qiniu {
     http: Client,
-    upload: Url,
+    upload_override: Option<Url>,
+    endpoints: OnceCell<Endpoints>,
     download: Url,
     access_key: String,
     secret: hmac::Key,
     bucket: String,
-    prefix: String,
-    batch: usize,
-    jobs: Semaphore,
 }
 
 pub struct Transports {
@@ -48,7 +72,7 @@ pub struct Transports {
 }
 
 impl Transports {
-    pub fn load(directory: &Path) -> Result<Self> {
+    pub fn load(directory: &Path, relay: &Url, environment: &GatewayEnvironment) -> Result<Self> {
         let file = directory.join("transport.env");
         let profile = if file.exists() {
             dotenvy::Iter::new(private_file(&file, false)?)
@@ -62,27 +86,17 @@ impl Transports {
                 .ok()
                 .or_else(|| profile.get(name).cloned())
         };
-        let mut legacy = HashMap::new();
-        if let Some(path) = explicit("POCKET_NATIVE_STORAGE_ENV_FILE") {
-            let path = PathBuf::from(path);
-            ensure!(path.is_absolute(), "对象存储配置文件必须是绝对路径");
-            let file = private_file(&path, false)?;
-            for entry in dotenvy::Iter::new(file) {
-                let (key, value) = entry.map_err(|_| anyhow::anyhow!("既有传输配置格式无效"))?;
-                if matches!(
-                    key.as_str(),
-                    "POCKET_MEDIA_ORIGIN"
-                        | "POCKET_MEDIA_BUCKET"
-                        | "POCKET_MEDIA_PREFIX"
-                        | "POCKET_QINIU_ACCESS_KEY"
-                        | "POCKET_QINIU_SECRET_KEY"
-                        | "POCKET_P2P"
-                        | "POCKET_STUN_URLS"
-                ) {
-                    legacy.insert(key, value);
-                }
+        let legacy = match explicit("POCKET_NATIVE_STORAGE_ENV_FILE") {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                ensure!(path.is_absolute(), "对象存储配置文件必须是绝对路径");
+                transport_settings(legacy_private_file(&path)?, true)?
             }
-        }
+            None if environment.is_external() => {
+                filter_transport(environment.values.clone(), false)
+            }
+            None => migrated_transport_settings(directory, crate::migration::source())?,
+        };
         let get = |name: &str| explicit(name).or_else(|| legacy.get(name).cloned());
         let direct = if get("POCKET_NATIVE_P2P")
             .or_else(|| get("POCKET_P2P"))
@@ -107,21 +121,104 @@ impl Transports {
             );
             Some(crate::direct::Direct::new(urls))
         };
-        let storage = explicit("POCKET_NATIVE_QINIU_UPLOAD_URL")
-            .map(|upload| Storage::new(upload, &get))
-            .transpose()?;
+        let upload = get("POCKET_NATIVE_QINIU_UPLOAD_URL").filter(|value| !value.is_empty());
+        let storage = if let Some(key) = explicit("POCKET_NATIVE_STORAGE_PLUGIN") {
+            let config = explicit("POCKET_NATIVE_STORAGE_PLUGIN_CONFIG").map(PathBuf::from);
+            let plugin = NativeStorage::load(directory, relay, &key, config.as_deref())?;
+            Some(Storage::new(Provider::Plugin(plugin), &get)?)
+        } else if upload.is_some()
+            || [
+                "POCKET_MEDIA_ORIGIN",
+                "POCKET_MEDIA_BUCKET",
+                "POCKET_QINIU_ACCESS_KEY",
+                "POCKET_QINIU_SECRET_KEY",
+            ]
+            .iter()
+            .all(|key| get(key).is_some_and(|value| !value.is_empty()))
+        {
+            Some(Storage::qiniu(upload, &get)?)
+        } else {
+            None
+        };
         Ok(Self { direct, storage })
     }
 }
 
+fn migrated_transport_settings(
+    directory: &Path,
+    source: Option<&Path>,
+) -> Result<HashMap<String, String>> {
+    let Some(source) = source else {
+        return Ok(HashMap::new());
+    };
+    let config = directory.join("gateway.env");
+    let config = if config.try_exists()? {
+        config
+    } else {
+        source.join("gateway.env")
+    };
+    match legacy_private_file(&config) {
+        Ok(file) => transport_settings(file, false),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(HashMap::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn transport_settings(file: std::fs::File, explicit: bool) -> Result<HashMap<String, String>> {
+    let settings = dotenvy::Iter::new(file)
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|_| anyhow::anyhow!("既有传输配置格式无效"))?;
+    Ok(filter_transport(settings, explicit))
+}
+
+fn filter_transport(
+    mut settings: HashMap<String, String>,
+    explicit: bool,
+) -> HashMap<String, String> {
+    settings.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "POCKET_MEDIA_ADAPTER"
+                | "POCKET_MEDIA_ORIGIN"
+                | "POCKET_MEDIA_BUCKET"
+                | "POCKET_MEDIA_PREFIX"
+                | "POCKET_QINIU_ACCESS_KEY"
+                | "POCKET_QINIU_SECRET_KEY"
+                | "POCKET_NATIVE_QINIU_UPLOAD_URL"
+                | "POCKET_NATIVE_STORAGE_BATCH_MIB"
+                | "POCKET_NATIVE_P2P"
+                | "POCKET_P2P"
+                | "POCKET_STUN_URLS"
+        )
+    });
+    let used_media = settings
+        .remove("POCKET_MEDIA_ADAPTER")
+        .is_some_and(|value| !value.is_empty());
+    if !explicit && !used_media {
+        settings.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "POCKET_NATIVE_P2P" | "POCKET_P2P" | "POCKET_STUN_URLS"
+            )
+        });
+    }
+    settings
+}
+
 impl Storage {
-    fn new(upload: String, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
+    fn qiniu(upload: Option<String>, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
         let required = |name| {
             get(name)
                 .filter(|value| !value.is_empty())
                 .with_context(|| format!("缺少对象存储配置 {name}"))
         };
-        let upload = origin(&upload)?;
+        let upload_override = upload.as_deref().map(origin).transpose()?;
         let download = origin(&required("POCKET_MEDIA_ORIGIN")?)?;
         let access_key = required("POCKET_QINIU_ACCESS_KEY")?;
         let secret = hmac::Key::new(
@@ -129,6 +226,21 @@ impl Storage {
             required("POCKET_QINIU_SECRET_KEY")?.as_bytes(),
         );
         let bucket = required("POCKET_MEDIA_BUCKET")?;
+        Self::new(
+            Provider::Qiniu(Qiniu {
+                http: storage_client()?,
+                upload_override,
+                endpoints: OnceCell::new(),
+                download,
+                access_key,
+                secret,
+                bucket,
+            }),
+            get,
+        )
+    }
+
+    fn new(provider: Provider, get: &impl Fn(&str) -> Option<String>) -> Result<Self> {
         let prefix = get("POCKET_MEDIA_PREFIX").unwrap_or_else(|| "codex-pocket".to_owned());
         ensure!(
             !prefix.is_empty()
@@ -144,20 +256,14 @@ impl Storage {
             .transpose()?
             .unwrap_or(25);
         ensure!((1..=50).contains(&batch), "对象存储批次须在 1–50 MiB");
-        let http = Client::builder()
-            .use_rustls_tls()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(120))
-            .build()?;
+        let http = match &provider {
+            Provider::Qiniu(qiniu) => qiniu.http.clone(),
+            Provider::Plugin(_) => storage_client()?,
+        };
         Ok(Self {
-            inner: Arc::new(Qiniu {
+            inner: Arc::new(Transport {
                 http,
-                upload,
-                download,
-                access_key,
-                secret,
-                bucket,
+                provider,
                 prefix,
                 batch,
                 jobs: Semaphore::new(2),
@@ -173,7 +279,7 @@ impl Storage {
         &self,
         db: Database,
         device: String,
-        thread: Uuid,
+        scope: crate::files::Scope,
         id: Uuid,
         action: &str,
         request: &Value,
@@ -183,6 +289,16 @@ impl Storage {
             .jobs
             .try_acquire()
             .context("对象存储正在处理其他附件")?;
+        if matches!(action, "storage-plan" | "storage-import") {
+            let (db, device, scope) = (db.clone(), device.clone(), scope.clone());
+            let batch = self.batch();
+            tokio::task::spawn_blocking(move || {
+                db.lock()
+                    .expect("database mutex poisoned")
+                    .import_pending_upload(&device, &scope, id, Some(batch))
+            })
+            .await??;
+        }
         if action == "storage-plan" {
             let indices: Vec<usize> = serde_json::from_value(request["indices"].clone())?;
             ensure!(
@@ -196,50 +312,33 @@ impl Storage {
             let (manifest, complete) = db
                 .lock()
                 .expect("database mutex poisoned")
-                .storage_manifest(&device, thread, id)?;
+                .storage_manifest(&device, &scope, id)?;
             let size = indices.iter().try_fold(0, |total, &index| {
                 Ok::<_, anyhow::Error>(total + block_length(&manifest, index)? + aead::MAX_TAG_LEN)
             })?;
             let object = Uuid::new_v4();
-            {
-                let store = db.lock().expect("database mutex poisoned");
-                store.db.execute(
-                    "DELETE FROM native_storage_objects WHERE expires<=?1",
-                    [now()],
-                )?;
-                let count: i64 = store.db.query_row(
-                    "SELECT count(*) FROM native_storage_objects WHERE device=?1",
-                    [&device],
-                    |row| row.get(0),
-                )?;
-                ensure!(count < 32, "待处理对象存储批次过多");
-                store.db.execute(
-                    "INSERT INTO native_storage_objects VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                    params![
-                        object.to_string(),
-                        device,
-                        thread.to_string(),
-                        id.to_string(),
-                        serde_json::to_string(&indices)?,
-                        complete,
-                        now() + 900_000
-                    ],
-                )?;
-            }
             let key = self.inner.key(object);
-            let plan = self.inner.plan(&key, size)?;
-            if !complete {
-                return Ok(json!({"objectId":object,"upload":plan}));
+            let grant = if complete {
+                None
+            } else {
+                Some(self.inner.provider.plan(&key, size).await?)
+            };
+            db.lock()
+                .expect("database mutex poisoned")
+                .record_storage_object(object, &device, &scope, id, &indices, complete)?;
+            if let Some(grant) = grant {
+                return Ok(json!({"objectId":object,"upload":grant}));
             }
             let mut ciphertext = Vec::with_capacity(size);
             for &index in &indices {
                 let db = db.clone();
                 let device = device.clone();
                 let manifest = manifest.clone();
+                let scope = scope.clone();
                 let block = tokio::task::spawn_blocking(move || {
                     let plain = db.lock().expect("database mutex poisoned").read_upload(
                         &device,
-                        thread,
+                        &scope,
                         id,
                         index as u64,
                     )?;
@@ -248,74 +347,47 @@ impl Storage {
                 .await??;
                 ciphertext.extend(block);
             }
-            self.inner.put(&key, ciphertext).await?;
+            self.inner.provider.put(&key, ciphertext).await?;
+            let url = self
+                .inner
+                .provider
+                .download_url(&key, GRANT_TTL_MS / 1_000)
+                .await?;
             return Ok(
-                json!({"objectId":object,"url":self.inner.signed_url(&key, 900), "indices":indices, "size":size}),
+                json!({"objectId":object,"url":url.as_str(), "indices":indices, "size":size}),
             );
         }
 
         let object = Uuid::parse_str(request["objectId"].as_str().context("对象编号无效")?)?;
-        let (indices, download) = db.lock().expect("database mutex poisoned").db.query_row(
+        let native = db.lock().expect("database mutex poisoned").db.query_row(
             "SELECT indices,download FROM native_storage_objects WHERE id=?1 AND device=?2 AND thread=?3 AND transfer=?4 AND expires>?5",
-            params![object.to_string(), device, thread.to_string(), id.to_string(), now()],
+            params![object.to_string(), device, scope.key(), id.to_string(), now()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
-        ).optional()?.context("对象不属于此附件或已过期")?;
+        ).optional()?;
         let key = self.inner.key(object);
+        let (indices, download) = match &native {
+            Some((indices, download)) => (serde_json::from_str(indices)?, *download),
+            None if action == "storage-import" => (
+                legacy_object_indices(&device, &scope, id, object, &key)?,
+                false,
+            ),
+            None => anyhow::bail!("对象不属于此附件或已过期"),
+        };
         match action {
             "storage-import" if !download => {
-                let indices: Vec<usize> = serde_json::from_str(&indices)?;
-                let (manifest, _) = db
-                    .lock()
-                    .expect("database mutex poisoned")
-                    .storage_manifest(&device, thread, id)?;
-                let size = indices.iter().try_fold(0, |total, &index| {
-                    Ok::<_, anyhow::Error>(
-                        total + block_length(&manifest, index)? + aead::MAX_TAG_LEN,
-                    )
-                })?;
-                let mut response = self
+                let received = self
                     .inner
-                    .http
-                    .get(self.inner.signed_url(&key, 300))
-                    .send()
+                    .receive_object(&db, &device, &scope, id, &key, indices)
                     .await?;
-                ensure!(
-                    response.status().is_success()
-                        && response.content_length().is_none_or(|n| n == size as u64),
-                    "对象读取失败或大小无效"
-                );
-                let mut encrypted = Vec::with_capacity(size);
-                while let Some(chunk) = response.chunk().await? {
-                    ensure!(encrypted.len() + chunk.len() <= size, "对象数据过大");
-                    encrypted.extend_from_slice(&chunk);
+                if !received && native.is_none() {
+                    return Ok(json!({"ok":true}));
                 }
-                ensure!(encrypted.len() == size, "对象数据未传完");
-                let device = device.clone();
-                let db = db.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut offset = 0;
-                    for index in indices {
-                        let end = offset + block_length(&manifest, index)? + aead::MAX_TAG_LEN;
-                        let plain = decrypt(&manifest, index, encrypted[offset..end].to_vec())?;
-                        db.lock().expect("database mutex poisoned").file_request(
-                            &device,
-                            thread,
-                            id,
-                            "write",
-                            Some(index as u64),
-                            &plain,
-                        )?;
-                        offset = end;
-                    }
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await??;
             }
             "storage-done" if download => {}
             _ => anyhow::bail!("对象方向无效"),
         }
         // The bucket policy expires unfinished ciphertext even if the desktop is offline.
-        if self.inner.remove(&key).await.is_ok() {
+        if self.inner.provider.remove(&key).await.is_ok() && native.is_some() {
             db.lock().expect("database mutex poisoned").db.execute(
                 "DELETE FROM native_storage_objects WHERE id=?1",
                 [object.to_string()],
@@ -323,6 +395,37 @@ impl Storage {
         }
         Ok(json!({"ok":true}))
     }
+}
+
+fn legacy_object_indices(
+    device: &str,
+    scope: &crate::files::Scope,
+    transfer: Uuid,
+    object: Uuid,
+    key: &str,
+) -> Result<Vec<usize>> {
+    let (backend, thread) = scope.backend_and_thread();
+    let record = legacy_upload_receipt(backend, thread, device, transfer)?
+        .context("旧对象不属于此附件或已过期")?
+        .storage_object(object)?
+        .context("旧对象不存在")?;
+    ensure!(
+        record["id"] == object.to_string()
+            && record["transfer"] == transfer.to_string()
+            && record["key"] == key
+            && record["expires"]
+                .as_i64()
+                .is_some_and(|expires| expires > now()),
+        "旧对象不属于此附件或已过期"
+    );
+    let indices: Vec<usize> = serde_json::from_value(record["indices"].clone())?;
+    ensure!(
+        (1..=15).contains(&indices.len())
+            && indices.iter().all(|&index| index < 256)
+            && indices.windows(2).all(|pair| pair[0] + 1 == pair[1]),
+        "旧对象的分块清单无效"
+    );
+    Ok(indices)
 }
 
 fn origin(raw: &str) -> Result<Url> {
@@ -340,11 +443,59 @@ fn origin(raw: &str) -> Result<Url> {
     Ok(url)
 }
 
-impl Qiniu {
+fn storage_client() -> Result<Client> {
+    Ok(Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(120))
+        .build()?)
+}
+
+impl Transport {
     fn key(&self, id: Uuid) -> String {
         format!("{}/private-encrypted-v2/{id}", self.prefix)
     }
+}
 
+impl Provider {
+    async fn plan(&self, key: &str, size: usize) -> Result<Value> {
+        match self {
+            Self::Qiniu(qiniu) => qiniu.plan(&qiniu.endpoints().await?.upload, key, size),
+            Self::Plugin(plugin) => plugin.plan(key, size).await,
+        }
+    }
+
+    async fn download_url(&self, key: &str, seconds: i64) -> Result<Url> {
+        match self {
+            Self::Qiniu(qiniu) => {
+                qiniu.endpoints().await?;
+                Ok(Url::parse(&qiniu.signed_url(key, seconds))?)
+            }
+            Self::Plugin(plugin) => plugin.download_url(key, now() + seconds * 1_000).await,
+        }
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<()> {
+        match self {
+            Self::Qiniu(qiniu) => {
+                qiniu
+                    .put(&qiniu.endpoints().await?.upload, key, bytes)
+                    .await
+            }
+            Self::Plugin(plugin) => plugin.put(key, bytes).await,
+        }
+    }
+
+    async fn remove(&self, key: &str) -> Result<()> {
+        match self {
+            Self::Qiniu(qiniu) => qiniu.remove(key).await,
+            Self::Plugin(plugin) => plugin.remove(key).await,
+        }
+    }
+}
+
+impl Qiniu {
     fn sign(&self, data: &str) -> String {
         format!(
             "{}:{}",
@@ -355,14 +506,14 @@ impl Qiniu {
 
     fn token(&self, key: &str, size: usize) -> Result<String> {
         let policy = json!({"scope":format!("{}:{key}",self.bucket),"insertOnly":1,
-            "deadline":now()/1000+900,"fsizeMin":size,"fsizeLimit":size,"deleteAfterDays":1});
+            "deadline":(now() + GRANT_TTL_MS)/1000,"fsizeMin":size,"fsizeLimit":size,"deleteAfterDays":1});
         let policy = URL_SAFE.encode(serde_json::to_vec(&policy)?);
         Ok(format!("{}:{policy}", self.sign(&policy)))
     }
 
-    fn plan(&self, key: &str, size: usize) -> Result<Value> {
+    fn plan(&self, upload: &Url, key: &str, size: usize) -> Result<Value> {
         Ok(
-            json!({"url":self.upload.as_str(),"method":"POST","encoding":"multipart",
+            json!({"url":upload.as_str(),"method":"POST","encoding":"multipart",
             "fields":{"token":self.token(key,size)?,"key":key},"fileField":"file"}),
         )
     }
@@ -372,7 +523,7 @@ impl Qiniu {
         format!("{url}&token={}", self.sign(&url))
     }
 
-    async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<()> {
+    async fn put(&self, upload: &Url, key: &str, bytes: Vec<u8>) -> Result<()> {
         let form = Form::new()
             .text("key", key.to_owned())
             .text("token", self.token(key, bytes.len())?)
@@ -384,7 +535,7 @@ impl Qiniu {
             );
         ensure!(
             self.http
-                .post(self.upload.clone())
+                .post(upload.clone())
                 .multipart(form)
                 .send()
                 .await?
@@ -400,14 +551,8 @@ impl Qiniu {
             "/delete/{}",
             URL_SAFE.encode(format!("{}:{key}", self.bucket))
         );
-        let token = self.sign(&format!("{path}\n"));
-        let response = self
-            .http
-            .post(format!("https://rs.qiniuapi.com{path}"))
-            .header("Authorization", format!("QBox {token}"))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .send()
-            .await?;
+        let url = self.endpoints().await?.resource.join(&path)?;
+        let response = self.management_request(url).send().await?;
         ensure!(
             response.status().is_success() || response.status().as_u16() == 612,
             "对象清理失败"
@@ -460,3 +605,6 @@ fn decrypt(manifest: &Value, index: usize, mut bytes: Vec<u8>) -> Result<Vec<u8>
     bytes.truncate(length);
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod tests;

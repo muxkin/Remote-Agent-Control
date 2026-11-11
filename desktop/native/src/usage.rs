@@ -1,22 +1,27 @@
-use crate::{
-    app_tools::{AppTools, Tool, call},
-    state::now,
-};
+#[cfg(feature = "official-plugins")]
+use crate::app_tools::{AppTools, Tool, call};
+use crate::state::now;
+#[cfg(feature = "official-plugins")]
 use anyhow::Result;
 use serde_json::{Value, json};
+#[cfg(feature = "official-plugins")]
 use std::{sync::Arc, time::Duration};
+#[cfg(feature = "official-plugins")]
 use tokio::{
     sync::Mutex,
     time::{Instant, timeout},
 };
+#[cfg(feature = "official-plugins")]
 use uuid::Uuid;
 
+#[cfg(feature = "official-plugins")]
 #[derive(Clone)]
 pub struct Usage {
     tools: AppTools,
     cached: Arc<Mutex<Option<(Instant, Value)>>>,
 }
 
+#[cfg(feature = "official-plugins")]
 impl Usage {
     pub fn new(tools: AppTools) -> Self {
         Self {
@@ -58,6 +63,7 @@ pub fn unavailable(reason: &str) -> Value {
     json!({"available":false,"updatedAt":now(),"buckets":[],"reason":reason})
 }
 
+#[cfg(feature = "official-plugins")]
 fn normalize(value: &Value) -> Value {
     let limits: Vec<_> = if let Some(limits) = value["rateLimitsByLimitId"]
         .as_object()
