@@ -288,6 +288,7 @@ fn run_managed(
     let _desktop_events = desktop_shell::prepare(tray_events.clone());
     #[cfg(feature = "desktop")]
     let tray = {
+        #[cfg(target_os = "linux")]
         if let Err(error) = desktop_shell::register_launcher() {
             eprintln!("无法注册应用入口：{error}");
         }
