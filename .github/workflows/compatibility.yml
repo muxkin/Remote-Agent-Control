@@ -93,7 +93,15 @@ jobs:
         with:
           name: verified-build
           path: .
-      - run: npx playwright install --with-deps chrome
+      - name: Prepare Chrome for browser tests
+        run: |
+          if ! node --input-type=module -e '
+            import { chromium } from "@playwright/test";
+            const browser = await chromium.launch({ channel: "chrome" });
+            await browser.close();
+          '; then
+            npx playwright install --with-deps chrome
+          fi
       - run: npm run test:delivery
       - run: npm run test:conversation-replay
       - run: npm run test:messaging

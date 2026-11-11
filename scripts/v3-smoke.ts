@@ -1,6 +1,6 @@
 /** Frontend regression on an isolated simulated desktop; never approves a real task. */
 import { chromium, expect } from '@playwright/test';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config, host, store, native, close } from './v2-fixture.js';
 import { THREAD, TURN } from '../test/helpers.js';
@@ -322,28 +322,32 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: '返回会话列表' }).click();
   await tab('我的');
+  const installerBase = '/downloads/desktop/native/rust/linux/x64/';
+  // A published manifest exercises the browser's pinned key without downloading the installer.
+  const releaseManifest = JSON.parse(
+    await readFile(new URL('../test/fixtures/native-linux-release.json', import.meta.url), 'utf8'),
+  );
+  const { file, size } = JSON.parse(Buffer.from(releaseManifest.payload, 'base64').toString('utf8'));
+  const installerPath = installerBase + file;
   let downloadRequests = 0;
-  await page.route('**/downloads/desktop/releases.json', (route) => {
-    if (++downloadRequests === 1) return route.fulfill({ status: 503 });
-    return route.fulfill({
-      json: {
-        files: [
-          { platform: 'linux', arch: 'x64', version: '1.0.0', file: 'AgentSpace-1.0.0.AppImage', size: 2048 },
-          { platform: 'linux', arch: 'x64', version: '1.0.0', file: '../outside.AppImage', size: 2048 },
-        ],
-      },
-    });
+  await page.route('**/downloads/desktop/native/rust/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === installerBase + 'latest.json') {
+      if (++downloadRequests === 1) return route.fulfill({ status: 503 });
+      return route.fulfill({ json: releaseManifest });
+    }
+    if (path === installerPath && route.request().method() === 'HEAD') {
+      return route.fulfill({ status: 200, headers: { 'content-length': String(size) } });
+    }
+    return route.fulfill({ status: 404 });
   });
   await page.getByRole('button', { name: /电脑适配器/ }).click();
-  await expect(page.getByText('暂时无法读取安装包。')).toBeVisible();
-  await page.getByRole('button', { name: '重试', exact: true }).click();
-  await expect(page.locator('.donation-page a[download]')).toHaveCount(1);
-  await expect(page.getByRole('link', { name: /下载 v1.0.0/ })).toHaveAttribute(
-    'href',
-    '/downloads/desktop/linux/x64/AgentSpace-1.0.0.AppImage',
-  );
+  await expect(page.getByText('暂时无法验证安装包')).toBeVisible();
+  await page.getByRole('button', { name: '重新检查 Linux x64（glibc）' }).click();
+  await expect(page.locator('.adapter-downloads a[download]')).toHaveCount(1);
+  await expect(page.getByRole('link', { name: '下载 Linux x64（glibc）' })).toHaveAttribute('href', installerPath);
   await page.getByRole('button', { name: '返回', exact: true }).click();
-  await expect(page.locator('.donation-page')).toHaveCount(0);
+  await expect(page.locator('.adapter-downloads')).toHaveCount(0);
 
   await page.route('**/support.json', (route) =>
     route.fulfill({
