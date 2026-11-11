@@ -1,21 +1,11 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, shallowRef, watch } from 'vue';
+import { computed, onUnmounted, shallowRef } from 'vue';
 import { nativeInstallerTargets, type NativeInstallerTarget } from '../../shared/desktop-releases.js';
 import SvgIcon from '../SvgIcon.vue';
 import { loadNativeInstaller, type NativeInstaller } from './native-installers.js';
 
-const releases = 'https://github.com/muxkin/Remote-Agent-Control/releases';
-const portableVersion = '0.2.7';
-const portableBase = `${releases}/download/native-v${portableVersion}/AgentSpace-Native-${portableVersion}-`;
-const portableDownloads = [
-  { name: 'Windows x64', suffix: 'windows-x64.zip' },
-  { name: 'Linux x64', suffix: 'linux-x64.tar.xz' },
-];
-const platforms = [
-  { id: 'win32', label: 'Windows' },
-  { id: 'darwin', label: 'macOS' },
-  { id: 'linux', label: 'Linux' },
-];
+const sourceVersion = __POCKET_NATIVE_VERSION__;
+const sourceArchive = `https://github.com/muxkin/Remote-Agent-Control/archive/refs/tags/native-rust-v${sourceVersion}.tar.gz`;
 const installerLabels = {
   'windows-x64-setup.exe': { name: 'Windows x64', icon: 'windows', format: 'EXE' },
   'macos-arm64.dmg': { name: 'macOS Apple Silicon', icon: 'apple', format: 'DMG' },
@@ -25,14 +15,6 @@ const installerLabels = {
 
 type NativeResult = NativeInstaller | 'loading' | 'unpublished' | 'error';
 type InstallerSuffix = NativeInstallerTarget['suffix'];
-interface ArchiveDownload {
-  platform: string;
-  arch: string;
-  version: string;
-  file: string;
-  size: number;
-}
-
 const nativeResults = shallowRef<Partial<Record<InstallerSuffix, NativeResult>>>({});
 const nativeRows = computed(() =>
   nativeInstallerTargets.map((target) => ({
@@ -48,18 +30,6 @@ const verifiedRows = computed(() =>
 );
 const checkingInstallers = computed(() => nativeRows.value.some(({ result }) => result === 'loading'));
 const installerRequests = new AbortController();
-const archiveAttempt = ref(0);
-const archiveOpen = ref(false);
-const archiveStatus = ref<'loading' | 'ready' | 'error'>('loading');
-const files = shallowRef<ArchiveDownload[]>([]);
-const previewBase = '/downloads/desktop/native/preview/linux/x64/';
-const preview = shallowRef<{ version: string; files: { name: string; size: number }[] }>();
-const signedLinux = shallowRef<NativeInstaller>();
-const archiveSections = computed(() =>
-  platforms
-    .map(({ id, label }) => ({ label, files: files.value.filter((file) => file.platform === id) }))
-    .filter((section) => section.files.length),
-);
 const sizeLabel = (bytes: number) => `${Math.ceil(bytes / 1024 / 1024)} MiB`;
 
 function checkInstaller(target: NativeInstallerTarget) {
@@ -77,66 +47,6 @@ function checkInstaller(target: NativeInstallerTarget) {
 
 for (const target of nativeInstallerTargets) checkInstaller(target);
 onUnmounted(() => installerRequests.abort());
-
-watch([archiveOpen, archiveAttempt], async ([open], _previous, onCleanup) => {
-  if (!open) return;
-  const controller = new AbortController();
-  onCleanup(() => controller.abort());
-  const { signal } = controller;
-  archiveStatus.value = 'loading';
-
-  const linux = nativeInstallerTargets.find(({ platform }) => platform === 'linux');
-  if (linux) {
-    void loadNativeInstaller(linux, 'hybrid', signal)
-      .then((release) => {
-        if (!signal.aborted) signedLinux.value = release ?? undefined;
-      })
-      .catch(() => {
-        if (!signal.aborted) signedLinux.value = undefined;
-      });
-  }
-
-  void fetch(previewBase + 'preview.json', { signal, cache: 'no-cache' })
-    .then(async (response) => (response.ok ? response.json() : undefined))
-    .then((manifest) => {
-      if (signal.aborted || !manifest || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(manifest.version)) return;
-      if (!Array.isArray(manifest.files)) return;
-      const expected = ['deb', 'tar.xz'].map(
-        (suffix) => `AgentSpace-Native-${manifest.version}-linux-x64.${suffix}`,
-      );
-      const files = manifest.files.filter(
-        (file: { name?: string; size?: number }) =>
-          file && expected.includes(file.name ?? '') && Number.isFinite(file.size) && Number(file.size) > 0,
-      );
-      if (files.length === 2 && new Set(files.map((file: { name: string }) => file.name)).size === 2)
-        preview.value = { version: manifest.version, files };
-    })
-    .catch(() => {});
-
-  try {
-    const response = await fetch('/downloads/desktop/releases.json', { signal, cache: 'no-cache' });
-    if (!response.ok && response.status !== 404) throw new Error('Release manifest unavailable');
-    const data = response.status === 404 ? { files: [] } : await response.json();
-    if (!Array.isArray(data.files)) throw new Error('Invalid release manifest');
-    if (signal.aborted) return;
-    files.value = data.files.filter(
-      (file: ArchiveDownload) =>
-        file &&
-        ['linux', 'darwin', 'win32'].includes(file.platform) &&
-        ['x64', 'arm64'].includes(file.arch) &&
-        /^AgentSpace-[0-9][A-Za-z0-9._-]*\.(exe|dmg|AppImage)$/.test(file.file) &&
-        typeof file.version === 'string' &&
-        Number.isFinite(file.size),
-    );
-    archiveStatus.value = 'ready';
-  } catch {
-    if (!signal.aborted) archiveStatus.value = 'error';
-  }
-});
-
-function onArchiveToggle(event: Event) {
-  archiveOpen.value = (event.currentTarget as HTMLDetailsElement).open;
-}
 </script>
 
 <template>
@@ -207,64 +117,10 @@ function onArchiveToggle(event: Event) {
           </li>
         </ul>
       </details>
-      <details @toggle="onArchiveToggle">
-        <summary>
-          旧版本与便携包
-          <SvgIcon name="chevron" :size="18" />
-        </summary>
-        <div class="archive-downloads">
-          <p><a :href="releases">GitHub 发行记录与独立插件</a></p>
-
-          <section v-if="signedLinux">
-            <h4>Linux x64 旧签名安装版 v{{ signedLinux.version }}</h4>
-            <ul class="download-links">
-              <li>
-                <a :href="signedLinux.href" download>下载签名 DEB</a>
-                <small>{{ sizeLabel(signedLinux.size) }}</small>
-              </li>
-              <li><a :href="signedLinux.manifest">签名更新清单</a></li>
-            </ul>
-          </section>
-
-          <section v-if="preview">
-            <h4>Linux x64 插件版预览 v{{ preview.version }}</h4>
-            <p>自动更新暂未启用。</p>
-            <ul class="download-links">
-              <li v-for="file in preview.files" :key="file.name">
-                <a :href="previewBase + file.name" download>{{ file.name.endsWith('.deb') ? '下载 DEB 安装包' : '下载便携包' }}</a>
-                <small>{{ sizeLabel(file.size) }}</small>
-              </li>
-              <li><a :href="previewBase + 'preview.json'">SHA-256 校验清单</a></li>
-            </ul>
-          </section>
-
-          <section>
-            <h4>原生便携版 v{{ portableVersion }}</h4>
-            <ul class="download-links">
-              <li v-for="{ name, suffix } in portableDownloads" :key="suffix">
-                <a :href="portableBase + suffix">{{ name }} · 下载便携包</a>
-              </li>
-            </ul>
-          </section>
-
-          <p v-if="archiveStatus === 'loading'" role="status">正在读取归档安装包…</p>
-          <div v-else-if="archiveStatus === 'error'" role="status">
-            <p>暂时无法读取归档安装包。</p>
-            <button type="button" class="installer-retry" @click="archiveAttempt++">重试</button>
-          </div>
-          <section v-for="section in archiveSections" :key="section.label">
-            <h4>{{ section.label }} 旧安装包</h4>
-            <ul class="download-links">
-              <li v-for="file in section.files" :key="file.file">
-                <a :href="'/downloads/desktop/' + file.platform + '/' + file.arch + '/' + file.file" download>
-                  {{ file.arch === 'arm64' ? 'ARM64 / Apple Silicon' : 'Intel / AMD 64 位' }} · 下载 v{{ file.version }}
-                </a>
-                <small>{{ sizeLabel(file.size) }}</small>
-              </li>
-            </ul>
-          </section>
-        </div>
-      </details>
+      <a class="source-download" :href="sourceArchive" :aria-label="'下载源码包 v' + sourceVersion">
+        <span>源码包 <small>v{{ sourceVersion }} · TAR.GZ</small></span>
+        <SvgIcon name="download" :size="18" />
+      </a>
     </div>
   </div>
 </template>
@@ -293,7 +149,7 @@ function onArchiveToggle(event: Event) {
 .installer-note,
 .installer-info small,
 .download-links small,
-.archive-downloads p {
+.source-download small {
   color: var(--muted);
   line-height: 1.5;
 }
@@ -366,7 +222,8 @@ function onArchiveToggle(event: Event) {
 }
 
 .installer-info small,
-.download-links small {
+.download-links small,
+.source-download small {
   font-size: 12px;
 }
 
@@ -410,11 +267,13 @@ function onArchiveToggle(event: Event) {
   border-top: 1px solid var(--download-divider);
 }
 
-.download-details details {
+.download-details details,
+.source-download {
   border-bottom: 1px solid var(--download-divider);
 }
 
-.download-details summary {
+.download-details summary,
+.source-download {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -435,7 +294,18 @@ function onArchiveToggle(event: Event) {
   transform: rotate(90deg);
 }
 
-.download-details summary:hover {
+.source-download {
+  text-decoration: none;
+  color: var(--text);
+}
+
+.source-download small {
+  margin-inline-start: 5px;
+  font-weight: 400;
+}
+
+.download-details summary:hover,
+.source-download:hover {
   color: var(--accent);
 }
 
@@ -460,33 +330,9 @@ function onArchiveToggle(event: Event) {
   gap: 2px 10px;
 }
 
-.download-links a,
-.archive-downloads a {
-  color: var(--accent);
-}
-
 .download-links a {
+  color: var(--accent);
   padding-block: 5px;
-}
-
-.archive-downloads {
-  display: grid;
-  gap: 14px;
-  padding-bottom: 16px;
-}
-
-.archive-downloads h4,
-.archive-downloads p {
-  margin: 0;
-  font-size: 14px;
-}
-
-.archive-downloads h4 {
-  margin-bottom: 5px;
-}
-
-.archive-downloads .download-links {
-  padding-bottom: 0;
 }
 
 @media (max-width: 420px) {
