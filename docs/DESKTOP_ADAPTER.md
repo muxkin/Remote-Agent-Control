@@ -4,13 +4,13 @@
 
 ## Rust + Ely 原生适配器
 
-原生适配器位于 `desktop/native`。v0.3.35 安装版沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
+原生适配器位于 `desktop/native`。安装版使用独立 Rust 网关和 Ely 托盘，支持 Codex 历史、工具活动和附件。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
 
 v0.2.8 Linux 混合版安装包附带 Node 和 Python。纯 Rust 安装器的发布验收覆盖 Linux x64、Windows x64、macOS Apple Silicon 和 macOS Intel。
 
 ### 原生安装包
 
-[v0.3.35 发布页](https://github.com/muxkin/Remote-Agent-Control/releases/tag/native-rust-v0.3.35)提供四个平台的安装器和各平台独立的 Codex、DSH 插件包，并附 `SHA256SUMS`。安装器来自同一提交的[四目标验收](https://github.com/muxkin/Remote-Agent-Control/actions/runs/42903316595)，覆盖实际安装和签名 HTTPS 更新。
+[v0.3.36 发布页](https://github.com/muxkin/Remote-Agent-Control/releases/tag/native-rust-v0.3.36)提供四个平台的安装器、独立的 Codex 和 DSH 插件包、可直接用 Cargo 构建的源码包及 `SHA256SUMS`。安装器来自同一提交的[四目标验收](https://github.com/muxkin/Remote-Agent-Control/actions/runs/42954220598)，覆盖实际安装和签名 HTTPS 更新。
 
 | 平台 | 安装包 | 安装方式 |
 | --- | --- | --- |
