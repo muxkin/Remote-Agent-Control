@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from 'vue';
-import { nativeInstallerTargets } from '../../shared/desktop-releases.js';
+import { computed, onUnmounted, ref, shallowRef, watch } from 'vue';
+import { nativeInstallerTargets, type NativeInstallerTarget } from '../../shared/desktop-releases.js';
 import SvgIcon from '../SvgIcon.vue';
 import { loadNativeInstaller, type NativeInstaller } from './native-installers.js';
-import './donation.css';
 
-const version = '0.2.7'; // Last GitHub release with both portable packages.
-const nativeRelease = 'https://github.com/muxkin/Remote-Agent-Control/releases/download/native-v' + version;
-const nativeDownloads = [
+const releases = 'https://github.com/muxkin/Remote-Agent-Control/releases';
+const portableVersion = '0.2.7';
+const portableBase = `${releases}/download/native-v${portableVersion}/AgentSpace-Native-${portableVersion}-`;
+const portableDownloads = [
   { name: 'Windows x64', suffix: 'windows-x64.zip' },
   { name: 'Linux x64', suffix: 'linux-x64.tar.xz' },
 ];
@@ -16,210 +16,502 @@ const platforms = [
   { id: 'darwin', label: 'macOS' },
   { id: 'linux', label: 'Linux' },
 ];
-interface Download {
+const installerLabels = {
+  'windows-x64-setup.exe': { name: 'Windows x64', icon: 'windows', format: 'EXE' },
+  'macos-arm64.dmg': { name: 'macOS Apple Silicon', icon: 'apple', format: 'DMG' },
+  'macos-x64.dmg': { name: 'macOS Intel', icon: 'apple', format: 'DMG' },
+  'linux-x64.deb': { name: 'Linux x64', icon: 'linux', format: 'DEB' },
+} as const;
+
+type NativeResult = NativeInstaller | 'loading' | 'unpublished' | 'error';
+type InstallerSuffix = NativeInstallerTarget['suffix'];
+interface ArchiveDownload {
   platform: string;
   arch: string;
   version: string;
   file: string;
   size: number;
 }
-const files = shallowRef<Download[]>([]);
+
+const nativeResults = shallowRef<Partial<Record<InstallerSuffix, NativeResult>>>({});
+const nativeRows = computed(() =>
+  nativeInstallerTargets.map((target) => ({
+    target,
+    ...installerLabels[target.suffix],
+    result: nativeResults.value[target.suffix] ?? 'loading',
+  })),
+);
+const verifiedRows = computed(() =>
+  nativeRows.value.flatMap(({ name, result }) =>
+    typeof result === 'string' ? [] : [{ name, release: result }],
+  ),
+);
+const checkingInstallers = computed(() => nativeRows.value.some(({ result }) => result === 'loading'));
+const installerRequests = new AbortController();
+const archiveAttempt = ref(0);
+const archiveOpen = ref(false);
+const archiveStatus = ref<'loading' | 'ready' | 'error'>('loading');
+const files = shallowRef<ArchiveDownload[]>([]);
 const previewBase = '/downloads/desktop/native/preview/linux/x64/';
 const preview = shallowRef<{ version: string; files: { name: string; size: number }[] }>();
 const signedLinux = shallowRef<NativeInstaller>();
-const nativeNames = {
-  'windows-x64-setup.exe': 'Windows x64',
-  'macos-arm64.dmg': 'macOS Apple Silicon',
-  'macos-x64.dmg': 'macOS Intel',
-  'linux-x64.deb': 'Linux x64',
-} as const;
-type NativeResult = NativeInstaller | 'loading' | 'unpublished' | 'error';
-const nativeResults = shallowRef<NativeResult[]>([]);
-const nativeRows = computed(() =>
-  nativeInstallerTargets.map((target, index) => ({
-    name: nativeNames[target.suffix],
-    target,
-    result: nativeResults.value[index] ?? 'loading',
-  })),
+const archiveSections = computed(() =>
+  platforms
+    .map(({ id, label }) => ({ label, files: files.value.filter((file) => file.platform === id) }))
+    .filter((section) => section.files.length),
 );
+const sizeLabel = (bytes: number) => `${Math.ceil(bytes / 1024 / 1024)} MiB`;
 
-const sections = computed(() =>
-  platforms.map((platform) => ({
-    ...platform,
-    files: files.value.filter((file) => file.platform === platform.id),
-  })),
-);
-const state = ref<'loading' | 'ready' | 'error'>('loading');
-const attempt = ref(0);
-
-watch(
-  attempt,
-  async (_attempt, _previous, onCleanup) => {
-    const controller = new AbortController();
-    onCleanup(() => controller.abort());
-    state.value = 'loading';
-    nativeResults.value = nativeInstallerTargets.map(() => 'loading');
-    nativeInstallerTargets.forEach((target, index) => {
-      const set = (result: NativeResult) => {
-        if (controller.signal.aborted) return;
-        nativeResults.value = nativeResults.value.map((value, current) =>
-          current === index ? result : value,
-        );
-      };
-      void loadNativeInstaller(target, 'rust', controller.signal)
-        .then((release) => set(release ?? 'unpublished'))
-        .catch(() => set('error'));
-      if (target.platform === 'linux') {
-        void loadNativeInstaller(target, 'hybrid', controller.signal)
-          .then((release) => {
-            if (!controller.signal.aborted) signedLinux.value = release ?? undefined;
-          })
-          .catch(() => {
-            if (!controller.signal.aborted) signedLinux.value = undefined;
-          });
-      }
-    });
-    void fetch(previewBase + 'preview.json', { signal: controller.signal, cache: 'no-cache' })
-      .then(async (response) => (response.ok ? response.json() : undefined))
-      .then((manifest) => {
-        if (controller.signal.aborted || !manifest || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(manifest.version))
-          return;
-        if (!Array.isArray(manifest.files)) return;
-        const expected = ['deb', 'tar.xz'].map(
-          (suffix) => `AgentSpace-Native-${manifest.version}-linux-x64.${suffix}`,
-        );
-        const files = manifest.files.filter(
-          (file: { name?: string; size?: number }) =>
-            file && expected.includes(file.name ?? '') && Number.isFinite(file.size) && Number(file.size) > 0,
-        );
-        if (files.length === 2 && new Set(files.map((file: { name: string }) => file.name)).size === 2)
-          preview.value = { version: manifest.version, files };
-      })
-      .catch(() => {});
-
-    try {
-      const response = await fetch('/downloads/desktop/releases.json', {
-        signal: controller.signal,
-        cache: 'no-cache',
-      });
-      if (!response.ok && response.status !== 404) throw new Error('Release manifest unavailable');
-      const data = response.status === 404 ? { files: [] } : await response.json();
-      if (!Array.isArray(data.files)) throw new Error('Invalid release manifest');
-      if (controller.signal.aborted) return;
-
-      files.value = data.files.filter(
-        (file: Download) =>
-          ['linux', 'darwin', 'win32'].includes(file.platform) &&
-          ['x64', 'arm64'].includes(file.arch) &&
-          /^AgentSpace-[0-9][A-Za-z0-9._-]*\.(exe|dmg|AppImage)$/.test(file.file) &&
-          typeof file.version === 'string' &&
-          Number.isFinite(file.size),
-      );
-      state.value = 'ready';
-    } catch {
-      if (!controller.signal.aborted) state.value = 'error';
+function checkInstaller(target: NativeInstallerTarget) {
+  const { signal } = installerRequests;
+  const setResult = (result: NativeResult) => {
+    if (!signal.aborted) {
+      nativeResults.value = { ...nativeResults.value, [target.suffix]: result };
     }
-  },
-  { immediate: true },
-);
+  };
+  setResult('loading');
+  void loadNativeInstaller(target, 'rust', signal)
+    .then((release) => setResult(release ?? 'unpublished'))
+    .catch(() => setResult('error'));
+}
+
+for (const target of nativeInstallerTargets) checkInstaller(target);
+onUnmounted(() => installerRequests.abort());
+
+watch([archiveOpen, archiveAttempt], async ([open], _previous, onCleanup) => {
+  if (!open) return;
+  const controller = new AbortController();
+  onCleanup(() => controller.abort());
+  const { signal } = controller;
+  archiveStatus.value = 'loading';
+
+  const linux = nativeInstallerTargets.find(({ platform }) => platform === 'linux');
+  if (linux) {
+    void loadNativeInstaller(linux, 'hybrid', signal)
+      .then((release) => {
+        if (!signal.aborted) signedLinux.value = release ?? undefined;
+      })
+      .catch(() => {
+        if (!signal.aborted) signedLinux.value = undefined;
+      });
+  }
+
+  void fetch(previewBase + 'preview.json', { signal, cache: 'no-cache' })
+    .then(async (response) => (response.ok ? response.json() : undefined))
+    .then((manifest) => {
+      if (signal.aborted || !manifest || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(manifest.version)) return;
+      if (!Array.isArray(manifest.files)) return;
+      const expected = ['deb', 'tar.xz'].map(
+        (suffix) => `AgentSpace-Native-${manifest.version}-linux-x64.${suffix}`,
+      );
+      const files = manifest.files.filter(
+        (file: { name?: string; size?: number }) =>
+          file && expected.includes(file.name ?? '') && Number.isFinite(file.size) && Number(file.size) > 0,
+      );
+      if (files.length === 2 && new Set(files.map((file: { name: string }) => file.name)).size === 2)
+        preview.value = { version: manifest.version, files };
+    })
+    .catch(() => {});
+
+  try {
+    const response = await fetch('/downloads/desktop/releases.json', { signal, cache: 'no-cache' });
+    if (!response.ok && response.status !== 404) throw new Error('Release manifest unavailable');
+    const data = response.status === 404 ? { files: [] } : await response.json();
+    if (!Array.isArray(data.files)) throw new Error('Invalid release manifest');
+    if (signal.aborted) return;
+    files.value = data.files.filter(
+      (file: ArchiveDownload) =>
+        file &&
+        ['linux', 'darwin', 'win32'].includes(file.platform) &&
+        ['x64', 'arm64'].includes(file.arch) &&
+        /^AgentSpace-[0-9][A-Za-z0-9._-]*\.(exe|dmg|AppImage)$/.test(file.file) &&
+        typeof file.version === 'string' &&
+        Number.isFinite(file.size),
+    );
+    archiveStatus.value = 'ready';
+  } catch {
+    if (!signal.aborted) archiveStatus.value = 'error';
+  }
+});
+
+function onArchiveToggle(event: Event) {
+  archiveOpen.value = (event.currentTarget as HTMLDetailsElement).open;
+}
 </script>
 
 <template>
-  <div class="donation-page">
-    <section class="donation-intro">
-      <span class="donation-mark">
-        <SvgIcon name="monitor" :size="32" />
-      </span>
+  <div class="adapter-downloads">
+    <header class="adapter-intro">
       <h2>连接你的电脑</h2>
-      <p>安装适配器，打开已有的 Codex / Agent，<br />再用手机扫码配对。</p>
-    </section>
-    <section class="donation-card">
-      <h3>纯 Rust 安装版</h3>
-      <p>支持自动更新。Codex 和 DSH 插件可独立安装和升级。Linux 安装更新时需要系统授权。</p>
-      <p v-for="{ name, target, result } in nativeRows" :key="target.suffix" class="native-release-row">
-        <template v-if="typeof result !== 'string'">
-          <a :href="result.href" download>{{ name }} · 下载 v{{ result.version }}</a>
-          <span class="native-release-meta">
-            <small>{{ Math.ceil(result.size / 1024 / 1024) }} MiB</small>
-            <small v-if="result.releaseKeyOnly">发布密钥验签</small>
-            <small><a :href="result.manifest" :aria-label="name + ' 签名清单'">签名清单</a></small>
+      <p>在电脑上安装并打开适配器，再用手机扫码配对。</p>
+    </header>
+
+    <section aria-labelledby="adapter-installer-title">
+      <div class="installer-heading">
+        <h3 id="adapter-installer-title">下载安装器</h3>
+        <span>支持自动更新</span>
+      </div>
+
+      <ul class="installer-list" :aria-busy="checkingInstallers" aria-live="polite">
+        <li
+          v-for="{ target, name, icon, format, result } in nativeRows"
+          :key="target.suffix"
+          class="installer-row"
+        >
+          <span class="platform-icon">
+            <SvgIcon :name="icon" :size="22" />
           </span>
-        </template>
-        <template v-else-if="result === 'loading'">{{ name }} · 正在检查…</template>
-        <template v-else-if="result === 'unpublished'">{{ name }} · 待发布</template>
-        <template v-else>{{ name }} · 暂时无法验证安装包</template>
-      </p>
-      <button v-if="nativeResults.includes('error')" class="secondary" @click="attempt++">
-        重试纯 Rust 安装包
-      </button>
+          <div class="installer-info">
+            <strong>{{ name }}</strong>
+            <small v-if="typeof result !== 'string'">
+              v{{ result.version }} · {{ format }} · {{ sizeLabel(result.size) }}
+            </small>
+            <small v-else-if="result === 'loading'">正在验证安装包…</small>
+            <small v-else-if="result === 'unpublished'">暂未发布</small>
+            <small v-else>暂时无法验证安装包</small>
+          </div>
+          <a
+            v-if="typeof result !== 'string'"
+            class="installer-download"
+            :href="result.href"
+            :aria-label="'下载 ' + name"
+            download
+          >
+            <SvgIcon name="download" :size="17" />
+            下载
+          </a>
+          <button
+            v-else-if="result === 'error'"
+            type="button"
+            class="installer-retry"
+            :aria-label="'重新检查 ' + name"
+            @click="checkInstaller(target)"
+          >
+            重试
+          </button>
+        </li>
+      </ul>
+      <p class="installer-note">Linux 安装更新时需要系统授权。</p>
     </section>
-    <h3>旧版与便携包</h3>
-    <section v-if="signedLinux" class="donation-card">
-      <h3>Linux x64 旧签名安装版 v{{ signedLinux.version }}</h3>
-      <p>内置 Agent 插件和独立 Agent 的消息与通话接入。更新下载后由系统授权安装。</p>
-      <p>
-        <a :href="signedLinux.href" download>下载签名 DEB</a>
-        <small> · {{ Math.ceil(signedLinux.size / 1024 / 1024) }} MB</small>
-      </p>
-      <p><a :href="signedLinux.manifest">签名更新清单</a></p>
-    </section>
-    <section v-if="preview" class="donation-card">
-      <h3>Linux x64 插件版预览 v{{ preview.version }}</h3>
-      <p>内置 Codex 和 DSH 插件。预览包的自动更新暂未启用。</p>
-      <p v-for="file in preview.files" :key="file.name">
-        <a :href="previewBase + file.name" download>{{
-          file.name.endsWith('.deb') ? '下载 DEB 安装包' : '下载便携包'
-        }}</a>
-        <small> · {{ Math.ceil(file.size / 1024 / 1024) }} MB</small>
-      </p>
-      <p><a :href="previewBase + 'preview.json'">SHA-256 校验清单</a></p>
-    </section>
-    <section class="donation-card">
-      <h3>原生托盘版 v{{ version }}</h3>
-      <p>解压即可运行，无需安装 Node 或 Python。关闭窗口后继续在托盘运行，可在托盘菜单退出。</p>
-      <p v-for="{ name, suffix } in nativeDownloads" :key="suffix">
-        <a :href="nativeRelease + '/AgentSpace-Native-' + version + '-' + suffix">{{ name }} · 下载便携包</a>
-      </p>
-    </section>
-    <h3>原有安装版</h3>
-    <p v-if="state === 'loading'" role="status">正在读取安装包…</p>
-    <div v-else-if="state === 'error'" role="status">
-      <p>暂时无法读取安装包。</p>
-      <button class="secondary" @click="attempt++">重试</button>
+
+    <div class="download-details">
+      <details v-if="verifiedRows.length">
+        <summary>
+          签名清单
+          <SvgIcon name="chevron" :size="18" />
+        </summary>
+        <ul class="download-links">
+          <li v-for="{ name, release } in verifiedRows" :key="name">
+            <a :href="release.manifest" :aria-label="name + ' 签名清单'">{{ name }}</a>
+            <small v-if="release.releaseKeyOnly">发布密钥验签</small>
+          </li>
+        </ul>
+      </details>
+      <details @toggle="onArchiveToggle">
+        <summary>
+          旧版本与便携包
+          <SvgIcon name="chevron" :size="18" />
+        </summary>
+        <div class="archive-downloads">
+          <p><a :href="releases">GitHub 发行记录与独立插件</a></p>
+
+          <section v-if="signedLinux">
+            <h4>Linux x64 旧签名安装版 v{{ signedLinux.version }}</h4>
+            <ul class="download-links">
+              <li>
+                <a :href="signedLinux.href" download>下载签名 DEB</a>
+                <small>{{ sizeLabel(signedLinux.size) }}</small>
+              </li>
+              <li><a :href="signedLinux.manifest">签名更新清单</a></li>
+            </ul>
+          </section>
+
+          <section v-if="preview">
+            <h4>Linux x64 插件版预览 v{{ preview.version }}</h4>
+            <p>自动更新暂未启用。</p>
+            <ul class="download-links">
+              <li v-for="file in preview.files" :key="file.name">
+                <a :href="previewBase + file.name" download>{{ file.name.endsWith('.deb') ? '下载 DEB 安装包' : '下载便携包' }}</a>
+                <small>{{ sizeLabel(file.size) }}</small>
+              </li>
+              <li><a :href="previewBase + 'preview.json'">SHA-256 校验清单</a></li>
+            </ul>
+          </section>
+
+          <section>
+            <h4>原生便携版 v{{ portableVersion }}</h4>
+            <ul class="download-links">
+              <li v-for="{ name, suffix } in portableDownloads" :key="suffix">
+                <a :href="portableBase + suffix">{{ name }} · 下载便携包</a>
+              </li>
+            </ul>
+          </section>
+
+          <p v-if="archiveStatus === 'loading'" role="status">正在读取归档安装包…</p>
+          <div v-else-if="archiveStatus === 'error'" role="status">
+            <p>暂时无法读取归档安装包。</p>
+            <button type="button" class="installer-retry" @click="archiveAttempt++">重试</button>
+          </div>
+          <section v-for="section in archiveSections" :key="section.label">
+            <h4>{{ section.label }} 旧安装包</h4>
+            <ul class="download-links">
+              <li v-for="file in section.files" :key="file.file">
+                <a :href="'/downloads/desktop/' + file.platform + '/' + file.arch + '/' + file.file" download>
+                  {{ file.arch === 'arm64' ? 'ARM64 / Apple Silicon' : 'Intel / AMD 64 位' }} · 下载 v{{ file.version }}
+                </a>
+                <small>{{ sizeLabel(file.size) }}</small>
+              </li>
+            </ul>
+          </section>
+        </div>
+      </details>
     </div>
-    <template v-else>
-      <section v-for="section in sections" :key="section.id" class="donation-card">
-        <h3>{{ section.label }}</h3>
-        <template v-if="section.files.length">
-          <p v-for="file in section.files" :key="file.arch">
-            <a :href="'/downloads/desktop/' + file.platform + '/' + file.arch + '/' + file.file" download>
-              {{ file.arch === 'arm64' ? 'ARM64 / Apple Silicon' : 'Intel / AMD 64 位' }} · 下载 v{{
-                file.version
-              }}
-            </a>
-            <small> · {{ Math.ceil(file.size / 1024 / 1024) }} MB</small>
-          </p>
-        </template>
-        <p v-else>此平台的正式安装包尚未发布。</p>
-      </section>
-    </template>
   </div>
 </template>
 
 <style scoped>
-.native-release-row {
+.adapter-downloads {
+  --download-divider: color-mix(in srgb, var(--outline) 55%, transparent);
+  width: min(100%, 640px);
+  margin-inline: auto;
+  padding: clamp(24px, 5vw, 44px) 24px 40px;
+  color: var(--text);
+}
+
+.adapter-intro {
+  margin-bottom: 30px;
+}
+
+.adapter-intro h2 {
+  margin: 0 0 8px;
+  font-size: clamp(26px, 4vw, 34px);
+  line-height: 1.25;
+}
+
+.adapter-intro p,
+.installer-heading span,
+.installer-note,
+.installer-info small,
+.download-links small,
+.archive-downloads p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.adapter-intro p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.installer-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.installer-heading h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.installer-heading span,
+.installer-note {
+  font-size: 13px;
+}
+
+.installer-list {
+  margin: 0 -6px;
+  padding: 0 14px;
+  list-style: none;
+  border: 1px solid var(--outline);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 88%, var(--surface-subtle));
+}
+
+.installer-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding-block: 11px;
+}
+
+.installer-row + .installer-row {
+  border-top: 1px solid var(--download-divider);
+}
+
+.platform-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface));
+  color: var(--accent);
+}
+
+.installer-info {
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.installer-info strong {
+  font-size: 16px;
+  line-height: 1.25;
+  font-weight: 650;
+}
+
+.installer-info small,
+.download-links small {
+  font-size: 12px;
+}
+
+.installer-download,
+.installer-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 42px;
+  border-radius: 10px;
+  padding: 0 12px;
+  font-size: 14px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.installer-download {
+  background: var(--accent);
+  color: var(--on-accent);
+  text-decoration: none;
+}
+
+.installer-download:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+  color: var(--on-accent);
+}
+
+.installer-retry {
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.installer-note {
+  margin: 12px 0 24px;
+}
+
+.download-details {
+  border-top: 1px solid var(--download-divider);
+}
+
+.download-details details {
+  border-bottom: 1px solid var(--download-divider);
+}
+
+.download-details summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding-block: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+}
+
+.download-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.download-details details[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.download-details summary:hover {
+  color: var(--accent);
+}
+
+.adapter-downloads :is(a, button, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.download-links {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0 0 12px;
+  list-style: none;
+  font-size: 14px;
+}
+
+.download-links li {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0 12px;
-  margin-block: 6px;
+  gap: 2px 10px;
 }
-.native-release-meta {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 0 8px;
-}
-.native-release-row a {
+
+.download-links a,
+.archive-downloads a {
   color: var(--accent);
+}
+
+.download-links a {
+  padding-block: 5px;
+}
+
+.archive-downloads {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 16px;
+}
+
+.archive-downloads h4,
+.archive-downloads p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.archive-downloads h4 {
+  margin-bottom: 5px;
+}
+
+.archive-downloads .download-links {
+  padding-bottom: 0;
+}
+
+@media (max-width: 420px) {
+  .adapter-downloads {
+    padding-inline: 20px;
+  }
+}
+
+@media (max-width: 360px) {
+  .installer-list {
+    padding-inline: 10px;
+  }
+
+  .installer-row {
+    gap: 8px;
+  }
+
+  .platform-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .installer-download,
+  .installer-retry {
+    padding-inline: 9px;
+  }
 }
 </style>
