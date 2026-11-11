@@ -1442,8 +1442,12 @@ function reconnect(phone: Identity, ticket: string) {
 
 async function verifyTlsClient() {
   const probe = createServer();
-  const hello = new Promise<Buffer>((resolve) => {
+  const hello = new Promise<Buffer>((resolve, reject) => {
     probe.on('connection', (socket) => {
+      // The probe only reads the ClientHello. The adapter may reset a connection during teardown.
+      socket.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ECONNRESET') reject(error);
+      });
       socket.once('data', (bytes) => {
         resolve(bytes);
         socket.destroy();
