@@ -106,6 +106,8 @@ Windows 更新失败时会一起恢复旧主程序和随包插件。用户的私
 
 `native-rust-v<版本>` 标签触发 GitHub Releases 分发。工作流要求同一提交已通过四个目标的验收，并核对安装器及插件二进制的 SHA-256。安装器、便携包和独立 Codex、DSH 插件随版本一起提供。网页「我的 → 电脑适配器」从当前服务读取各平台签名清单，验签并确认安装器可读取后显示下载链接。
 
+发布页的 `AgentSpace-Native-<版本>-source.tar.gz` 是独立的 Cargo 工作区，包含纯 Rust 适配器、Codex 和 DSH 插件的源码与编译所需资源。解压后在根目录执行 `cargo build --release --locked` 即可构建三个可执行文件。各平台所需工具链和系统库见包内的 `README.md`。
+
 ### 本地构建与功能范围
 
 ```bash

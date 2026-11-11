@@ -5,7 +5,7 @@ import SvgIcon from '../SvgIcon.vue';
 import { loadNativeInstaller, type NativeInstaller } from './native-installers.js';
 
 const sourceVersion = __POCKET_NATIVE_VERSION__;
-const sourceArchive = `https://github.com/muxkin/Remote-Agent-Control/archive/refs/tags/native-rust-v${sourceVersion}.tar.gz`;
+const sourceArchive = `https://github.com/muxkin/Remote-Agent-Control/releases/download/native-rust-v${sourceVersion}/AgentSpace-Native-${sourceVersion}-source.tar.gz`;
 const installerLabels = {
   'windows-x64-setup.exe': { name: 'Windows x64', icon: 'windows', format: 'EXE' },
   'macos-arm64.dmg': { name: 'macOS Apple Silicon', icon: 'apple', format: 'DMG' },
