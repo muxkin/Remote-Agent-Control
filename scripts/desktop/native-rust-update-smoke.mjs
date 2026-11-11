@@ -18,8 +18,9 @@ assert(
   'Run this installer test in a disposable runner or VM',
 );
 const platform = process.platform;
-const arch = process.arch;
-const userInstall = process.env.POCKET_QA_LINUX_USER_INSTALL === '1';
+const muslDesktop = process.env.POCKET_QA_LINUX_MUSL_DESKTOP === '1';
+const arch = muslDesktop ? 'x64-musl' : process.arch;
+const userInstall = muslDesktop || process.env.POCKET_QA_LINUX_USER_INSTALL === '1';
 assert(!userInstall || platform === 'linux', 'User-directory installation is a Linux test');
 assert(platform === 'linux' || platform === 'win32' || platform === 'darwin');
 const program = platform === 'win32' ? 'agent-space-native.exe' : 'agent-space-native';
@@ -32,8 +33,9 @@ const installer = join(distribution, filename);
 const payload = await readFile(installer);
 const directory = await mkdtemp(join(tmpdir(), 'native-rust-update-smoke-'));
 const userHome = join(directory, 'home');
-const binDir = dirname(newBinary);
-const targetDir = dirname(binDir);
+const rustTarget = 'x86_64-unknown-linux-musl';
+const targetDir = muslDesktop ? resolve(process.env.CARGO_TARGET_DIR ?? 'dist/native-musl-target') : dirname(dirname(newBinary));
+const binDir = muslDesktop ? join(targetDir, rustTarget, 'release') : dirname(newBinary);
 const root = join(directory, 'fixture');
 const crate = join(root, 'desktop', 'native');
 const staged = join(directory, 'old-package');
@@ -75,13 +77,14 @@ async function buildOldAdapter() {
     /(name = "agent-space-native"\nversion = ")[^"]+(")/, (_match, prefix, suffix) => prefix + '0.0.0' + suffix,
   ));
   const args = ['--release', '--locked', '--no-default-features', '--manifest-path', join(crate, 'Cargo.toml'),
-    '--target-dir', targetDir];
+    '--target-dir', targetDir, ...(muslDesktop ? ['--target', rustTarget] : [])];
   await run('cargo', ['build', ...args, '--bin', 'agent-space-update-fixture'], cargoOptions);
   const tests = await run('cargo', ['test', ...args, '--lib', '--no-run', '--message-format=json'], cargoOptions);
   const testBinary = tests.stdout.split('\n').filter((line) => line.startsWith('{'))
     .map((line) => JSON.parse(line))
     .find((item) => item.reason === 'compiler-artifact' && item.target.kind.includes('lib') && item.profile.test)?.executable;
   assert.equal(typeof testBinary, 'string', 'The update test executable is missing');
+  if (muslDesktop) return testBinary;
   await mkdir(staged);
   await cp(oldBinary, join(staged, program));
   await cp('LICENSE', join(staged, 'LICENSE'));
@@ -94,8 +97,11 @@ async function buildOldAdapter() {
 async function installOldAdapter() {
   if (platform === 'linux') {
     if (userInstall) {
-      const destination = join(userHome, '.local/opt/agent-space/native');
-      await cp(staged, destination, { recursive: true });
+      const destination = join(userHome, 'Applications', 'Agent Space');
+      const bundle = muslDesktop ? installer : join(distribution, `AgentSpace-Native-${release}-linux-${arch}.tar.xz`);
+      await mkdir(destination, { recursive: true });
+      await run('tar', [muslDesktop ? '--zstd' : '-J', '-xf', bundle, '--no-same-owner', '--strip-components=1', '-C', destination]);
+      await cp(oldBinary, join(destination, program));
       return join(destination, program);
     }
     const args = ['-i', oldInstaller];
@@ -182,8 +188,10 @@ try {
   const packagedDigest = (image, name) =>
     mountedMacApp(image, join(directory, name), (app) => digest(join(app, 'Contents', 'MacOS', program)));
   const expected = platform === 'darwin' ? await packagedDigest(installer, 'new-hash') : await digest(newBinary);
-  const previous = platform === 'darwin' ? await packagedDigest(oldInstaller, 'old-hash') : await digest(oldBinary);
   installed = await installOldAdapter();
+  const previous = platform === 'darwin'
+    ? await packagedDigest(oldInstaller, 'old-hash')
+    : await digest(oldBinary);
   assert.equal(await digest(installed), previous, 'The old installer did not install the expected executable');
   assert.notEqual(previous, expected, 'The update fixture needs distinct old and new executables');
   const { origin, ca, requests, root, good } = await serveRelease();
@@ -218,6 +226,12 @@ try {
   assert(requests.includes('/abandoned' + root + filename));
   assert(!requests.includes('/foreign' + root + filename));
   assert.equal(await digest(installed), expected);
+  if (muslDesktop) {
+    const list = await run(installed, ['--adapter', 'list'], { env: {
+      ...runEnv, POCKET_NATIVE_STATE_DIR: join(directory, 'state'),
+    } });
+    assert(Array.isArray(JSON.parse(list.stdout).packages), 'The updated musl adapter did not start');
+  }
 } finally {
   server?.closeAllConnections();
   if (server) await new Promise((done) => server.close(() => done()));

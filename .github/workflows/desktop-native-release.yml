@@ -31,7 +31,7 @@ jobs:
             case "$target" in
               win32-*) platform=windows; installers=(windows-x64-setup.exe windows-x64.zip); executable_suffix=.exe ;;
               darwin-*) platform=macos; installers=("macos-$arch.dmg"); executable_suffix= ;;
-              linux-*) platform=linux; installers=(linux-x64.deb linux-x64.tar.xz); executable_suffix= ;;
+              linux-*) platform=linux; installers=(linux-x64.deb linux-x64.tar.xz linux-x64-musl.tar.xz linux-x64-musl-desktop.tar.zst); executable_suffix= ;;
             esac
             download="$RUNNER_TEMP/$target"
             gh run download "$run_id" --name "agent-space-native-$target" --dir "$download"
@@ -71,7 +71,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" release/AgentSpace-* release/SHA256SUMS \
             --verify-tag --title "Agent Space Rust Desktop ${GITHUB_REF_NAME#native-rust-}" \
-            --notes "Verified installers and independent Codex and DSH plugin packages for Windows x64, macOS Apple Silicon and Intel, and Linux x64. The installers include both official plugins. The source archive is a standalone Cargo workspace for the adapter and both plugins. To install a separate plugin package, verify its SHA-256 checksum, extract it, and run agent-space-native --adapter install with the extracted directory. The automatic update feed is published separately with the desktop release key."
+            --notes "Verified installers and independent Codex and DSH plugin packages for Windows x64, macOS Apple Silicon and Intel, and Linux x64. The installers include both official plugins. Linux x64 offers a portable musl desktop bundle and a statically linked musl headless gateway. The source archive is a standalone Cargo workspace for the adapter and both plugins. To install a separate plugin package, verify its SHA-256 checksum, extract it, and run agent-space-native --adapter install with the extracted directory. The automatic update feed is published separately with the desktop release key."
   publish-source:
     if: startsWith(github.ref_name, 'native-rust-source-v')
     runs-on: ubuntu-latest

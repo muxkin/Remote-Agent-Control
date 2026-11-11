@@ -848,7 +848,7 @@ impl DeviceSession {
                                     .retained_attachment(&scope, &sha256)?;
                                 let file = match retained {
                                     Some(file) => file,
-                                    None => crate::dsh_media::legacy_file(
+                                    None => history_media::legacy_dsh_file(
                                         &backend,
                                         &thread,
                                         &attachment_id,
@@ -905,9 +905,7 @@ impl DeviceSession {
                 let live = self
                     .codex_watch(backend, thread)
                     .and_then(|watch| watch.live.as_ref());
-                let source = connector
-                    .media(backend, thread, device.clone(), path, live)
-                    .await?;
+                let source = connector.media(thread, device.clone(), path, live).await?;
                 tokio::task::spawn_blocking(move || {
                     let download = Download::prepare(source, device, scope, batch)?;
                     db.lock()

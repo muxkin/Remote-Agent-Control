@@ -1,6 +1,5 @@
 use crate::{
     codex_backend::{self, Selection},
-    dsh::Dsh,
     files::VerifiedUpload,
     history_media::Source,
     migration::GatewayEnvironment,
@@ -67,7 +66,9 @@ pub(crate) struct View {
     pub messages: Arc<[Value]>,
     pub streamed: Option<Value>,
     pub observations: Arc<[Observation]>,
+    #[cfg(feature = "official-plugins")]
     pub image_limits: Value,
+    #[cfg(feature = "official-plugins")]
     pub continued_questions: Value,
     pub plugin_epoch: Option<u64>,
 }
@@ -162,6 +163,7 @@ pub(crate) enum Mode {
     Plan,
 }
 
+#[cfg(feature = "official-plugins")]
 impl Mode {
     pub(crate) fn name(self) -> &'static str {
         match self {
@@ -430,51 +432,24 @@ impl Registry {
                         .is_none_or(|package| package.manifest.product == "dsh"),
                 "官方 DSH 插件产品标识无效"
             );
-            if !is_dsh || package.is_some() {
-                let private = directory
-                    .join("native-plugins")
-                    .join("instances")
-                    .join(&row.id);
-                let id = row.id;
-                let host = Arc::new(crate::plugin_host::Host::new(
-                    id.clone(),
-                    row.name,
-                    package,
-                    Value::Object(config),
-                    private,
-                    instance_read_only,
-                ));
-                ensure!(
-                    plugins.insert(id, host.clone()).is_none(),
-                    "插件实例标识重复"
-                );
-                hosts.push(host);
-                continue;
-            }
-            let dsh = Dsh::new(
-                row.id,
+            let private = directory
+                .join("native-plugins")
+                .join("instances")
+                .join(&row.id);
+            let id = row.id;
+            let host = Arc::new(crate::plugin_host::Host::new(
+                id.clone(),
                 row.name,
-                config
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .context("DSH 缺少服务地址")?,
-                config
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned(),
-                config
-                    .get("token")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
+                package,
+                Value::Object(config),
+                private,
                 instance_read_only,
-            )?;
-            let id = dsh.id().to_owned();
+            ));
             ensure!(
-                plugins.insert(id, Arc::new(dsh)).is_none(),
-                "DSH 实例标识重复"
+                plugins.insert(id, host.clone()).is_none(),
+                "插件实例标识重复"
             );
+            hosts.push(host);
         }
         for host in hosts {
             runtime.spawn(host.supervise(directory.to_owned()));

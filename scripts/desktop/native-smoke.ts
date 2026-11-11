@@ -33,6 +33,7 @@ const executable = resolve(process.argv[2] ?? 'desktop/native/target/release/age
 const codexPackage = process.argv[3] && resolve(process.argv[3]);
 const storageFixture = process.env.POCKET_NATIVE_TEST_STORAGE_PLUGIN;
 const bundled = process.env.POCKET_NATIVE_TEST_BUNDLED_PLUGINS === '1';
+assert(bundled || codexPackage, 'Supply the Codex plugin directory or test an installer with bundled plugins');
 const directory = await mkdtemp(
   join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'native-adapter-smoke-'),
 );
@@ -93,11 +94,13 @@ pdf += `xref\n0 4\n0000000000 65535 f \n${offsets.join('')}trailer\n<< /Size 4 /
 const pdfBytes = Buffer.from(pdf);
 const pngBytes = await readFile('src/web/public/app-icon-32.png');
 const unrelatedFile = join(projectPath, 'unrelated.txt');
+const outsidePng = join(directory, 'outside-settings.png');
 await mkdir(projectPath, { recursive: true });
 await writeFile(projectFile, 'project attachment');
 await writeFile(join(projectPath, projectPdf), pdfBytes);
 await writeFile(join(projectPath, projectPng), pngBytes);
 await writeFile(unrelatedFile, 'unmentioned file');
+await writeFile(outsidePng, pngBytes);
 await mkdir(join(legacyState, 'uploads', legacyId), { mode: 0o700, recursive: true });
 await writeFile(legacyPath, legacyBytes, { mode: 0o600 });
 if (process.platform === 'win32') platformRuntime().privateFile(legacyPath);
@@ -193,6 +196,7 @@ legacyRecord.payload.content[0].text +=
 const historicalReply =
   ':codex-file-citation{path="./report.txt" purpose="open"}\n' +
   `[${projectPdf}](sandbox:./${projectPdf})\n![${projectPng}](sandbox:./${projectPng})\n` +
+  `[临时目录截图](<${outsidePng}>)\n` +
   '`:codex-file-citation{path="./unrelated.txt"}`\n' +
   'Earlier history. '.repeat(800);
 const assistantRecord = {
@@ -394,7 +398,7 @@ async function cloudflareRelay(port: number) {
   return { listen: () => worker.ready, close: () => worker.dispose() };
 }
 
-async function launch(useSaved = false) {
+async function launch(useSaved = false, extraEnvironment: NodeJS.ProcessEnv = {}) {
   if (process.platform === 'win32') {
     // The hosted runner is elevated. Node-created fixture files and SQLite's
     // sidecars can inherit Administrators as owner even in a private directory.
@@ -423,6 +427,7 @@ async function launch(useSaved = false) {
       POCKET_NATIVE_ORIGIN: useSaved ? '' : origin,
       POCKET_NATIVE_ENROLLMENT: useSaved ? '' : enrollment,
       POCKET_NATIVE_STATE_DIR: state,
+      POCKET_NATIVE_P2P: '1',
       ...(!codexPackage ? { POCKET_NATIVE_CODEX_HOME: codexHome } : {}),
       POCKET_NATIVE_READ_ONLY: ipc ? '0' : '1',
       ...(ipc && !codexPackage
@@ -433,6 +438,7 @@ async function launch(useSaved = false) {
             ...(forkCli ? { POCKET_NATIVE_CODEX_CLI: forkCli } : {}),
           }
         : {}),
+      ...extraEnvironment,
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -1794,9 +1800,27 @@ try {
   assert.deepEqual(await readFile(join(legacyState, 'state.sqlite')), databaseBefore);
   await assert.rejects(importer(), /目标状态目录已存在/);
   if (storageFixture) await installStorageFixture(storageFixture);
-  const versions = codexPackage ? await installCodexVariants(codexPackage) : undefined;
   await verifyTlsClient();
   await relay.listen();
+  if (codexPackage && !bundled) {
+    const withoutPlugin = await launch(false, { POCKET_NATIVE_CODEX_HOME: codexHome });
+    try {
+      const session = await reconnect(existingPhone, old.routeTicket);
+      try {
+        const ready = await session.ready;
+        assert.equal(ready.status.reason, '尚未安装 Codex 插件');
+        assert.equal(ready.status.writesEnabled, false);
+        assert.equal(ready.p2p.enabled, true);
+        const { backends } = await session.rpc<{ backends: { id: string }[] }>(apiCall('/backends'));
+        assert(!backends.some(({ id }) => id === 'codex-local'), 'Codex opened local history without a plugin');
+      } finally {
+        session.close();
+      }
+    } finally {
+      await withoutPlugin.stop();
+    }
+  }
+  const versions = codexPackage ? await installCodexVariants(codexPackage) : undefined;
   let gateway = await launch();
   try {
     if (bundled) {
@@ -2021,6 +2045,7 @@ try {
       [projectFile, Buffer.from('project attachment')],
       [`sandbox:./${projectPdf}`, pdfBytes, 'application/pdf'],
       [`sandbox:./${projectPng}`, pngBytes, 'image/png'],
+      [outsidePng, pngBytes, 'image/png'],
       ...viewed.map(({ path, bytes }) => [path, bytes] as const),
     ] as const) {
       const manifest = await describe(path);

@@ -1,6 +1,6 @@
 use crate::{
-    codex_live::{Action, Outcome, Thread, View},
-    codex_service::{Availability, Local, Options},
+    codex_live::{Action, Outcome, View},
+    codex_service::{Availability, Options},
     conversations::Change,
     history_media::Source,
     migration::GatewayEnvironment,
@@ -29,7 +29,7 @@ const READ: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Default)]
 pub struct Backend {
-    inner: Option<Kind>,
+    inner: Option<Arc<Hosted>>,
     name: Option<Arc<str>>,
 }
 
@@ -168,12 +168,6 @@ impl Selection {
     }
 }
 
-#[derive(Clone)]
-enum Kind {
-    Local(Arc<Local>),
-    Hosted(Arc<Hosted>),
-}
-
 struct Hosted {
     host: Arc<Host>,
     available: Mutex<Availability>,
@@ -182,36 +176,20 @@ struct Hosted {
 }
 
 #[derive(Clone)]
-pub(crate) enum Live {
-    Local(Arc<Thread>),
-    Hosted(Arc<RemoteWatch>),
-}
+pub(crate) struct Live(Arc<RemoteWatch>);
 
-pub(crate) struct RemoteWatch {
+struct RemoteWatch {
     id: Uuid,
     updates: watch::Receiver<Option<Arc<View>>>,
 }
 
 impl Live {
     pub(crate) fn view(&self) -> Option<Arc<View>> {
-        match self {
-            Self::Local(thread) => thread.view.borrow().clone(),
-            Self::Hosted(thread) => thread.updates.borrow().clone(),
-        }
+        self.0.updates.borrow().clone()
     }
 
-    fn local(&self) -> Option<&Arc<Thread>> {
-        match self {
-            Self::Local(thread) => Some(thread),
-            _ => None,
-        }
-    }
-
-    fn watch_id(&self) -> Option<Uuid> {
-        match self {
-            Self::Hosted(thread) => Some(thread.id),
-            _ => None,
-        }
+    fn watch_id(&self) -> Uuid {
+        self.0.id
     }
 }
 
@@ -231,54 +209,44 @@ impl Backend {
         } = selection;
         let package =
             Catalog::open(directory)?.bind_official(id, PACKAGE, version.as_deref(), bundled)?;
-        if let Some(package) = package {
-            ensure!(
-                package.manifest.product == "codex",
-                "官方 Codex 插件产品标识无效"
-            );
-            let availability = Availability {
-                history: options.home.as_ref().is_some_and(|path| path.is_dir()),
-                ..Availability::default()
-            };
-            let version = package.manifest.version.clone();
-            let host = Arc::new(Host::new(
-                id.into(),
-                name.clone(),
-                Some(package),
-                serde_json::to_value(&options)?,
-                directory.join("native-plugins").join("instances").join(id),
-                read_only,
-            ));
-            runtime.spawn(host.clone().supervise(directory.to_owned()));
+        let Some(package) = package else {
             return Ok(Self {
-                inner: Some(Kind::Hosted(Arc::new(Hosted {
-                    host,
-                    available: Mutex::new(availability),
-                    version: Mutex::new(Some(version)),
-                    watches: Mutex::new(HashMap::new()),
-                }))),
-                name: Some(name.into()),
-            });
-        }
-        match Local::open(&options, read_only, id != ID) {
-            Ok(local) => Ok(Self {
-                inner: Some(Kind::Local(Arc::new(local))),
-                name: Some(name.into()),
-            }),
-            Err(error) if options.explicit && id == ID => {
-                Err(error).context("无法读取 Codex 会话索引")
-            }
-            Err(_) => Ok(Self {
                 inner: None,
                 name: (id != ID).then(|| name.into()),
-            }),
-        }
+            });
+        };
+        ensure!(
+            package.manifest.product == "codex",
+            "官方 Codex 插件产品标识无效"
+        );
+        let availability = Availability {
+            history: options.home.as_ref().is_some_and(|path| path.is_dir()),
+            ..Availability::default()
+        };
+        let version = package.manifest.version.clone();
+        let host = Arc::new(Host::new(
+            id.into(),
+            name.clone(),
+            Some(package),
+            serde_json::to_value(&options)?,
+            directory.join("native-plugins").join("instances").join(id),
+            read_only,
+        ));
+        runtime.spawn(host.clone().supervise(directory.to_owned()));
+        Ok(Self {
+            inner: Some(Arc::new(Hosted {
+                host,
+                available: Mutex::new(availability),
+                version: Mutex::new(Some(version)),
+                watches: Mutex::new(HashMap::new()),
+            })),
+            name: Some(name.into()),
+        })
     }
 
     fn available(&self) -> Availability {
         match &self.inner {
-            Some(Kind::Local(local)) => local.availability(),
-            Some(Kind::Hosted(remote)) => *remote
+            Some(remote) => *remote
                 .available
                 .lock()
                 .expect("Codex availability mutex poisoned"),
@@ -298,10 +266,7 @@ impl Backend {
 
     pub(crate) async fn refresh(&self) {
         match &self.inner {
-            Some(Kind::Local(local)) => {
-                local.refresh().await;
-            }
-            Some(Kind::Hosted(remote)) => {
+            Some(remote) => {
                 if let Ok(value) = remote
                     .host
                     .call("codex/refresh", json!({}), Duration::from_secs(8))
@@ -322,7 +287,11 @@ impl Backend {
     }
 
     pub fn status(&self, online: bool) -> Value {
-        status(self.available(), online)
+        let mut result = status(self.available(), online);
+        if self.inner.is_none() {
+            result["reason"] = json!("尚未安装 Codex 插件");
+        }
+        result
     }
 
     pub(crate) fn info(&self, id: &str, online: bool) -> Option<Value> {
@@ -331,7 +300,7 @@ impl Backend {
             Some(info) => info,
             None if id != ID => json!({
                 "product":"codex","connected":false,"version":null,
-                "profile":"rust-native","capabilities":{},
+                "profile":"rust-native-plugin","capabilities":{},
             }),
             None => return None,
         };
@@ -339,7 +308,7 @@ impl Backend {
         if let Some(name) = &self.name {
             info["name"] = json!(name.as_ref());
         }
-        if let Some(Kind::Hosted(remote)) = &self.inner {
+        if let Some(remote) = &self.inner {
             info["profile"] = json!("rust-native-plugin");
             info["adapterVersion"] =
                 json!(*remote.version.lock().expect("Codex package mutex poisoned"));
@@ -349,15 +318,14 @@ impl Backend {
 
     pub(crate) fn watch(&self, thread: Uuid) -> Option<Live> {
         match &self.inner {
-            Some(Kind::Local(local)) => local.subscribe(thread).map(Live::Local),
-            Some(Kind::Hosted(remote)) if self.has_desktop() => {
+            Some(remote) if self.has_desktop() => {
                 let mut watches = remote
                     .watches
                     .lock()
                     .expect("Codex subscriptions mutex poisoned");
                 watches.retain(|_, live| live.strong_count() > 0);
                 if let Some(watch) = watches.get(&thread).and_then(Weak::upgrade) {
-                    return Some(Live::Hosted(watch));
+                    return Some(Live(watch));
                 }
                 if watches.len() >= 24 {
                     return None;
@@ -370,7 +338,7 @@ impl Backend {
                 tokio::spawn(async move {
                     follow(host, thread, id, publish).await;
                 });
-                Some(Live::Hosted(live))
+                Some(Live(live))
             }
             _ => None,
         }
@@ -378,7 +346,7 @@ impl Backend {
 
     pub(crate) fn admit_write(&self) -> Result<Option<OwnedRwLockReadGuard<()>>> {
         match &self.inner {
-            Some(Kind::Hosted(remote)) => remote.host.admit_write(),
+            Some(remote) => remote.host.admit_write(),
             _ => Ok(None),
         }
     }
@@ -391,19 +359,9 @@ impl Backend {
         live: Option<&Live>,
     ) -> Result<Option<Value>> {
         match &self.inner {
-            Some(Kind::Local(local)) => {
-                local
-                    .read(
-                        method,
-                        params,
-                        query,
-                        live.and_then(Live::local).map(Arc::as_ref),
-                    )
-                    .await
-            }
-            Some(Kind::Hosted(remote)) => {
+            Some(remote) => {
                 let value = remote.host.call("codex/read", json!({
-                    "method":method,"params":params,"query":query,"watchId":live.and_then(Live::watch_id),
+                    "method":method,"params":params,"query":query,"watchId":live.map(Live::watch_id),
                 }), READ).await?;
                 Ok((!value.is_null()).then_some(value))
             }
@@ -421,53 +379,25 @@ impl Backend {
         skills: &[String],
         plugins: &[String],
     ) -> Result<Vec<Value>> {
-        match self.inner.as_ref().context("尚未配置 Codex")? {
-            Kind::Local(local) => {
-                local
-                    .select_tools(
-                        thread,
-                        live.and_then(Live::local).map(Arc::as_ref),
-                        skills,
-                        plugins,
-                    )
-                    .await
-            }
-            Kind::Hosted(remote) => {
-                let value = remote.host.call("codex/selectTools", json!({
-                    "thread":thread,"watchId":live.and_then(Live::watch_id),"skills":skills,"plugins":plugins,
+        let remote = self.inner.as_ref().context("尚未安装 Codex 插件")?;
+        let value = remote.host.call("codex/selectTools", json!({
+                    "thread":thread,"watchId":live.map(Live::watch_id),"skills":skills,"plugins":plugins,
                 }), READ).await?;
-                Ok(serde_json::from_value(value)?)
-            }
-        }
+        Ok(serde_json::from_value(value)?)
     }
 
     pub(crate) async fn media(
         &self,
-        backend: &str,
         thread: Uuid,
         device: String,
         reference: String,
         live: Option<&Live>,
     ) -> Result<Source> {
-        match self.inner.as_ref().context("尚未配置 Codex")? {
-            Kind::Local(local) => {
-                local
-                    .media(
-                        backend.to_owned(),
-                        thread,
-                        device,
-                        reference,
-                        live.and_then(Live::local).map(Arc::as_ref),
-                    )
-                    .await
-            }
-            Kind::Hosted(remote) => {
-                let value = remote.host.call("codex/media", json!({
-                    "thread":thread,"device":device,"reference":reference,"watchId":live.and_then(Live::watch_id),
+        let remote = self.inner.as_ref().context("尚未安装 Codex 插件")?;
+        let value = remote.host.call("codex/media", json!({
+                    "thread":thread,"device":device,"reference":reference,"watchId":live.map(Live::watch_id),
                 }), Duration::from_secs(25)).await?;
-                remote.host.source(value).await
-            }
-        }
+        remote.host.source(value).await
     }
 
     pub(crate) async fn execute(
@@ -478,13 +408,7 @@ impl Backend {
         action: Action,
     ) -> Outcome {
         match &self.inner {
-            Some(Kind::Local(_)) => timeout(
-                Duration::from_secs(35),
-                Local::execute(live.local().map(Arc::as_ref), request, action),
-            )
-            .await
-            .unwrap_or(Outcome::Uncertain),
-            Some(Kind::Hosted(remote)) => remote
+            Some(remote) => remote
                 .outcome(
                     "codex/execute",
                     request,
@@ -506,9 +430,8 @@ impl Backend {
         change: Change,
     ) -> Outcome {
         match &self.inner {
-            Some(Kind::Local(local)) => local.manage(request, change, thread, live.and_then(Live::local).cloned()).await,
-            Some(Kind::Hosted(remote)) => remote.outcome("codex/manage", request, json!({
-                "thread":thread,"watchId":live.and_then(Live::watch_id),"request":request,"change":change,
+            Some(remote) => remote.outcome("codex/manage", request, json!({
+                "thread":thread,"watchId":live.map(Live::watch_id),"request":request,"change":change,
             }), Duration::from_secs(75)).await,
             None => Outcome::Rejected("尚未连接 Codex".into()),
         }

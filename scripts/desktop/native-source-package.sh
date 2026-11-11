@@ -35,7 +35,7 @@ awk '/^\[profile\.release\]$/ { profile = 1; print ""; print; next }
      profile { print }' "$crate/Cargo.toml" >> "$root/Cargo.toml"
 awk '/^\[profile\.release\]$/ { profile = 1; next }
      /^\[/ { profile = 0 }
-     /^default = \["ely"\]$/ { print "default = [\"ely\", \"official-plugins\"]"; next }
+     /^default = \["desktop"\]$/ { print "default = [\"desktop\", \"official-plugins\"]"; next }
      !profile { print }' "$crate/Cargo.toml" > "$stage/Cargo.toml"
 mv "$stage/Cargo.toml" "$crate/Cargo.toml"
 
@@ -53,13 +53,16 @@ Cargo writes `agent-space-native`, `agent-space-adapter-codex` and
 platform's native compiler and linker. Cargo fetches the locked dependencies
 from crates.io on the first build.
 
-- Linux desktop builds need the Fontconfig, XKB and Wayland development libraries.
-  On Ubuntu 24.04, install `build-essential pkg-config libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev`.
-- Windows desktop builds use the MSVC Rust toolchain and Windows SDK.
-- macOS desktop builds use Xcode command-line tools and Rust 1.99.1 or later.
-  Run `MACOSX_DEPLOYMENT_TARGET=14.0 cargo +1.99.1 build --release --locked` for the release settings.
+The gateway runs Codex and DSH as plugin processes. Install their packaged
+directories with `agent-space-native --adapter install <directory>` before
+starting a gateway built from source.
 
-To build the headless adapter and both plugins without the desktop UI dependencies,
+- Linux builds use a C compiler and linker for native dependencies. The tray uses the desktop D-Bus session.
+- Windows desktop builds use the MSVC Rust toolchain and Windows SDK.
+- macOS builds use Xcode command-line tools.
+  Run `MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --release --locked` for the release settings.
+
+To build the headless adapter and both plugins without system tray support,
 run `cargo build --release --locked --no-default-features --features official-plugins`.
 EOF
 

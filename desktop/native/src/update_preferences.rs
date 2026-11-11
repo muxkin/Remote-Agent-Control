@@ -178,7 +178,11 @@ fn legacy_settings() -> Option<PathBuf> {
     if let Some(path) = env::var_os("POCKET_NATIVE_LEGACY_DESKTOP_SETTINGS") {
         return Some(PathBuf::from(path));
     }
-    if env::var_os("POCKET_NATIVE_STATE_DIR").is_some() {
+    let state = env::var_os("POCKET_NATIVE_STATE_DIR").map(PathBuf::from);
+    if !uses_default_state(
+        state.as_deref(),
+        crate::state::default_directory().as_deref(),
+    ) {
         return None;
     }
     let base = dirs::config_dir()?;
@@ -186,6 +190,17 @@ fn legacy_settings() -> Option<PathBuf> {
         .into_iter()
         .map(|name| base.join(name).join("settings.json"))
         .find(|file| file.is_file())
+}
+
+fn uses_default_state(state: Option<&Path>, default: Option<&Path>) -> bool {
+    // The update helper passes the current state path explicitly, including on a standard install.
+    state.is_none_or(|state| {
+        std::path::absolute(state)
+            .ok()
+            .as_deref()
+            .zip(default)
+            .is_some_and(|(state, default)| state == default)
+    })
 }
 
 #[derive(Deserialize)]
@@ -260,6 +275,17 @@ fn settings_bytes(file: fs::File) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::state::private_directory;
+
+    #[test]
+    fn updated_default_installation_can_still_discover_legacy_gateway_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let default = root.path().join("agent-space-native-preview");
+        let isolated = root.path().join("test-profile");
+        assert!(uses_default_state(None, Some(&default)));
+        assert!(uses_default_state(Some(&default), Some(&default)));
+        assert!(!uses_default_state(Some(&isolated), Some(&default)));
+        assert!(!uses_default_state(Some(&isolated), None));
+    }
 
     #[test]
     fn migrates_legacy_switch_and_source_once_and_keeps_an_explicit_reset() -> Result<()> {

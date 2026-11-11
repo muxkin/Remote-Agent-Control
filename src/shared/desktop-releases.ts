@@ -10,11 +10,21 @@ export const nativeInstallerTargets = [
   { platform: 'linux', arch: 'x64', suffix: 'linux-x64.deb' },
 ] as const;
 
-export type NativeInstallerTarget = (typeof nativeInstallerTargets)[number];
+export const linuxMuslInstallerTarget = {
+  platform: 'linux', arch: 'x64-musl', suffix: 'linux-x64-musl-desktop.tar.zst',
+} as const;
+
+export type NativeInstallerTarget = (typeof nativeInstallerTargets)[number] | typeof linuxMuslInstallerTarget;
 
 export function releaseKey(path: string) {
   const name = path.replace(/^\/downloads\/desktop\//, '');
   if (name === 'releases.json') return `desktop-releases/${name}`;
+  if (
+    /^native\/rust\/linux\/x64-musl\/(?:latest\.json|AgentSpace-Native-\d{1,6}\.\d{1,6}\.\d{1,6}-linux-x64-musl-desktop\.tar\.zst)$/.test(
+      name,
+    )
+  )
+    return `desktop-releases/${name}`;
   if (
     /^native\/preview\/linux\/x64\/(?:preview\.json|AgentSpace-Native-\d{1,6}\.\d{1,6}\.\d{1,6}-linux-x64\.(?:deb|tar\.xz))$/.test(
       name,

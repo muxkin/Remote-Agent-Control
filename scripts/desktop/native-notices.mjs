@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 export async function nativeNotices(native, target, features = []) {
   const graph = execFileSync(
@@ -39,13 +39,6 @@ export async function nativeNotices(native, target, features = []) {
       for (const entry of entries) {
         if (entry.isFile() && /^(licen[cs]e|copying|notice|ofl)/i.test(entry.name))
           texts.push(`\n${pkg} · ${entry.name}\n\n${await readFile(join(dir, entry.name), 'utf8')}`);
-      }
-      if (pkg.startsWith('ely-core-')) {
-        const assets = join(dir, 'assets');
-        for (const file of await readdir(assets, { recursive: true }).catch(() => [])) {
-          if (/^(licen[cs]e|copying|notice|ofl)/i.test(basename(file)))
-            texts.push(`\n${pkg} · ${file}\n\n${await readFile(join(assets, file), 'utf8')}`);
-        }
       }
       break;
     }

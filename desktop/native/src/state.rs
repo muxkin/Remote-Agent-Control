@@ -413,6 +413,10 @@ fn private_file(_: &Path, _: bool) -> Result<File> {
     bail!("此预览尚未实现 Windows 的私有文件 ACL")
 }
 
+pub(crate) fn default_directory() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|path| path.join("agent-space-native-preview"))
+}
+
 pub fn saved_origin(directory: &Path) -> Result<Option<String>> {
     use std::io::Read;
     let path = directory.join("service-origin");

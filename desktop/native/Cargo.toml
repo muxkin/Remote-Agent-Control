@@ -1,6 +1,6 @@
 [package]
 name = "agent-space-native"
-version = "0.3.36"
+version = "0.3.38"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -8,9 +8,9 @@ publish = false
 default-run = "agent-space-native"
 
 [features]
-default = ["ely"]
-ely = ["dep:ely-core", "dep:gpui", "dep:gpui-platform", "dep:tray-icon", "dep:auto-launch", "dep:zbus"]
-official-plugins = []
+default = ["desktop"]
+desktop = ["dep:tray-icon", "dep:auto-launch", "dep:zbus", "dep:dispatch2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+official-plugins = ["dep:jsonschema", "dep:pulldown-cmark", "dep:toml"]
 
 [[bin]]
 name = "agent-space-adapter-dsh"
@@ -31,17 +31,22 @@ dirs = "6"
 dotenvy = "0.15"
 futures = "0.3"
 icu_properties = "2"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-jsonschema = { version = "0.61", default-features = false }
+jsonschema = { version = "0.61", default-features = false, optional = true }
 libp2p-core = "0.44"
 libp2p-identity = { version = "0.3", features = ["ed25519", "peerid", "rand"] }
 libp2p-noise = "0.47"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdh"] }
+open = "5"
 percent-encoding = "2"
-pulldown-cmark = { version = "0.13", default-features = false }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 rand = "0.9"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "stream", "json"] }
 ring = "0.17"
 rusqlite = { version = "0.39", features = ["backup", "bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
@@ -54,16 +59,13 @@ time = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "signal", "process", "fs"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["compat", "rt", "io"] }
-toml = "1.2"
+toml = { version = "1.2", optional = true }
 unicode-segmentation = "1"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 webrtc = "0.21.1"
 
 zstd = { version = "0.13", default-features = false }
-ely-core = { version = "=0.2.0", optional = true }
-gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, optional = true }
-gpui-platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "x11", "wayland"], optional = true }
 tray-icon = { version = "=0.26.1", default-features = false, features = ["ksni"], optional = true }
 auto-launch = { version = "=0.6.0", optional = true }
 
@@ -77,6 +79,10 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+dispatch2 = { version = "0.3", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSObject"], optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSRunningApplication", "objc2-core-foundation"], optional = true }
 
 [build-dependencies]
 embed-resource = "3.0.12"
@@ -92,5 +98,5 @@ opt-level = "s"
 sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization",
-  "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading",
+  "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging",
 ] }

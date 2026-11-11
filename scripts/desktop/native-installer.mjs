@@ -10,6 +10,7 @@ const appId = 'org.agent-space.adapter';
 const appName = 'Agent Space Adapter';
 const icon = resolve('src/web/public/app-icon-512.png');
 const program = 'agent-space-native';
+export const linuxGlibcMinor = 35;
 
 export async function buildInstaller(platform, source, version, output, signed = false) {
   const stage = await mkdtemp(join(tmpdir(), 'agent-space-native-installer-'));
@@ -66,7 +67,7 @@ Architecture: amd64
 Maintainer: Agent Space contributors
 Section: utils
 Priority: optional
-Depends: libc6 (>= 2.39), libgcc-s1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libfontconfig1
+Depends: libc6 (>= 2.${linuxGlibcMinor}), libgcc-s1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libfontconfig1
 Recommends: libvulkan1, mesa-vulkan-drivers, pkexec
 Description: Agent Space native desktop adapter
  Connects local Agent sessions to the Agent Space workbench.

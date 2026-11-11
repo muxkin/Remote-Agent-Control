@@ -1,7 +1,7 @@
 use crate::{
     dsh::{Dsh, Session, records},
     files::{BLOCK, VerifiedUpload},
-    history_media::{MissingAttachment, Source, legacy_root, links},
+    history_media::{MissingAttachment, Source, dsh_attachment_digest as attachment_digest, links},
     plugins::Media,
     state::{hash, private_file},
 };
@@ -10,12 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{io::Write, path::Path, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
@@ -428,48 +423,11 @@ fn workspace_path(cwd: &str, reference: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn legacy_file(backend: &str, thread: &str, attachment_id: &str) -> Result<File> {
-    let root = legacy_root().context(MissingAttachment)?;
-    let receipt_name = format!("{}.json", hash(&json!([thread, attachment_id]).to_string()));
-    let receipt = root
-        .join("backends")
-        .join(backend)
-        .join("receipts")
-        .join(receipt_name);
-    let mut bytes = Vec::new();
-    private_file(&receipt, false)
-        .map_err(|_| MissingAttachment)?
-        .take(8193)
-        .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 8192, "旧附件回执无效");
-    let value: Value = serde_json::from_slice(&bytes)?;
-    let path = PathBuf::from(value["path"].as_str().context(MissingAttachment)?);
-    let uploads = root
-        .join("uploads")
-        .canonicalize()
-        .map_err(|_| MissingAttachment)?;
-    let canonical = path.canonicalize().map_err(|_| MissingAttachment)?;
-    ensure!(
-        path.is_absolute() && canonical.starts_with(uploads),
-        "旧附件不在上传目录"
-    );
-    private_file(&canonical, false)
-}
-
 fn valid_id(id: &str) -> bool {
     (1..=200).contains(&id.len())
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
-pub(crate) fn attachment_digest(id: &str) -> Option<&str> {
-    let digest = id.strip_prefix("sha256:").unwrap_or(id);
-    (digest.len() == 64
-        && digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    .then_some(digest)
 }
 
 fn valid_name(name: &str) -> bool {

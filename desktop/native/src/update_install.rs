@@ -208,7 +208,12 @@ fn replace_mac(executable: &Path, artifact: &Path, stage: &Path, release_key: bo
     result
 }
 
-pub(crate) fn restart(executable: &Path, directory: &Path) -> Result<()> {
+pub(crate) fn restart(executable: &Path, directory: &Path, headless: bool) -> Result<()> {
+    let mode = if headless {
+        "--headless"
+    } else {
+        "--background"
+    };
     if cfg!(target_os = "macos") {
         let app = mac_app(executable).context("应用安装位置无效")?;
         let mut state = std::ffi::OsString::from("POCKET_NATIVE_STATE_DIR=");
@@ -221,13 +226,13 @@ pub(crate) fn restart(executable: &Path, directory: &Path) -> Result<()> {
                 "-a".as_ref(),
                 app.as_os_str(),
                 "--args".as_ref(),
-                "--background".as_ref(),
+                mode.as_ref(),
             ],
         );
     }
     let mut child = Command::new(executable);
     child
-        .arg("--background")
+        .arg(mode)
         .env("POCKET_NATIVE_STATE_DIR", directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

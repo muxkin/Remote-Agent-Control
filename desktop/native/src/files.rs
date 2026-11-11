@@ -82,6 +82,7 @@ pub(crate) struct VerifiedUpload {
     pub sha256: String,
 }
 
+#[cfg(feature = "official-plugins")]
 impl Attachment {
     pub fn image(&self) -> bool {
         self.path
@@ -584,6 +585,7 @@ pub(crate) fn is_hash(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn message_attachment_text(text: &str) -> (String, Vec<Value>) {
     const LEGACY: &str = "\n\n手机上传的附件（保留原始文件）：\n";
     if let Some((body, lines)) = text.rsplit_once(LEGACY) {

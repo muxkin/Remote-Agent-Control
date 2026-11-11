@@ -1,3 +1,4 @@
+#[cfg(feature = "official-plugins")]
 use crate::{
     app_tools::{self, AppTools, Tool},
     codex::History,
@@ -5,8 +6,11 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "official-plugins")]
 use serde_json::json;
+#[cfg(feature = "official-plugins")]
 use std::{sync::Arc, time::Duration};
+#[cfg(feature = "official-plugins")]
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -119,6 +123,7 @@ impl Change {
         }
     }
 
+    #[cfg(feature = "official-plugins")]
     pub async fn execute(
         self,
         desktop: Desktop,
@@ -256,6 +261,7 @@ impl Change {
     }
 }
 
+#[cfg(feature = "official-plugins")]
 #[derive(Serialize)]
 pub struct Project {
     id: String,
@@ -264,6 +270,7 @@ pub struct Project {
     desktop_id: String,
 }
 
+#[cfg(feature = "official-plugins")]
 pub async fn projects(tools: &AppTools, history: History, anchor: &str) -> Result<Vec<Project>> {
     let mut stream = tools.connect(Tool::Projects).await?;
     let result = timeout(

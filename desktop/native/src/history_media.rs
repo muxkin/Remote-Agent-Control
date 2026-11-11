@@ -1,23 +1,42 @@
-use crate::{codex::History, files, state::legacy_private_file};
-use anyhow::{Context, Result, bail, ensure};
+#[cfg(feature = "official-plugins")]
+use crate::codex::History;
+use crate::{
+    files,
+    state::{hash, legacy_private_file, private_file},
+};
+#[cfg(feature = "official-plugins")]
+use anyhow::bail;
+use anyhow::{Context, Result, ensure};
+#[cfg(feature = "official-plugins")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(feature = "official-plugins")]
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+#[cfg(feature = "official-plugins")]
 use regex::Regex;
 use serde_json::{Value, json};
+#[cfg(feature = "official-plugins")]
 use std::{
     collections::HashMap,
-    fs::File,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    io::{BufRead, BufReader, Seek, SeekFrom, Write},
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
+#[cfg(feature = "official-plugins")]
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(feature = "official-plugins")]
 const LIMIT: u64 = 512 * 1024 * 1024;
+#[cfg(feature = "official-plugins")]
 pub(crate) const MAX_LINE: u64 = 32 * 1024 * 1024;
+#[cfg(feature = "official-plugins")]
 const INLINE_LIMIT: usize = 24 * 1024 * 1024;
+#[cfg(feature = "official-plugins")]
 const MAX_VIEWED_IMAGES: usize = 32;
 
 #[derive(Debug)]
@@ -31,9 +50,11 @@ impl std::fmt::Display for MissingAttachment {
 
 impl std::error::Error for MissingAttachment {}
 
+#[cfg(feature = "official-plugins")]
 #[derive(Default, Clone)]
 pub struct Rollouts(Arc<Mutex<HashMap<PathBuf, Expanded>>>);
 
+#[cfg(feature = "official-plugins")]
 struct Expanded {
     file: tempfile::NamedTempFile,
     modified: SystemTime,
@@ -41,6 +62,7 @@ struct Expanded {
     size: u64,
 }
 
+#[cfg(feature = "official-plugins")]
 impl Rollouts {
     pub fn open(&self, path: &Path) -> Result<File> {
         let file = File::open(path)?;
@@ -95,6 +117,7 @@ pub struct Source {
     pub expected: Option<(u64, String)>,
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn description(
     history: &History,
     backend: &str,
@@ -158,7 +181,7 @@ pub fn description(
                         && links(text).any(|link| link_matches(&link)))
             })
         {
-            match project_file(path, history.home(), &cwd) {
+            match attachment_file(path) {
                 Ok(source) => return Ok(source),
                 Err(error) => missing |= is_not_found(&error),
             }
@@ -213,7 +236,7 @@ pub fn description(
                         .iter()
                         .any(|item| item["path"].as_str().is_some_and(link_matches)))
             {
-                match project_file(path, history.home(), &cwd) {
+                match attachment_file(path) {
                     Ok(source) => return Ok(source),
                     Err(error) => missing |= is_not_found(&error),
                 }
@@ -268,7 +291,7 @@ pub fn description(
                 .and_then(|id| Uuid::parse_str(id).ok())
                 == Some(thread);
             if own_thread && link_matches(path) {
-                match project_file(requested.as_ref().unwrap(), history.home(), &cwd) {
+                match attachment_file(requested.as_ref().unwrap()) {
                     Ok(source) => return Ok(source),
                     Err(_) => missing = true,
                 }
@@ -296,6 +319,7 @@ fn is_not_found(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
+#[cfg(feature = "official-plugins")]
 fn viewed_images(output: &Value) -> Option<Vec<&str>> {
     let mut images = Vec::new();
     for item in output.as_array()? {
@@ -334,6 +358,43 @@ pub(crate) fn legacy_root() -> Option<PathBuf> {
     } else {
         dirs::data_local_dir().map(|dir| dir.join("codex-pocket-remote"))
     }
+}
+
+pub(crate) fn legacy_dsh_file(backend: &str, thread: &str, attachment_id: &str) -> Result<File> {
+    let root = legacy_root().context(MissingAttachment)?;
+    let receipt_name = format!("{}.json", hash(&json!([thread, attachment_id]).to_string()));
+    let receipt = root
+        .join("backends")
+        .join(backend)
+        .join("receipts")
+        .join(receipt_name);
+    let mut bytes = Vec::new();
+    private_file(&receipt, false)
+        .map_err(|_| MissingAttachment)?
+        .take(8193)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 8192, "旧附件回执无效");
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let path = PathBuf::from(value["path"].as_str().context(MissingAttachment)?);
+    let uploads = root
+        .join("uploads")
+        .canonicalize()
+        .map_err(|_| MissingAttachment)?;
+    let canonical = path.canonicalize().map_err(|_| MissingAttachment)?;
+    ensure!(
+        path.is_absolute() && canonical.starts_with(uploads),
+        "旧附件不在上传目录"
+    );
+    private_file(&canonical, false)
+}
+
+pub(crate) fn dsh_attachment_digest(id: &str) -> Option<&str> {
+    let digest = id.strip_prefix("sha256:").unwrap_or(id);
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(digest)
 }
 
 pub(crate) fn legacy_upload(
@@ -578,38 +639,14 @@ fn read_legacy_upload(
     }))
 }
 
-fn project_file(path: &Path, home: &Path, cwd: &Path) -> Result<Source> {
+#[cfg(feature = "official-plugins")]
+fn attachment_file(path: &Path) -> Result<Source> {
     let canonical = path.canonicalize()?;
     ensure!(
         !canonical
             .components()
             .any(|part| part.as_os_str().eq_ignore_ascii_case("native-uploads")),
         "此附件属于其他设备或会话"
-    );
-    let allowed = |root: &Path| {
-        root.parent().is_some()
-            && path.starts_with(root)
-            && root
-                .canonicalize()
-                .is_ok_and(|root| canonical.starts_with(&root) && canonical != root)
-    };
-    let media_root = ["generated_images", "artifacts", "visualizations"]
-        .into_iter()
-        .any(|dir| allowed(&home.join(dir)));
-    ensure!(
-        allowed(cwd) || media_root,
-        "附件不在会话工作区或桌面媒体目录"
-    );
-    ensure!(
-        media_root
-            || canonical.components().all(|part| {
-                let value = part.as_os_str().to_string_lossy().to_ascii_lowercase();
-                !matches!(
-                    value.as_str(),
-                    ".git" | ".ssh" | ".config" | ".local" | ".codex" | "auth.json" | ".env"
-                ) && !value.starts_with(".env.")
-            }),
-        "此文件不能通过附件入口读取"
     );
     ensure!(canonical.metadata()?.is_file(), "附件不是普通文件");
     let name = path
@@ -624,6 +661,7 @@ fn project_file(path: &Path, home: &Path, cwd: &Path) -> Result<Source> {
     })
 }
 
+#[cfg(feature = "official-plugins")]
 fn local_path(reference: &str, cwd: &Path) -> Result<PathBuf> {
     let raw = reference
         .trim()
@@ -675,6 +713,7 @@ fn local_path(reference: &str, cwd: &Path) -> Result<PathBuf> {
     Ok(path.components().collect())
 }
 
+#[cfg(feature = "official-plugins")]
 pub(crate) fn links(text: &str) -> impl Iterator<Item = String> {
     static CITATION: OnceLock<Regex> = OnceLock::new();
     static ATTRIBUTE: OnceLock<Regex> = OnceLock::new();
@@ -728,6 +767,7 @@ pub(crate) fn links(text: &str) -> impl Iterator<Item = String> {
     links.into_iter()
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn media(item: &Value) -> Vec<String> {
     fn visit(item: &Value, level: u8, result: &mut Vec<String>) {
         if level > 8 || result.len() >= 32 {
@@ -800,10 +840,12 @@ pub fn media(item: &Value) -> Vec<String> {
     found
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn attachments(explicit: Vec<Value>, content: &Value) -> Vec<Value> {
     collect_attachments(explicit, media(content), |_, _| {})
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn attachments_from(
     explicit: Vec<Value>,
     media: Vec<String>,
@@ -821,6 +863,7 @@ pub fn attachments_from(
     })
 }
 
+#[cfg(feature = "official-plugins")]
 fn collect_attachments(
     mut explicit: Vec<Value>,
     media: Vec<String>,
@@ -845,6 +888,7 @@ fn collect_attachments(
     explicit
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn media_reference(source: &str) -> String {
     if let Some((kind, _)) = source
         .strip_prefix("data:")
@@ -856,6 +900,7 @@ pub fn media_reference(source: &str) -> String {
     source.to_owned()
 }
 
+#[cfg(feature = "official-plugins")]
 fn embedded(data: &str) -> Result<Source> {
     ensure!(data.len() <= INLINE_LIMIT, "内嵌附件过大");
     let (kind, bytes) = data
@@ -873,6 +918,7 @@ fn embedded(data: &str) -> Result<Source> {
     })
 }
 
+#[cfg(feature = "official-plugins")]
 fn extension(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "image/png" => "png",

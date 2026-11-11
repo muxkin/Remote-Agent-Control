@@ -15,6 +15,7 @@ export function updateFilename(version, platform, arch) {
   if (typeof version !== 'string' || !versionPattern.test(version)) throw Error('更新版本无效');
   const suffix = {
     'linux/x64': 'linux-x64.deb',
+    'linux/x64-musl': 'linux-x64-musl-desktop.tar.zst',
     'win32/x64': 'windows-x64-setup.exe',
     'darwin/x64': 'macos-x64.dmg',
     'darwin/arm64': 'macos-arm64.dmg',

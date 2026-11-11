@@ -29,15 +29,9 @@ use windows_sys::Win32::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
-        OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL, SECURITY_IDENTIFICATION, WRITE_OWNER,
+        OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL, WRITE_OWNER,
     },
-    System::{
-        Pipes::GetNamedPipeServerProcessId,
-        Threading::{
-            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-            QueryFullProcessImageNameW,
-        },
-    },
+    System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 
 const SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -335,8 +329,18 @@ fn verify(handle: HANDLE, user: &User, directory: bool, policy: OwnerPolicy) -> 
     Ok(())
 }
 
+#[cfg(feature = "official-plugins")]
 pub fn codex_pipe(path: &Path, expected: &Path) -> Result<crate::codex_peer::Stream> {
     use tokio::net::windows::named_pipe::ClientOptions;
+    use windows_sys::Win32::{
+        Storage::FileSystem::SECURITY_IDENTIFICATION,
+        System::{
+            Pipes::GetNamedPipeServerProcessId,
+            Threading::{
+                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            },
+        },
+    };
     ensure!(
         path.as_os_str()
             .to_string_lossy()

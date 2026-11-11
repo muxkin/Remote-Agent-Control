@@ -13,18 +13,38 @@ const PLUGINS: &str = "usr/lib/agent-space-native/official-plugins";
 const MAX_PAYLOAD: u64 = 512 * 1024 * 1024;
 
 pub(crate) fn installed(executable: &Path) -> bool {
-    dirs::home_dir().is_some_and(|home| installed_in(executable, &home))
-}
-
-fn installed_in(executable: &Path, home: &Path) -> bool {
-    let directory = home.join(".local/opt/agent-space/native");
-    executable == directory.join(PROGRAM)
-        && fs::symlink_metadata(&directory).is_ok_and(|metadata| {
-            metadata.is_dir()
-                && metadata.uid() == rustix::process::geteuid().as_raw()
-                && metadata.mode() & 0o200 != 0
+    let Some(directory) = executable.parent() else {
+        return false;
+    };
+    let uid = rustix::process::geteuid().as_raw();
+    if !executable.is_absolute()
+        || executable.file_name() != Some(PROGRAM.as_ref())
+        || !fs::symlink_metadata(directory).is_ok_and(|metadata| {
+            metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o300 == 0o300
         })
-        && fs::symlink_metadata(executable).is_ok_and(|metadata| metadata.is_file())
+        || !fs::symlink_metadata(executable)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.uid() == uid)
+    {
+        return false;
+    }
+    let plugins = directory.join("official-plugins");
+    match fs::symlink_metadata(&plugins) {
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == uid => {
+            ["codex", "dsh"].into_iter().all(|product| {
+                let source = plugins.join(product);
+                fs::symlink_metadata(&source)
+                    .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == uid)
+                    && read_manifest(&source).is_ok_and(|manifest| {
+                        manifest.name == format!("@agent-remote/adapter-{product}")
+                            && manifest.product == product
+                    })
+            })
+        }
+        // Earlier user installations could contain only the main executable.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => dirs::home_dir()
+            .is_some_and(|home| directory == home.join(".local/opt/agent-space/native")),
+        _ => false,
+    }
 }
 
 pub(crate) fn replace(executable: &Path, artifact: &Path) -> Result<()> {
@@ -42,65 +62,83 @@ pub(crate) fn replace(executable: &Path, artifact: &Path) -> Result<()> {
 }
 
 fn unpack(artifact: &Path, destination: &Path) -> Result<()> {
+    if let Some(root) = artifact
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".tar.zst"))
+    {
+        return unpack_payload(File::open(artifact)?, destination, Some(Path::new(root)));
+    }
+
     let mut archive = ar::Archive::new(File::open(artifact)?);
     while let Some(entry) = archive.next_entry() {
         let entry = entry?;
-        if entry.header().identifier() != b"data.tar.zst" {
-            continue;
+        if entry.header().identifier() == b"data.tar.zst" {
+            return unpack_payload(entry, destination, None);
         }
-        let decoded = zstd::stream::read::Decoder::new(entry)?.take(MAX_PAYLOAD + 1);
-        let mut payload = tar::Archive::new(decoded);
-        let mut files = HashSet::new();
-        let mut size = 0u64;
-        for (index, entry) in payload.entries()?.enumerate() {
-            ensure!(index < 8192, "更新包文件过多");
-            let mut entry = entry?;
-            let path = entry.path()?;
-            ensure!(
-                path.components()
-                    .all(|part| matches!(part, Component::Normal(_) | Component::CurDir)),
-                "更新包路径无效"
-            );
-            let path: PathBuf = path
-                .components()
-                .filter(|part| *part != Component::CurDir)
-                .collect();
-            let target = if path == Path::new("usr/bin/agent-space-native") {
-                PathBuf::from(PROGRAM)
-            } else if let Ok(relative) = path.strip_prefix(PLUGINS) {
-                Path::new("official-plugins").join(relative)
-            } else {
-                continue;
-            };
-            let kind = entry.header().entry_type();
-            if kind.is_dir() {
-                continue;
-            }
-            ensure!(kind.is_file(), "更新包中的程序和插件须为普通文件");
-            ensure!(files.insert(target.clone()), "更新包包含重复文件");
-            size = size.checked_add(entry.size()).context("更新包体积无效")?;
-            ensure!(size <= MAX_PAYLOAD, "更新包解压后过大");
-            let target = destination.join(target);
-            fs::create_dir_all(target.parent().context("更新包路径无效")?)?;
-            entry.unpack(&target)?;
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
-        }
-        ensure!(destination.join(PROGRAM).is_file(), "更新包缺少适配器");
-        fs::set_permissions(destination.join(PROGRAM), fs::Permissions::from_mode(0o755))?;
-        for product in ["codex", "dsh"] {
-            let root = destination.join("official-plugins").join(product);
-            let manifest = read_manifest(&root)?;
-            ensure!(
-                manifest.name == format!("@agent-remote/adapter-{product}")
-                    && manifest.product == product,
-                "更新包的官方插件标识无效"
-            );
-            let binary = Package { manifest, root }.executable()?;
-            fs::set_permissions(binary, fs::Permissions::from_mode(0o755))?;
-        }
-        return Ok(());
     }
     bail!("更新包缺少 Zstandard 格式的 Debian 数据归档")
+}
+
+fn unpack_payload(reader: impl Read, destination: &Path, root: Option<&Path>) -> Result<()> {
+    let decoded = zstd::stream::read::Decoder::new(reader)?.take(MAX_PAYLOAD + 1);
+    let mut payload = tar::Archive::new(decoded);
+    let mut files = HashSet::new();
+    let mut size = 0u64;
+    for (index, entry) in payload.entries()?.enumerate() {
+        ensure!(index < 8192, "更新包文件过多");
+        let mut entry = entry?;
+        let path = entry.path()?;
+        ensure!(
+            path.components()
+                .all(|part| matches!(part, Component::Normal(_) | Component::CurDir)),
+            "更新包路径无效"
+        );
+        let path: PathBuf = path
+            .components()
+            .filter(|part| *part != Component::CurDir)
+            .collect();
+        let target = if let Some(root) = root {
+            let relative = path.strip_prefix(root).context("更新包目录无效")?;
+            if relative == Path::new(PROGRAM) || relative.starts_with("official-plugins") {
+                relative.to_path_buf()
+            } else {
+                continue;
+            }
+        } else if path == Path::new("usr/bin/agent-space-native") {
+            PathBuf::from(PROGRAM)
+        } else if let Ok(relative) = path.strip_prefix(PLUGINS) {
+            Path::new("official-plugins").join(relative)
+        } else {
+            continue;
+        };
+        let kind = entry.header().entry_type();
+        if kind.is_dir() {
+            continue;
+        }
+        ensure!(kind.is_file(), "更新包中的程序和插件须为普通文件");
+        ensure!(files.insert(target.clone()), "更新包包含重复文件");
+        size = size.checked_add(entry.size()).context("更新包体积无效")?;
+        ensure!(size <= MAX_PAYLOAD, "更新包解压后过大");
+        let target = destination.join(target);
+        fs::create_dir_all(target.parent().context("更新包路径无效")?)?;
+        entry.unpack(&target)?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
+    }
+    ensure!(destination.join(PROGRAM).is_file(), "更新包缺少适配器");
+    fs::set_permissions(destination.join(PROGRAM), fs::Permissions::from_mode(0o755))?;
+    for product in ["codex", "dsh"] {
+        let root = destination.join("official-plugins").join(product);
+        let manifest = read_manifest(&root)?;
+        ensure!(
+            manifest.name == format!("@agent-remote/adapter-{product}")
+                && manifest.product == product,
+            "更新包的官方插件标识无效"
+        );
+        let binary = Package { manifest, root }.executable()?;
+        fs::set_permissions(binary, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -198,19 +236,26 @@ mod tests {
     }
 
     #[test]
-    fn stable_user_location_is_detected_and_symbolic_links_are_rejected() -> Result<()> {
-        let home = tempfile::tempdir()?;
-        let directory = home.path().join(".local/opt/agent-space/native");
-        fs::create_dir_all(&directory)?;
+    fn portable_updates_detect_the_bundle_in_a_user_chosen_directory() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let directory = fixture.path().join("my adapter");
+        let artifact = fixture.path().join("update.deb");
+        package(&artifact, false)?;
+        fs::create_dir(&directory)?;
         let executable = directory.join(PROGRAM);
         fs::write(&executable, b"adapter")?;
-        assert!(installed_in(&executable, home.path()));
-        assert!(!installed_in(&executable, directory.as_path()));
+        assert!(!installed(&executable));
+        unpack(&artifact, &directory)?;
+        assert!(installed(&executable));
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))?;
+        assert!(!installed(&executable));
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         fs::remove_file(&executable)?;
-        let actual = home.path().join(PROGRAM);
+        let actual = fixture.path().join(PROGRAM);
         fs::write(&actual, b"adapter")?;
         std::os::unix::fs::symlink(actual, &executable)?;
-        assert!(!installed_in(&executable, home.path()));
+        assert!(!installed(&executable));
         Ok(())
     }
 }

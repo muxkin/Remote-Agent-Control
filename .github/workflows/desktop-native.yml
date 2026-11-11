@@ -10,6 +10,8 @@ on:
       - 'src/web/public/app-icon-*.png'
       - 'scripts/desktop/native-*.ts'
       - 'scripts/desktop/native-*.mjs'
+      - 'scripts/desktop/native-musl*'
+      - 'src/shared/desktop-releases.ts'
       - 'src/server/**'
       - 'packages/**'
       - 'package-lock.json'
@@ -23,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             platform: linux
             arch: x64
             target: x86_64-unknown-linux-gnu
@@ -51,32 +53,84 @@ jobs:
           node-version: 24
           cache: npm
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils pkexec
+        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils pkexec zstd
       - if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
       - run: npm ci --ignore-scripts
-      - name: Select Rust with stable map_or_default for the macOS UI
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          echo 'RUSTUP_TOOLCHAIN=1.99.1' >> "$GITHUB_ENV"
-      - name: Build the Ely desktop app
+      - name: Build the Rust adapter with system tray
         working-directory: desktop/native
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: cargo build --release --locked
       - name: Build the official Codex and DSH plugins
+        if: runner.os != 'Linux'
         working-directory: desktop/native
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: cargo build --release --locked --no-default-features --features official-plugins --bin agent-space-adapter-codex --bin agent-space-adapter-dsh
-      - name: Package the official Codex and DSH plugins
+      - name: Build the static musl gateway and Linux plugins
+        if: runner.os == 'Linux'
         run: |
-          node scripts/desktop/native-plugin-package.mjs codex desktop/native/target/release/agent-space-adapter-codex${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-official-plugins/codex ${{ matrix.target }}
-          node scripts/desktop/native-plugin-package.mjs dsh desktop/native/target/release/agent-space-adapter-dsh${{ runner.os == 'Windows' && '.exe' || '' }} dist/native-official-plugins/dsh ${{ matrix.target }}
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/src" --workdir /src/desktop/native \
+            rust:1.95.0-alpine sh -ec '
+              cargo build --release --locked --target x86_64-unknown-linux-musl \
+                --no-default-features --bin agent-space-native
+              cargo build --release --locked --target x86_64-unknown-linux-musl \
+                --no-default-features --features official-plugins \
+                --bin agent-space-adapter-codex --bin agent-space-adapter-dsh
+            '
+      - name: Package the official Codex and DSH plugins
+        shell: bash
+        run: |
+          bin_dir=desktop/native/target/release
+          target=${{ matrix.target }}
+          if [[ "${{ runner.os }}" == Linux ]]; then
+            target=x86_64-unknown-linux-musl
+            bin_dir=desktop/native/target/$target/release
+          fi
+          for product in codex dsh; do
+            node scripts/desktop/native-plugin-package.mjs "$product" "$bin_dir/agent-space-adapter-$product${{ runner.os == 'Windows' && '.exe' || '' }}" "dist/native-official-plugins/$product" "$target"
+          done
       - name: Package the Rust adapter
         run: node scripts/desktop/native-package.mjs ${{ matrix.platform }} desktop/native/target/release/${{ matrix.binary }} ${{ matrix.target }} dist/native-official-plugins --installer
+      - name: Package and verify the static musl gateway
+        if: runner.os == 'Linux'
+        env:
+          POCKET_NATIVE_TEST_IPC: '1'
+          POCKET_NATIVE_TEST_BUNDLED_PLUGINS: '1'
+        run: |
+          target=x86_64-unknown-linux-musl
+          node scripts/desktop/native-package.mjs linux "desktop/native/target/$target/release/agent-space-native" "$target" dist/native-official-plugins
+          bundle=$(mktemp -d)
+          tar -xJf dist/desktop-native-preview/*-linux-x64-musl.tar.xz --strip-components=1 -C "$bundle"
+          node --import tsx scripts/desktop/native-smoke.ts "$bundle/agent-space-native"
+          node --import tsx scripts/desktop/native-dsh-smoke.ts "$bundle/agent-space-native"
+          docker run --rm --volume "$bundle:/bundle:ro" rust:1.95.0-alpine sh -ec '
+            export POCKET_NATIVE_STATE_DIR=/tmp/adapter-state
+            /bundle/agent-space-native --adapter install /bundle/official-plugins/codex
+            /bundle/agent-space-native --adapter install /bundle/official-plugins/dsh
+          '
+      - name: Build and package the portable musl desktop
+        if: runner.os == 'Linux'
+        run: |
+          docker build --target build -f scripts/desktop/native-musl.Dockerfile -t agent-space-musl-build scripts/desktop
+          docker run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/src" --workdir /src \
+            agent-space-musl-build sh -ec '
+              export CARGO_TARGET_DIR=/src/dist/native-musl-target
+              cargo build --manifest-path desktop/native/Cargo.toml --release --locked \
+                --target x86_64-unknown-linux-musl --bin agent-space-native
+            '
+          binary=dist/native-musl-target/x86_64-unknown-linux-musl/release/agent-space-native
+          node scripts/desktop/native-package.mjs linux "$binary" \
+            x86_64-unknown-linux-musl dist/native-official-plugins --musl-desktop
+          bash scripts/desktop/native-musl-desktop-smoke.sh \
+            dist/desktop-native-preview/*-musl-desktop.tar.zst agent-space-musl-build
+          docker run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/src" --workdir /src \
+            -e POCKET_QA_DISPOSABLE_INSTALL=1 -e POCKET_QA_LINUX_MUSL_DESKTOP=1 \
+            -e CARGO_TARGET_DIR=/src/dist/native-musl-target \
+            agent-space-musl-build node scripts/desktop/native-rust-update-smoke.mjs \
+              dist/desktop-native-preview "$binary"
       - name: Install and verify the Debian package and its default plugins
         if: runner.os == 'Linux'
         env:
@@ -92,7 +146,7 @@ jobs:
             node --import tsx scripts/desktop/native-smoke.ts /usr/bin/agent-space-native
           node --import tsx scripts/desktop/native-dsh-smoke.ts /usr/bin/agent-space-native
           cd desktop/native
-          cargo test --release --locked
+          cargo test --release --locked --features official-plugins
       - name: Mount and verify the macOS installer and its default plugins
         if: runner.os == 'macOS'
         env:
@@ -148,7 +202,7 @@ jobs:
         if: runner.os == 'Windows'
         env:
           POCKET_NATIVE_TEST_IPC: '1'
-        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }}
+        run: node --import tsx scripts/desktop/native-smoke.ts desktop/native/target/release/${{ matrix.binary }} dist/native-official-plugins/codex
       - name: Build the independent Rust plugin fixture
         working-directory: desktop/native
         run: cargo build --release --locked --no-default-features --example native-plugin-fixture
@@ -161,6 +215,15 @@ jobs:
         env:
           POCKET_NATIVE_TEST_STANDALONE_CALL: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: node --import tsx scripts/desktop/native-rust-im-smoke.ts desktop/native/target/release/${{ matrix.binary }} desktop/native/target/release/examples/native-im-fixture${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Verify the packaged static musl gateway supports independent Agent calls
+        if: runner.os == 'Linux'
+        env:
+          POCKET_NATIVE_TEST_STANDALONE_CALL: '1'
+        run: |
+          bundle=$(mktemp -d)
+          tar -xJf dist/desktop-native-preview/*-linux-x64-musl.tar.xz --strip-components=1 -C "$bundle"
+          node --import tsx scripts/desktop/native-rust-im-smoke.ts "$bundle/agent-space-native" \
+            desktop/native/target/release/examples/native-im-fixture
       - name: Verify the external Codex plugin and online version switches
         env:
           POCKET_NATIVE_TEST_IPC: '1'
@@ -184,6 +247,7 @@ jobs:
           path: |
             dist/desktop-native-preview/AgentSpace-Native-*.zip
             dist/desktop-native-preview/AgentSpace-Native-*.tar.xz
+            dist/desktop-native-preview/AgentSpace-Native-*.tar.zst
             dist/desktop-native-preview/AgentSpace-Native-*.deb
             dist/desktop-native-preview/AgentSpace-Native-*.dmg
             dist/desktop-native-preview/AgentSpace-Native-*-setup.exe

@@ -677,7 +677,7 @@ impl Adapter for Host {
         let id = reply["attachmentId"]
             .as_str()
             .context("原生插件附件标识无效")?;
-        let sha256 = crate::dsh_media::attachment_digest(id)
+        let sha256 = crate::history_media::dsh_attachment_digest(id)
             .filter(|digest| reply["sha256"] == *digest)
             .context("原生插件附件摘要无效")?;
         ensure!(
@@ -876,7 +876,9 @@ fn view(value: &Value, id: &str, revision: u64, read_only: bool, epoch: u64) -> 
             .is_object()
             .then(|| value["streamed"].clone()),
         observations: observations.into(),
+        #[cfg(feature = "official-plugins")]
         image_limits: value["imageLimits"].clone(),
+        #[cfg(feature = "official-plugins")]
         continued_questions: value["continuedQuestions"].clone(),
         plugin_epoch: Some(epoch),
     })

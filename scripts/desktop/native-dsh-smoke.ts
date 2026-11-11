@@ -17,6 +17,8 @@ import { createIdentity } from '../../src/shared/secure-channel.js';
 const state = await mkdtemp(join(tmpdir(), 'native-dsh-smoke-'));
 const executable = resolve(process.argv[2]);
 const plugin = process.argv[3] ? resolve(process.argv[3]) : undefined;
+const bundled = process.env.POCKET_NATIVE_TEST_BUNDLED_PLUGINS === '1';
+assert(bundled || plugin, 'Supply the DSH plugin directory or test an installer with bundled plugins');
 const legacy = join(state, 'legacy');
 const legacyWork = join(legacy, 'original-workspace');
 const legacyDesktop = join(legacy, 'desktop-settings.json');
@@ -673,12 +675,6 @@ async function stop() {
 }
 
 try {
-  if (plugin) {
-    execFileSync(executable, ['--adapter', 'install', plugin], {
-      env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-  }
   dsh.listen(0, '127.0.0.1');
   await once(dsh, 'listening');
   const carrier = dsh.address();
@@ -715,6 +711,30 @@ try {
     { mode: 0o600 },
   );
   await relay.app.listen({ host: '127.0.0.1', port: address.port });
+  if (plugin && !bundled) {
+    const withoutPlugin = await launch();
+    const params = new URLSearchParams(withoutPlugin.hash.slice(1));
+    const code = params.get('pair')!;
+    const session = await nodeSession(origin, params.get('host')!, await createIdentity(), hash(code), {
+      type: 'pair',
+      protocol: 2,
+      sessionId: randomUUID(),
+      code,
+      name: 'Missing DSH plugin fixture',
+    });
+    try {
+      const { backends } = await session.rpc<{ backends: { id: string; connected: boolean }[] }>(apiCall('/backends'));
+      assert.deepEqual(backends.map(({ id, connected }) => [id, connected]),
+        instances.map(({ id }) => [id, false]));
+    } finally {
+      session.close();
+      await stop();
+    }
+    execFileSync(executable, ['--adapter', 'install', plugin], {
+      env: { ...process.env, POCKET_NATIVE_STATE_DIR: state },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+  }
   const link = await launch();
   const params = new URLSearchParams(link.hash.slice(1));
   const pair = params.get('pair')!;
@@ -758,11 +778,7 @@ try {
       backends.map(({ id, connected }) => [id, connected]),
       instances.map(({ id }) => [id, true]),
     );
-    if (plugin || process.env.POCKET_NATIVE_TEST_BUNDLED_PLUGINS === '1')
-      assert(
-        backends.every((entry) => entry.adapterVersion),
-        'Expected the independent DSH plugin',
-      );
+    assert(backends.every((entry) => entry.adapterVersion), 'Expected the independent DSH plugin');
     const appearancePath = `/backends/${one.id}/appearance`;
     const customized = await session.rpc<{ revision: number; values: { name: string } }>(
       apiCall(appearancePath, 'POST', { revision: 0, patch: { name: 'DSH 测试外观' } }),

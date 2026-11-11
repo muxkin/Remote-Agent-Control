@@ -2,7 +2,7 @@
 
 当前桌面网关、插件宿主及官方 Codex、DSH 插件均由 Rust 实现，源码位于 `desktop/native`。网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口。安装包附带两款独立的官方原生插件，每个实例有独立进程、配置、状态目录与订阅，连接已有 Agent。
 
-纯 Rust Ely 适配器复用 `instances.json` 和设备配对。第三方插件以及官方 Codex、DSH 都可使用原生独立进程。 [原生安装与更新](DESKTOP_ADAPTER.md)
+纯 Rust Ely 适配器复用 `instances.json` 和设备配对。Codex、DSH 和第三方插件统一通过独立进程接入。网关保留插件协议、操作记录及附件授权，Codex 本地 IPC 和 DSH 服务端连接由各自插件负责。 [原生安装与更新](DESKTOP_ADAPTER.md)
 
 ## Rust 原生插件
 
@@ -32,7 +32,7 @@ agent-space-native --adapter result REQUEST_ID
 
 正式版本也在 GitHub Releases 提供独立包及 `SHA256SUMS`。开发版可从桌面验收 CI 下载 `agent-space-adapter-codex-*` 或 `agent-space-adapter-dsh-*` 产物。解压后将目录传给 `agent-space-native --adapter install`，用 `upgrade` 和 `rollback` 在线切换。首次绑定依次采用已安装的配置版本、当前适配器版本和最近安装的官方包。交付时同时安装网关与两款官方插件，并验证实例实际启动的原生插件进程。
 
-Codex 默认实例沿用 `codex-local`、原有会话、配对和上传索引。实例可保留旧配置的 `home`、`root`、`socket`、`executable` 和 `appTools`，也可继续用原生环境变量指定路径。DSH 沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。
+Codex 默认实例沿用 `codex-local`、原有会话、配对和上传索引。实例可保留旧配置的 `home`、`root`、`socket`、`executable` 和 `appTools`，也可继续用原生环境变量指定路径。DSH 沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。单独运行网关时，缺失插件的实例无法访问。用 `--adapter install` 安装对应插件后重启网关，既有实例配置会用于绑定。
 
 从 v0.3.12 起，可在同一网关配置多个官方 Codex 插件实例。用各自的 `id` 和 `config.home` 选择会话目录，分别用 `config.socket` 和 `config.appTools` 指定对应桌面的会话与工具端点。具名实例在 Windows 上需要明确的 `socket` 才能启用实时控制。每个实例单独记录订阅、操作和附件，沿用旧 Node 版 `backends/<id>/uploads` 中对应设备和会话的附件。具名实例的在线升级和回滚需要支持多实例的 Codex 插件版本。
 

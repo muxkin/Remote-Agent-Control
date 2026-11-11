@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, shallowRef } from 'vue';
-import { nativeInstallerTargets, type NativeInstallerTarget } from '../../shared/desktop-releases.js';
+import { linuxMuslInstallerTarget, nativeInstallerTargets, type NativeInstallerTarget } from '../../shared/desktop-releases.js';
 import SvgIcon from '../SvgIcon.vue';
 import { loadNativeInstaller, type NativeInstaller } from './native-installers.js';
 
@@ -10,18 +10,22 @@ const installerLabels = {
   'windows-x64-setup.exe': { name: 'Windows x64', icon: 'windows', format: 'EXE' },
   'macos-arm64.dmg': { name: 'macOS Apple Silicon', icon: 'apple', format: 'DMG' },
   'macos-x64.dmg': { name: 'macOS Intel', icon: 'apple', format: 'DMG' },
-  'linux-x64.deb': { name: 'Linux x64', icon: 'linux', format: 'DEB' },
+  'linux-x64.deb': { name: 'Linux x64（glibc）', icon: 'linux', format: 'DEB' },
+  'linux-x64-musl-desktop.tar.zst': { name: 'Linux x64（musl）', icon: 'linux', format: 'TAR.ZST' },
 } as const;
 
 type NativeResult = NativeInstaller | 'loading' | 'unpublished' | 'error';
 type InstallerSuffix = NativeInstallerTarget['suffix'];
 const nativeResults = shallowRef<Partial<Record<InstallerSuffix, NativeResult>>>({});
+const targets = [...nativeInstallerTargets, linuxMuslInstallerTarget];
 const nativeRows = computed(() =>
-  nativeInstallerTargets.map((target) => ({
-    target,
-    ...installerLabels[target.suffix],
-    result: nativeResults.value[target.suffix] ?? 'loading',
-  })),
+  targets
+    .map((target) => ({
+      target,
+      ...installerLabels[target.suffix],
+      result: nativeResults.value[target.suffix] ?? 'loading',
+    }))
+    .filter(({ target, result }) => target !== linuxMuslInstallerTarget || result !== 'unpublished'),
 );
 const verifiedRows = computed(() =>
   nativeRows.value.flatMap(({ name, result }) =>
@@ -45,7 +49,7 @@ function checkInstaller(target: NativeInstallerTarget) {
     .catch(() => setResult('error'));
 }
 
-for (const target of nativeInstallerTargets) checkInstaller(target);
+for (const target of targets) checkInstaller(target);
 onUnmounted(() => installerRequests.abort());
 </script>
 
@@ -101,7 +105,7 @@ onUnmounted(() => installerRequests.abort());
           </button>
         </li>
       </ul>
-      <p class="installer-note">Linux 安装更新时需要系统授权。</p>
+      <p class="installer-note">Linux 便携包的启动方式见包内说明。DEB 安装更新时需要系统授权。</p>
     </section>
 
     <div class="download-details">

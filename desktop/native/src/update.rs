@@ -50,6 +50,9 @@ struct Target {
 
 fn target() -> Option<Target> {
     let (platform, arch, suffix) = match (env::consts::OS, env::consts::ARCH) {
+        ("linux", "x86_64") if cfg!(target_env = "musl") => {
+            ("linux", "x64-musl", "linux-x64-musl-desktop.tar.zst")
+        }
         ("linux", "x86_64") => ("linux", "x64", "linux-x64.deb"),
         ("windows", "x86_64") => ("win32", "x64", "windows-x64-setup.exe"),
         ("macos", "x86_64") => ("darwin", "x64", "macos-x64.dmg"),
@@ -346,20 +349,24 @@ fn detached(executable: &Path) -> Command {
     command
 }
 
-fn handoff(staged: &Staged, executable: &Path, directory: &Path) -> Result<()> {
+fn handoff(staged: &Staged, executable: &Path, directory: &Path, headless: bool) -> Result<()> {
     let helper = staged
         .directory
         .path()
         .join(if cfg!(windows) { "apply.exe" } else { "apply" });
     fs::copy(executable, &helper)?;
-    detached(&helper)
+    let mut command = detached(&helper);
+    command
         .arg(APPLY_FLAG)
         .arg(executable)
         .arg(staged.directory.path())
         .env("POCKET_NATIVE_STATE_DIR", directory)
         .env_remove("POCKET_NATIVE_ENROLLMENT")
-        .env_remove("POCKET_RELAY_ENROLLMENT")
-        .spawn()?;
+        .env_remove("POCKET_RELAY_ENROLLMENT");
+    if headless {
+        command.arg("--headless");
+    }
+    command.spawn()?;
     Ok(())
 }
 
@@ -372,6 +379,7 @@ pub(crate) fn run(
     commands: mpsc::Receiver<UpdateCommand>,
     status: watch::Sender<Snapshot>,
     environment: &GatewayEnvironment,
+    headless: bool,
 ) -> impl Future<Output = ()> + use<> {
     // Migrate the signed feed before the gateway can advertise that it is online.
     let prepared = (|| {
@@ -406,6 +414,7 @@ pub(crate) fn run(
             directory,
             db,
             gate,
+            headless,
         }
         .run(preferences, commands, status)
         .await;
@@ -420,6 +429,7 @@ struct Updater {
     directory: PathBuf,
     db: Database,
     gate: UpdateGate,
+    headless: bool,
 }
 
 impl Updater {
@@ -463,7 +473,7 @@ impl Updater {
                 command = commands.recv() => match command {
                     None => return,
                     Some(UpdateCommand::Check)
-                        if preferences.auto_update && download.is_none() && staged.is_none() =>
+                        if download.is_none() && staged.is_none() =>
                     {
                         download = Some(start_download(&preferences));
                     }
@@ -479,11 +489,11 @@ impl Updater {
                         }
                         let _ = response.send(result);
                     }
-                    Some(UpdateCommand::Install) if manual && staged.is_some() => {
+                    Some(UpdateCommand::Install) if staged.is_some() && (manual || !preferences.auto_update) => {
                         requested = true;
                         apply.reset_immediately();
                         status.send_modify(|snapshot| {
-                            snapshot.update = "等待连接空闲后请求系统安装授权".into();
+                            snapshot.update = if manual { "等待连接空闲后请求系统安装授权" } else { "等待连接空闲后安装" }.into();
                             snapshot.manual_update = false;
                         });
                     }
@@ -499,7 +509,7 @@ impl Updater {
                             let message = format!(
                                 "已下载 v{}，{}",
                                 package.release.version,
-                                if manual { "安装需要系统授权" } else { "等待连接空闲后安装" }
+                                if manual { "安装需要系统授权" } else if !preferences.auto_update { "可手动安装" } else { "等待连接空闲后安装" }
                             );
                             staged = Some(package);
                             apply.reset_immediately();
@@ -509,24 +519,24 @@ impl Updater {
                         Err(_error) => {
                             #[cfg(test)]
                             eprintln!("Signed-update fixture download failed: {_error:#}");
-                            "检查或下载更新失败，将在后台重试".into()
+                            if preferences.auto_update { "检查或下载更新失败，将在后台重试" } else { "检查或下载更新失败，请重试" }.into()
                         }
                     };
                     status.send_modify(|snapshot| {
                         snapshot.update = message;
                         snapshot.update_checking = false;
-                        snapshot.manual_update = manual && staged.is_some();
+                        snapshot.manual_update = staged.is_some() && (manual || !preferences.auto_update);
                     });
                 }
                 _ = sleep_until(check_at), if preferences.auto_update && download.is_none() && staged.is_none() => {
                     download = Some(start_download(&preferences));
                 }
-                _ = apply.tick(), if staged.is_some() && (!manual || requested) => {
+                _ = apply.tick(), if staged.is_some() && ((!manual && preferences.auto_update) || requested) => {
                     if !self.gate.drain(&self.db).unwrap_or(false) {
                         continue;
                     }
                     let package = staged.as_ref().expect("downloaded update");
-                    match handoff(package, &self.executable, &self.directory) {
+                    match handoff(package, &self.executable, &self.directory, self.headless) {
                         Ok(()) => {
                             staged.take().expect("downloaded update").directory.keep();
                             status.send_modify(|snapshot| snapshot.exit_for_update = true);
@@ -580,7 +590,12 @@ fn remove_expired_staging(directory: &Path) {
     }
 }
 
-pub(crate) fn apply(executable: &Path, stage: &Path, directory: &Path) -> Result<()> {
+pub(crate) fn apply(
+    executable: &Path,
+    stage: &Path,
+    directory: &Path,
+    headless: bool,
+) -> Result<()> {
     ensure!(crate::update_install::installed(executable), "安装位置无效");
     let directory = directory.canonicalize()?;
     let stage = stage.canonicalize()?;
@@ -639,7 +654,7 @@ pub(crate) fn apply(executable: &Path, stage: &Path, directory: &Path) -> Result
         )
     })();
     drop(lock);
-    let relaunched = crate::update_install::restart(executable, &directory);
+    let relaunched = crate::update_install::restart(executable, &directory, headless);
     // Windows keeps the running helper executable mapped. Remove what can be deleted.
     let _ = fs::remove_dir_all(stage);
     result.and(relaunched)
@@ -757,6 +772,7 @@ mod tests {
             directory: directory.clone(),
             db: db.clone(),
             gate,
+            headless: false,
         };
         let settings = |enabled, path: &str| Preferences::new(enabled, origin.join(path)?.as_str());
         let configure = |preferences| {
@@ -884,6 +900,31 @@ mod tests {
         })
         .await
         .context("系统安装器没有替换可执行文件")?;
+        let management = directory.join("management.json");
+        let port = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(port) = fs::read(&management)
+                    .ok()
+                    .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
+                    .and_then(|instance| instance["port"].as_u64())
+                {
+                    return port;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("更新后未启动本机设置服务")?;
+        let page = reqwest::Client::builder()
+            .no_proxy()
+            .build()?
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        ensure!(page.contains("Agent 空间适配器"), "更新后设置页不可用");
         let record: Value = serde_json::from_reader(private_file(
             &directory.join("native-update-attempt.json"),
             false,

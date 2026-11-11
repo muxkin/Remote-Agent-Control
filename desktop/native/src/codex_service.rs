@@ -1,3 +1,4 @@
+#[cfg(feature = "official-plugins")]
 use crate::{
     app_tools::Tool,
     codex::History,
@@ -5,10 +6,17 @@ use crate::{
     codex_peer::Endpoint,
     conversations, history_media, settings,
 };
+#[cfg(feature = "official-plugins")]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc};
+#[cfg(feature = "official-plugins")]
+use serde_json::Value;
+#[cfg(feature = "official-plugins")]
+use serde_json::json;
+use std::path::PathBuf;
+#[cfg(feature = "official-plugins")]
+use std::sync::Arc;
+#[cfg(feature = "official-plugins")]
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
@@ -33,11 +41,13 @@ pub(crate) struct Options {
     pub explicit: bool,
 }
 
+#[cfg(feature = "official-plugins")]
 pub(crate) struct Local {
     history: History,
     desktop: Option<Desktop>,
 }
 
+#[cfg(feature = "official-plugins")]
 impl Local {
     pub(crate) fn open(options: &Options, read_only: bool, named: bool) -> Result<Self> {
         let home = options.home.as_deref().context("尚未配置 Codex 目录")?;
@@ -244,6 +254,7 @@ impl Local {
     }
 }
 
+#[cfg(feature = "official-plugins")]
 pub(crate) fn thread_id(value: &Value) -> Result<Uuid> {
     Ok(Uuid::parse_str(value.as_str().context("会话 ID 无效")?)?)
 }

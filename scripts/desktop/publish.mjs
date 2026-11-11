@@ -19,7 +19,7 @@ const config = output ? null : resolve(get('--config')),
 const url = output ? null : new URL(get('--origin'));
 if (
   !['linux', 'darwin', 'win32'].includes(platform) ||
-  !['x64', 'arm64'].includes(arch) ||
+  !['x64', 'arm64', 'x64-musl'].includes(arch) ||
   (!output &&
     (url.protocol !== 'https:' ||
       url.username ||
@@ -36,6 +36,9 @@ const nativeVersion = args.includes('--native-version') ? get('--native-version'
 const releaseKeyOnly = args.includes('--release-key-only');
 const rustNative = args.includes('--rust-native');
 const bridgeHybrid = args.includes('--bridge-hybrid-linux');
+const muslDesktop = arch === 'x64-musl';
+if (muslDesktop && (!rustNative || platform !== 'linux'))
+  throw Error('x64-musl is supported only for the Rust Linux desktop feed');
 if (rustNative && !nativeVersion) throw Error('--rust-native requires an explicit native release version');
 if (bridgeHybrid && (!rustNative || platform !== 'linux' || arch !== 'x64'))
   throw Error('--bridge-hybrid-linux requires a Linux x64 Rust native release');
@@ -214,8 +217,10 @@ if (nativeVersion) {
   }
   const file = updateFilename(nativeVersion, platform, arch);
   const source = join(directory, file);
-  if (!releaseKeyOnly) verifyPlatformSignature(platform, source);
+  if (!releaseKeyOnly && !muslDesktop) verifyPlatformSignature(platform, source);
   const bytes = await readFile(source);
+  if (muslDesktop && bytes.subarray(0, 4).toString('hex') !== '28b52ffd')
+    throw Error('Invalid Zstandard desktop archive');
   if (releaseKeyOnly) {
     const validInstaller =
       platform === 'win32'
