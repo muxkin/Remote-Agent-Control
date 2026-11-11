@@ -18,6 +18,10 @@ fn mac_app(executable: &Path) -> Option<&Path> {
 pub(crate) fn installed(executable: &Path) -> bool {
     match env::consts::OS {
         "linux" => {
+            #[cfg(target_os = "linux")]
+            if crate::update_linux::installed(executable) {
+                return true;
+            }
             executable == Path::new("/usr/bin/agent-space-native")
                 && Path::new("/usr/bin/apt-get").is_file()
                 && Path::new("/usr/bin/pkexec").is_file()
@@ -31,6 +35,10 @@ pub(crate) fn installed(executable: &Path) -> bool {
         }),
         _ => false,
     }
+}
+
+pub(crate) fn requires_authorization(executable: &Path) -> bool {
+    cfg!(target_os = "linux") && executable == Path::new("/usr/bin/agent-space-native")
 }
 
 fn command(program: &Path, args: &[&std::ffi::OsStr]) -> Result<()> {
@@ -61,6 +69,10 @@ pub(crate) fn replace(
         cfg!(target_os = "linux") && installed(executable),
         "不支持此安装位置"
     );
+    #[cfg(target_os = "linux")]
+    if crate::update_linux::installed(executable) {
+        return crate::update_linux::replace(executable, artifact);
+    }
     command(
         Path::new("/usr/bin/pkexec"),
         &[
@@ -85,20 +97,21 @@ fn replace_windows(executable: &Path, artifact: &Path, release_key: bool) -> Res
             .status()?;
         ensure!(status.success(), "Windows 发布者签名无效");
     }
-    replace_windows_files(executable, || command(artifact, &["/S".as_ref()]))
+    replace_files(executable, || command(artifact, &["/S".as_ref()]))
 }
 
-fn replace_windows_files(executable: &Path, install: impl FnOnce() -> Result<()>) -> Result<()> {
-    const FILES: [&str; 2] = ["official-plugins", "agent-space-native.exe"];
+pub(crate) fn replace_files(executable: &Path, install: impl FnOnce() -> Result<()>) -> Result<()> {
+    let name = executable.file_name().context("安装位置无效")?;
+    let files = [std::ffi::OsStr::new("official-plugins"), name];
     let directory = executable.parent().context("安装位置无效")?;
     ensure!(executable.is_file(), "安装位置缺少适配器");
     let backup = tempfile::Builder::new()
         .prefix(".previous-")
         .tempdir_in(directory)?;
-    let mut moved = [false; FILES.len()];
+    let mut moved = [false; 2];
     let mut installing = false;
     let result = (|| -> Result<()> {
-        for (index, name) in FILES.iter().enumerate() {
+        for (index, name) in files.iter().enumerate() {
             let path = directory.join(name);
             if path.try_exists()? {
                 fs::rename(path, backup.path().join(name))?;
@@ -112,10 +125,12 @@ fn replace_windows_files(executable: &Path, install: impl FnOnce() -> Result<()>
     })();
     if result.is_err() {
         let restore = (|| -> Result<()> {
-            for (index, name) in FILES.iter().enumerate() {
+            for (index, name) in files.iter().enumerate() {
                 let path = directory.join(name);
                 if installing && path.try_exists()? {
-                    fs::rename(&path, backup.path().join(format!("failed-{name}")))?;
+                    let mut failed = std::ffi::OsString::from("failed-");
+                    failed.push(name);
+                    fs::rename(&path, backup.path().join(failed))?;
                 }
                 if moved[index] {
                     fs::rename(backup.path().join(name), path)?;
@@ -245,7 +260,7 @@ mod tests {
                 fs::write(bundle.join("old-plugin"), b"previous bundle")?;
             }
 
-            let failed = replace_windows_files(&executable, || {
+            let failed = replace_files(&executable, || {
                 fs::write(&executable, b"new executable")?;
                 fs::create_dir(&bundle)?;
                 fs::write(bundle.join("new-plugin"), b"partial new bundle")?;

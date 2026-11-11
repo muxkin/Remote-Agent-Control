@@ -42,6 +42,8 @@ mod tool_activity;
 mod tools_catalog;
 mod update;
 mod update_install;
+#[cfg(target_os = "linux")]
+mod update_linux;
 mod update_preferences;
 mod usage;
 

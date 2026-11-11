@@ -429,7 +429,7 @@ impl Updater {
         mut commands: mpsc::Receiver<UpdateCommand>,
         status: watch::Sender<Snapshot>,
     ) {
-        let manual = self.target.platform == "linux";
+        let manual = crate::update_install::requires_authorization(&self.executable);
         let mut check_at = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut download = None;
         let mut staged = None;
@@ -690,6 +690,7 @@ mod tests {
             crate::update_install::installed(&executable),
             "测试适配器安装位置无效"
         );
+        let manual = crate::update_install::requires_authorization(&executable);
         let root = env::var_os("POCKET_QA_UPDATE_CA").context("missing fixture CA")?;
         let certificate = reqwest::Certificate::from_pem(&fs::read(root)?)?;
         let source = |name: &str, trust_fixture: bool| -> Result<UpdateSource> {
@@ -812,7 +813,7 @@ mod tests {
         )
         .await??;
         ensure!(!partial.exists(), "改源后保留了旧源未完成的下载");
-        if target.platform == "linux" {
+        if manual {
             requests
                 .send(UpdateCommand::Install)
                 .await
@@ -841,10 +842,10 @@ mod tests {
         )
         .await??;
         ensure!(
-            updates.borrow().manual_update == (target.platform == "linux"),
+            updates.borrow().manual_update == manual,
             "安装授权模式与平台不符"
         );
-        if target.platform == "linux" {
+        if manual {
             requests
                 .send(UpdateCommand::Install)
                 .await

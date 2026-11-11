@@ -133,6 +133,11 @@ jobs:
       - name: Verify the signed HTTPS update through the installed adapter
         shell: bash
         run: node scripts/desktop/native-rust-update-smoke.mjs dist/desktop-native-preview desktop/native/target/release/${{ matrix.binary }}
+      - name: Verify the signed HTTPS update in a Linux user installation
+        if: runner.os == 'Linux'
+        env:
+          POCKET_QA_LINUX_USER_INSTALL: '1'
+        run: node scripts/desktop/native-rust-update-smoke.mjs dist/desktop-native-preview desktop/native/target/release/${{ matrix.binary }}
       - name: Build the console binary and check Windows update rollback
         if: runner.os == 'Windows'
         working-directory: desktop/native

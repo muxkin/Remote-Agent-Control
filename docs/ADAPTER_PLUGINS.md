@@ -1,6 +1,6 @@
 # 独立 Agent 接入插件
 
-网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口；产品协议和系统连接器分别位于 `packages/adapter-codex`、`packages/adapter-dsh`。默认附带两款官方插件。每个配置实例有独立 Node 宿主、配置、状态目录与订阅；宿主只连接已有 Agent。
+当前桌面网关、插件宿主及官方 Codex、DSH 插件均由 Rust 实现，源码位于 `desktop/native`。网关负责配对、加密、操作记录、同步和文件传输。SDK 定义产品无关的会话接口。安装包附带两款独立的官方原生插件，每个实例有独立进程、配置、状态目录与订阅，连接已有 Agent。
 
 纯 Rust Ely 适配器复用 `instances.json` 和设备配对。第三方插件以及官方 Codex、DSH 都可使用原生独立进程。 [原生安装与更新](DESKTOP_ADAPTER.md)
 
@@ -30,7 +30,7 @@ agent-space-native --adapter result REQUEST_ID
 
 安装器和便携包附带官方 Codex 与 DSH 原生插件。适配器首次启动时校验清单、二进制摘要和 SDK 握手，再将插件登记到用户的私有 registry。已有的 Codex 和 DSH 实例可以直接复用原配置。适配器升级时，兼容的新版随包插件由现有监督器切换，旧版保留供回滚。每个实例对同一随包版本只尝试一次，手动切换正在排队时优先处理手动请求。
 
-正式版本也在 GitHub Releases 提供独立包及 `SHA256SUMS`。开发版可从桌面验收 CI 下载 `agent-space-adapter-codex-*` 或 `agent-space-adapter-dsh-*` 产物。解压后将目录传给 `agent-space-native --adapter install`，用 `upgrade` 和 `rollback` 在线切换。首次绑定依次采用已安装的配置版本、当前适配器版本和最近安装的官方包。仅构建网关二进制时，内建连接器仍可用于过渡。
+正式版本也在 GitHub Releases 提供独立包及 `SHA256SUMS`。开发版可从桌面验收 CI 下载 `agent-space-adapter-codex-*` 或 `agent-space-adapter-dsh-*` 产物。解压后将目录传给 `agent-space-native --adapter install`，用 `upgrade` 和 `rollback` 在线切换。首次绑定依次采用已安装的配置版本、当前适配器版本和最近安装的官方包。交付时同时安装网关与两款官方插件，并验证实例实际启动的原生插件进程。
 
 Codex 默认实例沿用 `codex-local`、原有会话、配对和上传索引。实例可保留旧配置的 `home`、`root`、`socket`、`executable` 和 `appTools`，也可继续用原生环境变量指定路径。DSH 沿用原 `@agent-remote/adapter-dsh` 或 `type: "dsh"` 的实例、凭据和会话配置。
 

@@ -90,7 +90,7 @@ Terminal=false
 Categories=Utility;
 `,
   );
-  run('dpkg-deb', ['--root-owner-group', '--build', stage, output]);
+  run('dpkg-deb', ['--root-owner-group', '-Zzstd', '--build', stage, output]);
 }
 
 async function buildDmg(stage, source, version, output, signed) {

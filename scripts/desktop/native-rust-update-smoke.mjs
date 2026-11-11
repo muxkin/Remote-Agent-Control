@@ -19,6 +19,8 @@ assert(
 );
 const platform = process.platform;
 const arch = process.arch;
+const userInstall = process.env.POCKET_QA_LINUX_USER_INSTALL === '1';
+assert(!userInstall || platform === 'linux', 'User-directory installation is a Linux test');
 assert(platform === 'linux' || platform === 'win32' || platform === 'darwin');
 const program = platform === 'win32' ? 'agent-space-native.exe' : 'agent-space-native';
 const lf = (text) => text.replaceAll('\r\n', '\n');
@@ -29,6 +31,7 @@ const filename = updateFilename(release, platform, arch);
 const installer = join(distribution, filename);
 const payload = await readFile(installer);
 const directory = await mkdtemp(join(tmpdir(), 'native-rust-update-smoke-'));
+const userHome = join(directory, 'home');
 const binDir = dirname(newBinary);
 const targetDir = dirname(binDir);
 const root = join(directory, 'fixture');
@@ -90,6 +93,11 @@ async function buildOldAdapter() {
 
 async function installOldAdapter() {
   if (platform === 'linux') {
+    if (userInstall) {
+      const destination = join(userHome, '.local/opt/agent-space/native');
+      await cp(staged, destination, { recursive: true });
+      return join(destination, program);
+    }
     const args = ['-i', oldInstaller];
     if (process.getuid?.() === 0) await run('dpkg', args);
     else await run('sudo', ['-n', 'dpkg', ...args]);
@@ -192,8 +200,9 @@ try {
   const runEnv = {
     ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(POCKET_|DISPLAY$|WAYLAND_DISPLAY$)/i.test(key))),
     ...env,
+    ...(userInstall ? { HOME: userHome } : {}),
   };
-  const result = platform === 'linux' && process.getuid?.() !== 0
+  const result = platform === 'linux' && !userInstall && process.getuid?.() !== 0
     ? await run('sudo', ['-n', 'env', ...Object.entries(env).map(([key, value]) => `${key}=${value}`), test, ...args], { timeout })
       .catch(reportRequests)
     : await run(test, args, { env: runEnv, timeout }).catch(reportRequests);
@@ -218,12 +227,12 @@ try {
     ], { env: { ...process.env, QA_UPDATE_EXE: installed } }).catch(() => {});
     await run(join(dirname(installed), 'Uninstall.exe'), ['/S']).catch(() => {});
   }
-  if (installed && platform === 'darwin') {
+  if (installed && (platform === 'darwin' || userInstall)) {
     const path = await realpath(installed).catch(() => installed);
     const literal = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     await run('pkill', ['-f', `^${literal}( |$)`]).catch(() => {});
   }
-  if (platform === 'linux' && process.getuid?.() !== 0)
+  if (platform === 'linux' && !userInstall && process.getuid?.() !== 0)
     await run('sudo', ['-n', 'rm', '-rf', '--', join(directory, 'state')]);
   await rm(directory, { recursive: true, force: true, maxRetries: 12, retryDelay: 100 });
   await rm(oldBinary, { force: true });

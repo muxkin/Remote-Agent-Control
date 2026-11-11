@@ -1,5 +1,12 @@
 # AGENTS.md
 
+## Desktop adapter delivery
+
+- Deliver and run the pure Rust desktop adapter with independent Rust Codex and DSH plugins. Desktop runtime packages must run without bundled Node or Python.
+- Complete missing behavior and fix compatibility problems in the Rust implementation. Continue migration toward the existing adapter's full feature set.
+- Preserve device identities, pairing records, credentials, instance configuration and attachments during migration.
+- Verify the actual executable, plugin processes, application launcher and autostart entry after switching versions. A successful build or uploaded release alone does not complete a local runtime migration.
+
 ## One application, multiple deployment runtimes
 
 - VPS/Node and Cloudflare must use the same frontend, client protocols and business logic. Do not maintain a personal-edition or Cloudflare-edition feature implementation.

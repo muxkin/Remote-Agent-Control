@@ -459,7 +459,7 @@ fn release_order(version: &str) -> Option<([u64; 3], bool)> {
     Some(([major, minor, patch], stable))
 }
 
-fn read_manifest(source: &Path) -> Result<Manifest> {
+pub(crate) fn read_manifest(source: &Path) -> Result<Manifest> {
     let manifest_path = source.join("adapter.json");
     ensure!(
         fs::symlink_metadata(&manifest_path)?.is_file(),

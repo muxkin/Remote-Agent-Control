@@ -1,5 +1,7 @@
 # 电脑适配器与可迁移的更新分发
 
+桌面端以纯 Rust Adapter 和独立的 Rust Codex、DSH 插件交付。功能迁移、兼容性修复和连接故障处理持续在 Rust 实现中完成。迁移验收应检查实际运行的二进制、插件进程、应用启动项和自启动项，并验证原有配对和会话访问。
+
 ## Rust + Ely 原生适配器
 
 原生适配器位于 `desktop/native`。v0.3.35 安装版沿用 v0.2.7 的独立 Rust 网关和 Ely 托盘，保留后续 Codex 历史、工具活动和附件修复。原生安装器和便携包携带 Rust 适配器、独立的官方 Codex 和 DSH 可执行插件、系统集成资源及许可证。既有桌面配对仍使用 Noise 协议和原有 SQLite 数据目录。
@@ -15,6 +17,8 @@ v0.2.8 Linux 混合版安装包附带 Node 和 Python。纯 Rust 安装器的发
 | Windows x64 | `*-windows-x64-setup.exe` | 当前用户安装，安装后从开始菜单打开。从托盘退出适配器后可重新安装或卸载。 |
 | macOS Apple Silicon / Intel | `*-macos-arm64.dmg` / `*-macos-x64.dmg` | 将应用拖入 Applications，再打开。以 macOS 14 为构建目标。 |
 | Linux x64 | `*-linux-x64.deb` | Ubuntu 24.04 或满足依赖的系统运行 `sudo apt install ./AgentSpace-Native-<版本>-linux-x64.deb`，再从应用菜单打开。 |
+
+Linux 也支持用户目录安装。将 `*-linux-x64.tar.xz` 的内容解压到 `~/.local/opt/agent-space/native`，该目录直接包含 `agent-space-native` 和 `official-plugins`，再从这里启动并启用自启动。此安装方式适用于满足运行库依赖的 Arch 等发行版。自动更新校验同一份 Ed25519 发布清单和安装包摘要，由 Rust 解包并同时替换适配器与官方插件，失败时恢复原安装文件。
 
 安装版与便携版使用同一原生状态目录。切换前先从托盘退出原进程。如果便携版已开启自启动，先关闭，再在安装版启用，使自启动指向安装位置。卸载保留身份、配对和附件数据。Windows 预览安装包没有发布者签名。macOS 预览应用使用本地临时签名（ad-hoc），未经过 Apple 公证。预览安装器通过 GitHub Releases 提供 SHA-256 校验。启用发布密钥的安装版可自动获取更新。
 

@@ -79,7 +79,7 @@ ${platform === 'darwin' ? '将 Agent Space Adapter 拖到 Applications 后打开
 关闭窗口后保持托盘运行。点击托盘图标可打开界面，菜单可退出适配器。
 启动时可用 --configure 重新设置服务地址。
 预览使用独立状态目录。打开本机 Codex 会话后，可从手机查看和控制。
-${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境的 XCB 和 XKB 运行库。\n' : ''}详见仓库 docs/DESKTOP_ADAPTER.md。
+${platform === 'linux' ? '需要 glibc 2.39 或更新版本，以及桌面环境的 XCB 和 XKB 运行库。\n用户目录安装可将包内文件解压至 ~/.local/opt/agent-space/native，再从该目录启动并启用自启动。此位置支持经过发布密钥验证的自动更新。\n' : ''}详见仓库 docs/DESKTOP_ADAPTER.md。
 `,
   );
   let thirdParty = await nativeNotices(native, target);

@@ -1,6 +1,6 @@
 [package]
 name = "agent-space-native"
-version = "0.3.35"
+version = "0.3.36"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -71,6 +71,8 @@ auto-launch = { version = "=0.6.0", optional = true }
 rustix = { version = "1", features = ["fs", "net", "process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ar = "0.9"
+tar = { version = "0.4", default-features = false }
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
