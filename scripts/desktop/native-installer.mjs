@@ -67,8 +67,8 @@ Architecture: amd64
 Maintainer: Agent Space contributors
 Section: utils
 Priority: optional
-Depends: libc6 (>= 2.${linuxGlibcMinor}), libgcc-s1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libfontconfig1
-Recommends: libvulkan1, mesa-vulkan-drivers, pkexec
+Depends: libc6 (>= 2.${linuxGlibcMinor}), libgcc-s1
+Recommends: pkexec
 Description: Agent Space native desktop adapter
  Connects local Agent sessions to the Agent Space workbench.
 `,
