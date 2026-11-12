@@ -48,9 +48,8 @@ export function readRoute(url: URL): AppRoute {
       : {}),
     page: pages.includes(page) ? page : 'messages',
     ...(page === 'messages' && conversation && /^[a-f0-9-]{36}$/.test(conversation) ? { conversation } : {}),
-    ...(page === 'workbench' && thread && /^[^\x00-\x1f/\\]{1,200}$/.test(thread)
-      ? { thread, ...(host && /^[a-zA-Z0-9]{1,200}$/.test(host) ? { host } : {}) }
-      : {}),
+    ...(page === 'workbench' && thread && /^[^\x00-\x1f/\\]{1,200}$/.test(thread) ? { thread } : {}),
+    ...(page === 'workbench' && host && /^[a-zA-Z0-9]{1,200}$/.test(host) ? { host } : {}),
   };
 }
 export function routeURL(route: AppRoute): string {
@@ -59,8 +58,8 @@ export function routeURL(route: AppRoute): string {
   if (route.page === 'messages' && route.conversation) query.set('conversation', route.conversation);
   if (route.page === 'workbench' && route.thread) {
     query.set('thread', route.thread);
-    if (route.host) query.set('host', route.host);
   }
+  if (route.page === 'workbench' && route.host) query.set('host', route.host);
   return `/?${query}`;
 }
 
@@ -74,7 +73,10 @@ export function parentRoute(route: AppRoute): AppRoute {
   if (route.page === 'messages') return { page: 'messages' };
   if (route.page === 'integrations') return { page: 'contacts' };
   if (route.page === 'workbench')
-    return { page: 'workbench', ...(route.backend && route.thread ? { backend: route.backend } : {}) };
+    return {
+      page: 'workbench',
+      ...(route.backend && route.thread ? { backend: route.backend, host: route.host } : {}),
+    };
   if (route.page === 'pair') return { page: 'devices' };
   if (route.page === 'about' || route.page === 'appearance') return { page: 'settings' };
   return { page: 'me' };

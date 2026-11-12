@@ -1,5 +1,5 @@
 import { tsxComponent } from './tsx-component';
-import { shallowRef } from 'vue';
+import { onScopeDispose, shallowRef } from 'vue';
 import { watchRender, writeRef, useExternalSnapshot } from './render-effects';
 import { UsagePanel } from './UsagePanel';
 import { uploadItems, type UploadItem } from './UploadProgress';
@@ -43,6 +43,9 @@ import { backTo, type AppRoute } from './shell/routes';
 
 const subscribeConnection = (notify: () => void) => deviceSession.onChange(notify);
 const connectionSnapshot = () => deviceSession.online;
+const HISTORY_TOP_THRESHOLD = 160;
+const HISTORY_PAGES_PER_LOAD = 8;
+const HISTORY_VISIBLE_TARGET = 40;
 
 const operationNames: Record<string, string> = {
   create: '新建会话',
@@ -72,6 +75,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
   onBusy: (busy: boolean) => void;
   active?: boolean;
 }) {
+  onScopeDispose(() => _props.onBusy(false));
   const backendState = shallowRef<BackendInfo>();
   const setBackend = writeRef(backendState);
   const pairedState = shallowRef(false);
@@ -178,6 +182,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
   const setHistoryCursor = writeRef(historyCursorState);
   const historyLoadingState = shallowRef(false);
   const setHistoryLoading = writeRef(historyLoadingState);
+  const historyError = shallowRef('');
   const subscriptionAttemptState = shallowRef(0);
   const setSubscriptionAttempt = writeRef(subscriptionAttemptState);
   const historyGeneration = { current: 0 };
@@ -186,6 +191,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
   const setOlder = writeRef(olderState);
   const transcriptRef = shallowRef<HTMLElement | null>(null);
   const followBottom = { current: true };
+  const transcriptTop = { current: 0 };
   const viewRef: { current: ThreadView | null } = { current: null };
   const operationSnapshots = { current: new Map<string, Operation>() };
   const recoveredDraft: { current: string | undefined } = { current: undefined };
@@ -496,6 +502,8 @@ export default tsxComponent(function AgentWorkspace(_props: {
       historyScroll.current = null;
       setHistoryLoading(false);
       setHistoryCursor('latest');
+      historyError.value = '';
+      transcriptTop.current = 0;
       setOperations(readPending(deviceId, id));
       setError('');
       setThreadError('');
@@ -529,13 +537,18 @@ export default tsxComponent(function AgentWorkspace(_props: {
     watchOlder(() => {
       const previous = historyScroll.current;
       const transcript = transcriptRef.value;
-      if (previous && transcript)
+      if (previous && transcript) {
         transcript.scrollTop = previous.top + transcript.scrollHeight - previous.height;
+        transcriptTop.current = transcript.scrollTop;
+      }
       historyScroll.current = null;
     }, [older]);
     watchView2(() => {
       const transcript = transcriptRef.value;
-      if (followBottom.current && transcript) transcript.scrollTop = transcript.scrollHeight;
+      if (followBottom.current && transcript) {
+        transcript.scrollTop = transcript.scrollHeight;
+        transcriptTop.current = transcript.scrollTop;
+      }
     }, [view?.messages]);
     async function pair(e: SubmitEvent) {
       e.preventDefault();
@@ -698,37 +711,58 @@ export default tsxComponent(function AgentWorkspace(_props: {
       }
     }
     async function loadOlder() {
-      if (!selected || !historyCursor || historyLoading) return;
+      let cursor = historyCursorState.value;
+      if (!selected || !view || !cursor || historyLoadingState.value) return;
       const id = selected.id;
       const generation = ++historyGeneration.current;
+      const known = new Set([...olderState.value, ...(viewRef.current?.messages ?? [])].map((m) => m.id));
+      let added: Message[] = [];
+      let visible = 0;
       setHistoryLoading(true);
+      historyError.value = '';
       try {
-        const page = await api<{ messages: Message[]; nextCursor: string | null }>(
-          `/threads/${encodeURIComponent(id)}/history${historyCursor === 'latest' ? '' : `?cursor=${encodeURIComponent(historyCursor)}`}`,
-        );
-        if (selectedId.current !== id || generation !== historyGeneration.current) return;
-        const transcript = transcriptRef.value;
-        if (transcript)
-          historyScroll.current = { top: transcript.scrollTop, height: transcript.scrollHeight };
-        followBottom.current = false;
-        setOlder((old) => [
-          ...new Map([...page.messages, ...old].map((message) => [message.id, message])).values(),
-        ]);
-        setHistoryCursor(page.nextCursor);
-        setView((previous) =>
-          previous?.historyUnavailable
-            ? {
-                ...previous,
-                historyUnavailable: false,
-                reason: '历史记录已读取。请在电脑上的 Codex 打开此会话后开始控制。',
-              }
-            : previous,
-        );
-        setError('');
+        for (
+          let index = 0;
+          cursor && index < HISTORY_PAGES_PER_LOAD && visible < HISTORY_VISIBLE_TARGET;
+          index++
+        ) {
+          const query: string = cursor === 'latest' ? '' : `?cursor=${encodeURIComponent(cursor)}`;
+          const page: { messages: Message[]; nextCursor: string | null } = await api(
+            `/threads/${encodeURIComponent(id)}/history${query}`,
+          );
+          if (selectedId.current !== id || generation !== historyGeneration.current) return;
+          const unique = page.messages.filter((message) => {
+            if (known.has(message.id)) return false;
+            known.add(message.id);
+            return true;
+          });
+          added = [...unique, ...added];
+          visible += unique.filter((message) => !codex || codexDisplayMessage(message, false)).length;
+          cursor = page.nextCursor === cursor ? null : page.nextCursor;
+        }
       } catch (e) {
-        if (generation === historyGeneration.current) setError((e as Error).message);
+        if (generation === historyGeneration.current) historyError.value = (e as Error).message;
       } finally {
-        if (generation === historyGeneration.current) setHistoryLoading(false);
+        if (selectedId.current === id && generation === historyGeneration.current) {
+          const transcript = transcriptRef.value;
+          if (transcript && (added.length || cursor !== historyCursorState.value)) {
+            historyScroll.current = { top: transcript.scrollTop, height: transcript.scrollHeight };
+            followBottom.current = false;
+            setOlder((old) => [...added, ...old]);
+          }
+          setHistoryCursor(cursor);
+          if (visible > 0 || !cursor)
+            setView((previous) =>
+              previous?.historyUnavailable
+                ? {
+                    ...previous,
+                    historyUnavailable: false,
+                    reason: '历史记录已读取。请在电脑上的 Codex 打开此会话后开始控制。',
+                  }
+                : previous,
+            );
+          setHistoryLoading(false);
+        }
       }
     }
     const currentOperations = operations.filter((operation) => operation.threadId === selected?.id);
@@ -813,12 +847,8 @@ export default tsxComponent(function AgentWorkspace(_props: {
       return (
         <main class="module-page">
           <section class="module-empty">
-            <h2>这段会话属于另一台电脑</h2>
-            <p>请从当前电脑的工作台选择会话。</p>
-            <button
-              class="secondary"
-              onClick={() => navigate({ page: 'workbench', backend: backendId }, true)}
-            >
+            <h2>正在打开对应的电脑</h2>
+            <button class="secondary" onClick={() => navigate({ page: 'workbench' }, true)}>
               返回工作台
             </button>
           </section>
@@ -857,8 +887,13 @@ export default tsxComponent(function AgentWorkspace(_props: {
             <p class="pair-guide" role="status">
               {fromPairLink && code
                 ? '已读取配对链接，点击「连接电脑」即可。'
-                : '点击扫码，扫描电脑上的配对二维码。登录后，已添加的电脑会加密同步到账号。'}
+                : '在要添加的电脑上打开适配器，点击「登录并连接」，使用同一账号授权。也可以扫描电脑上的配对二维码。'}
             </p>
+            {!fromPairLink && (
+              <button class="text-button" onClick={() => navigate({ page: 'downloads' })}>
+                下载电脑适配器
+              </button>
+            )}
             <PairScanner
               onScan={(host, code) => {
                 setHostId(host);
@@ -959,11 +994,17 @@ export default tsxComponent(function AgentWorkspace(_props: {
             level={2}
             title={selected?.title || '选择一个会话'}
             backLabel="返回会话列表"
-            onBack={() => backTo({ page: 'workbench', backend: backendId }, navigate)}
+            onBack={() => backTo({ page: 'workbench', backend: backendId, host: route.host }, navigate)}
             subtitle={
               <>
-                <Icon name="folder" size={14} />
-                <span>{selected?.projectName ?? '未分类'}</span>
+                <Icon name="monitor" size={14} />
+                <span>{deviceSession.host?.name}</span>
+                {selected && (
+                  <>
+                    <Icon name="folder" size={14} />
+                    <span>{selected.projectName ?? '未分类'}</span>
+                  </>
+                )}
               </>
             }
             status={
@@ -1005,21 +1046,30 @@ export default tsxComponent(function AgentWorkspace(_props: {
                   aria-label="聊天记录"
                   onScroll={(e) => {
                     const el = e.currentTarget as HTMLElement;
-                    followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+                    const top = el.scrollTop;
+                    const movingUp = top < transcriptTop.current;
+                    transcriptTop.current = top;
+                    followBottom.current = el.scrollHeight - top - el.clientHeight < 100;
+                    if (
+                      movingUp &&
+                      top <= HISTORY_TOP_THRESHOLD &&
+                      !historyError.value &&
+                      !view?.historyUnavailable
+                    )
+                      void loadOlder();
                   }}
                 >
-                  {historyCursor && (
-                    <button
-                      class="secondary older"
-                      disabled={historyLoading}
-                      onClick={() => void loadOlder()}
-                    >
-                      {historyLoading
-                        ? '正在加载历史记录…'
-                        : view?.historyUnavailable && historyCursor === 'latest'
-                          ? '重试读取历史'
-                          : '加载更早的记录'}
-                    </button>
+                  {view && historyCursor && (
+                    <div class="older">
+                      {historyError.value && <span role="status">{historyError.value}</span>}
+                      <button class="older-button" disabled={historyLoading} onClick={() => void loadOlder()}>
+                        {historyLoading
+                          ? '正在加载历史记录…'
+                          : view.historyUnavailable || historyError.value
+                            ? '重试读取历史'
+                            : '更早记录'}
+                      </button>
+                    </div>
                   )}
                   {!view &&
                     (threadError ? (

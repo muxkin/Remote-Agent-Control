@@ -3,12 +3,9 @@ import { shallowRef, defineAsyncComponent as lazy, Suspense, type VNodeChild } f
 import { watchRender, writeRef } from '../render-effects';
 import type { IconName } from '../icon-paths';
 
-import type { AccountDesktop } from '../../shared/desktop-authorization';
-import { syncAccountHosts } from '../account-session';
-import { messaging, useMessaging } from '../messaging/context';
+import { useMessaging } from '../messaging/context';
 import { Avatar } from '../messaging/ui';
 import { deviceSession } from '../device-session';
-import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
 import { PageHeader } from './PageHeader';
 import type { AppRoute } from './routes';
@@ -40,48 +37,28 @@ export default tsxComponent(function MePages(_props: {
   route: AppRoute;
   navigate: (route: AppRoute, replace?: boolean) => void;
   back: () => void;
-  hosts: PairedHost[];
-  hostId: string;
-  busy: boolean;
-  refreshHosts: () => Promise<void>;
 }) {
   const usageState = shallowRef<string>();
   const setUsage = writeRef(usageState);
   const workingState = shallowRef(false);
-  const setWorking = writeRef(workingState);
   const noticeState = shallowRef('');
-  const setNotice = writeRef(noticeState);
-  const confirmRemoveState = shallowRef(false);
-  const setConfirmRemove = writeRef(confirmRemoveState);
-  const accountDesktops = shallowRef<AccountDesktop[]>([]);
-  const revokeDesktop = shallowRef<string>();
-  const watchDesktops = watchRender();
-  const watchNotice = watchRender();
   const watchUsage = watchRender();
-  return ({ route, navigate, back, hosts, hostId, busy, refreshHosts }) => {
+  return ({ route, navigate, back }) => {
     const { user } = useMessaging();
     const name = user?.displayName ?? '登录或创建账户';
     const usage = usageState.value;
     const working = workingState.value;
-    const notice = noticeState.value;
-    const confirmRemove = confirmRemoveState.value;
-    watchNotice(() => {
-      setNotice('');
-      setConfirmRemove(false);
-      revokeDesktop.value = undefined;
-    }, [route.page, user?.id]);
-    watchDesktops(() => {
-      accountDesktops.value = [];
-      if (route.page !== 'devices' || user?.kind !== 'human') return;
-      const controller = new AbortController();
-      void messaging
-        .request<{ devices: AccountDesktop[] }>('/desktop-devices', 'GET', undefined, controller.signal)
-        .then(({ devices }) => {
-          if (!controller.signal.aborted) accountDesktops.value = devices;
-        })
-        .catch(() => {});
-      return () => controller.abort();
-    }, [route.page, user?.id]);
+    async function run(action: () => Promise<void>) {
+      workingState.value = true;
+      noticeState.value = '';
+      try {
+        await action();
+      } catch (error) {
+        noticeState.value = error instanceof Error ? error.message : '操作未完成，请重试';
+      } finally {
+        workingState.value = false;
+      }
+    }
     watchUsage(() => {
       if (route.page !== 'settings') return;
       let alive = true;
@@ -97,17 +74,6 @@ export default tsxComponent(function MePages(_props: {
         alive = false;
       };
     }, [route.page]);
-    async function run(action: () => Promise<void>) {
-      setWorking(true);
-      setNotice('');
-      try {
-        await action();
-      } catch (e) {
-        setNotice(e instanceof Error ? e.message : '操作未完成，请重试');
-      } finally {
-        setWorking(false);
-      }
-    }
     const titles: Partial<Record<AppRoute['page'], string>> = {
       me: '我的',
       settings: '设置',
@@ -176,7 +142,7 @@ export default tsxComponent(function MePages(_props: {
                   void run(async () => {
                     await deviceSession.cache.clear();
                     setUsage(formatBytes((await deviceSession.cache.usage()).bytes));
-                    setNotice('缓存已清理');
+                    noticeState.value = '缓存已清理';
                   })
                 }
               />
@@ -220,135 +186,6 @@ export default tsxComponent(function MePages(_props: {
             }}
           </Suspense>
         )}
-        {route.page === 'devices' && (
-          <>
-            <section class="settings-group">
-              {hosts.map((host) => (
-                <button
-                  key={host.hostId}
-                  class="device-row"
-                  disabled={working || busy || host.hostId === hostId}
-                  onClick={() =>
-                    void run(async () => {
-                      await deviceSession.select(host);
-                      await refreshHosts();
-                      setNotice(`已切换到 ${host.name}`);
-                    })
-                  }
-                >
-                  <span class="tool-avatar">
-                    <Icon name="monitor" />
-                  </span>
-                  <span>
-                    <strong>{host.name}</strong>
-                    <small>{host.hostId === hostId ? '当前设备' : '点击切换'}</small>
-                  </span>
-                  {host.hostId === hostId && <Icon name="check" />}
-                </button>
-              ))}
-              <Row
-                icon="plusCircle"
-                title="添加电脑"
-                disabled={working || busy}
-                onClick={() => navigate({ page: 'pair' })}
-              />
-            </section>
-            {!!accountDesktops.value.length && (
-              <section class="settings-group" aria-label="账号授权的电脑">
-                <h2>账号授权的电脑</h2>
-                {accountDesktops.value.map((desktop) => (
-                  <div key={desktop.hostId} class="inline-confirm">
-                    <p>
-                      {desktop.name} · {desktop.hostId.slice(-12)}
-                    </p>
-                    {revokeDesktop.value === desktop.hostId ? (
-                      <div>
-                        <button
-                          disabled={working}
-                          onClick={() => {
-                            revokeDesktop.value = undefined;
-                          }}
-                        >
-                          取消
-                        </button>
-                        <button
-                          class="danger"
-                          disabled={working || busy}
-                          onClick={() =>
-                            void run(async () => {
-                              if (!user) return;
-                              await messaging.request(`/desktop-devices/${desktop.hostId}`, 'DELETE', {
-                                accountId: user.id,
-                              });
-                              if (messaging.account.user?.id !== user.id) return;
-                              if (deviceSession.host?.hostId === desktop.hostId)
-                                deviceSession.resetAccount(user.id);
-                              await deviceSession.cache.forget(desktop.hostId);
-                              await syncAccountHosts(messaging.account);
-                              await refreshHosts();
-                              accountDesktops.value = accountDesktops.value.filter(
-                                ({ hostId }) => hostId !== desktop.hostId,
-                              );
-                              revokeDesktop.value = undefined;
-                              setNotice('已撤销这台电脑的服务授权');
-                            })
-                          }
-                        >
-                          确认撤销
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        disabled={working || busy}
-                        onClick={() => {
-                          revokeDesktop.value = desktop.hostId;
-                        }}
-                      >
-                        撤销授权
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </section>
-            )}
-            {!!hostId && (
-              <section class="settings-group">
-                {confirmRemove ? (
-                  <div class="inline-confirm">
-                    <p>解除当前电脑的配对，并移除它在此手机上的记录？</p>
-                    <div>
-                      <button class="secondary" onClick={() => setConfirmRemove(false)}>
-                        取消
-                      </button>
-                      <button
-                        class="danger"
-                        disabled={working || busy}
-                        onClick={() =>
-                          void run(async () => {
-                            await deviceSession.forget();
-                            await deviceSession.init();
-                            await refreshHosts();
-                            setConfirmRemove(false);
-                            setNotice('已解除配对');
-                          })
-                        }
-                      >
-                        解除配对
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <Row
-                    icon="close"
-                    title="解除当前配对"
-                    disabled={busy || working}
-                    onClick={() => setConfirmRemove(true)}
-                  />
-                )}
-              </section>
-            )}
-          </>
-        )}
         {route.page === 'about' && (
           <section class="about-content">
             <img class="about-app-icon" src="/app-icon-192.png" alt="Agent 空间图标" width="96" height="96" />
@@ -361,9 +198,9 @@ export default tsxComponent(function MePages(_props: {
             </small>
           </section>
         )}
-        {notice && (
+        {route.page === 'settings' && noticeState.value && (
           <p class="settings-notice" role="status">
-            {notice}
+            {noticeState.value}
           </p>
         )}
       </main>

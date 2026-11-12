@@ -1,5 +1,5 @@
 import { browserId } from './browser-id';
-import { DEFAULT_BACKEND, conversationKey } from '../shared/backends';
+import { DEFAULT_BACKEND, conversationKey, type BackendInfo } from '../shared/backends';
 import { CipherWire, SecureChannel, type Identity, type Lane } from '../shared/secure-channel';
 import { DeviceLink, type DeviceAuth } from '../shared/device-link';
 import { apiCall, RpcError, type RpcCall } from '../shared/rpc';
@@ -7,9 +7,16 @@ import { applySync, checkpoint, contentVersion, type CachedThread } from '../sha
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { SyncStore, type PairedHost } from './sync-store';
-import type { GatewayStatus, ServerEvent, ThreadView } from '../shared/types';
+import type { GatewayStatus, ServerEvent, ThreadSummary, ThreadView } from '../shared/types';
 import type { AgentUsage } from '../../packages/adapter-sdk/src/usage';
 import type { UsageSnapshot } from '../shared/usage';
+
+export interface DeviceOverview {
+  online: boolean | null;
+  toolsChecked: boolean;
+  backends: BackendInfo[];
+  recent: (ThreadSummary & { backendId: string })[];
+}
 
 export class DeviceSession {
   readonly cache = new SyncStore();
@@ -63,8 +70,8 @@ export class DeviceSession {
   private changed() {
     this.events.dispatchEvent(new Event('change'));
   }
-  private key(suffix: string, backendId = this.backendId) {
-    return `${this.identity?.peerId}:${this.host?.hostId}:${backendId === DEFAULT_BACKEND ? '' : `backend:${backendId}:`}${suffix}`;
+  private key(suffix: string, backendId = this.backendId, host = this.host, phoneId = this.identity?.peerId) {
+    return `${phoneId}:${host?.hostId}:${backendId === DEFAULT_BACKEND ? '' : `backend:${backendId}:`}${suffix}`;
   }
   contentKey(suffix: string, backendId = this.backendId) {
     return this.key(suffix, backendId);
@@ -147,17 +154,106 @@ export class DeviceSession {
     void navigator.storage?.persist?.().catch(() => false);
     return this.host;
   }
-  async select(host: PairedHost) {
+  async select(host: PairedHost, persist = true) {
     this.disconnect();
     const generation = this.generation;
     const identity = host.identity ?? (await this.cache.identity());
     if (generation !== this.generation) return;
     this.host = host;
     this.identity = identity;
-    await this.cache.saveHost(host, false);
+    if (persist) await this.cache.saveHost(host, false);
     if (generation !== this.generation) return;
     this.running = true;
+    this.changed();
     await this.connect();
+  }
+  async renameHost(host: PairedHost, name: string) {
+    const renamed = await this.cache.renameHost(host.hostId, name);
+    if (renamed && this.host?.hostId === host.hostId && this.host.ticket === renamed.ticket) {
+      this.host = renamed;
+      this.changed();
+    }
+  }
+
+  async overview(host: PairedHost, signal: AbortSignal, publish: (result: DeviceOverview) => void) {
+    const scope = this.cache.scope;
+    const current = () => !signal.aborted && scope === this.cache.scope;
+    const identity = host.identity ?? (await this.cache.identity(scope));
+    const cached = async <T>(path: string, backendId: string) =>
+      (
+        await this.cache.get<{ hash: string; value: T }>(
+          this.key(`rpc:${contentVersion(apiCall(path))}`, backendId, host, identity.peerId),
+        )
+      )?.value;
+    let online: boolean | null = null;
+    let toolsChecked = false;
+    let backends = (await cached<{ backends: BackendInfo[] }>('/backends', DEFAULT_BACKEND))?.backends ?? [];
+    const recent = new Map<string, ThreadSummary[]>();
+    const emit = () => {
+      if (current())
+        publish({
+          online,
+          toolsChecked,
+          backends,
+          recent: [...recent]
+            .flatMap(([backendId, threads]) => threads.map((thread) => ({ ...thread, backendId })))
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .slice(0, 16),
+        });
+    };
+    await Promise.all(
+      backends.map(async (backend) => {
+        const result = await cached<{ threads: ThreadSummary[] }>('/threads', backend.id);
+        if (result) recent.set(backend.id, result.threads.slice(0, 8));
+      }),
+    );
+    emit();
+    if (!current()) return;
+    const active = this.host?.hostId === host.hostId && this.host.ticket === host.ticket && this.online;
+    let link: DeviceLink | undefined;
+    const closeProbe = () => {
+      if (!active) link?.close();
+    };
+    try {
+      link = active
+        ? this.link()
+        : await this.openRelay(
+            host.hostId,
+            host.ticket,
+            'control',
+            { type: 'authenticate', protocol: 2, sessionId: browserId() },
+            identity,
+            signal,
+          );
+      if (!current()) return;
+      signal.addEventListener('abort', closeProbe, { once: true });
+      online = true;
+      const read = async <T>(path: string, backendId: string): Promise<T> => {
+        const call = apiCall(path);
+        const key = this.key(`rpc:${contentVersion(call)}`, backendId, host, identity.peerId);
+        const { value } = await link!.request('rpc', { call: { ...call, backendId } }, undefined, 6000);
+        if (current()) this.cache.put(key, { hash: contentVersion(value), value });
+        return value;
+      };
+      backends = (await read<{ backends: BackendInfo[] }>('/backends', DEFAULT_BACKEND)).backends;
+      toolsChecked = true;
+      for (const id of recent.keys()) if (!backends.some((backend) => backend.id === id)) recent.delete(id);
+      emit();
+      await Promise.allSettled(
+        backends.map(async (backend) => {
+          if (backend.capabilities?.history.state === 'unsupported') return;
+          const { threads } = await read<{ threads: ThreadSummary[] }>('/threads', backend.id);
+          recent.set(backend.id, threads.slice(0, 8));
+          emit();
+        }),
+      );
+    } catch {
+      online ??= false;
+      emit();
+    } finally {
+      signal.removeEventListener('abort', closeProbe);
+      closeProbe();
+    }
   }
   resetAccount(scope: string) {
     this.disconnect();
@@ -177,21 +273,36 @@ export class DeviceSession {
   async connect() {
     if (!this.running || !this.host) return;
     if (this.links.get('relay:control') && !this.links.get('relay:control')!.closed) return;
+    const generation = this.generation;
     try {
       await this.relay('control');
+      if (generation !== this.generation) return;
       this.attempt = 0;
       this.schedulePeer();
     } catch (error) {
-      this.metrics.fallback = error instanceof Error ? error.message : '电脑离线或中继暂不可用';
+      if (generation === this.generation)
+        this.metrics.fallback = error instanceof Error ? error.message : '电脑离线或中继暂不可用';
     } finally {
-      clearTimeout(this.retry);
-      if (this.running && !this.links.get('relay:control'))
-        this.retry = setTimeout(() => void this.connect(), Math.min(15000, 500 * 2 ** this.attempt++));
-      this.changed();
+      if (generation === this.generation) {
+        clearTimeout(this.retry);
+        if (this.running && !this.links.get('relay:control'))
+          this.retry = setTimeout(() => void this.connect(), Math.min(15000, 500 * 2 ** this.attempt++));
+        this.changed();
+      }
     }
   }
-  private async openRelay(hostId: string, ticket: string, lane: Lane, auth: DeviceAuth): Promise<DeviceLink> {
+  private async openRelay(
+    hostId: string,
+    ticket: string,
+    lane: Lane,
+    auth: DeviceAuth,
+    identity = this.identity!,
+    signal?: AbortSignal,
+  ): Promise<DeviceLink> {
+    signal?.throwIfAborted();
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/connect`);
+    const abort = () => ws.close();
+    signal?.addEventListener('abort', abort, { once: true });
     ws.binaryType = 'arraybuffer';
     const wire = new CipherWire(
       async (bytes) => {
@@ -205,60 +316,68 @@ export class DeviceSession {
       () => ws.close(),
     );
     let timer: ReturnType<typeof setTimeout>;
-    await new Promise<void>((resolve, reject) => {
-      timer = setTimeout(() => {
-        ws.close();
-        reject(new RpcError('电脑未连接或配对已失效', 0));
-      }, 10000);
-      ws.onmessage = (e) => {
-        if (e.data instanceof ArrayBuffer) {
-          wire.onData(new Uint8Array(e.data));
-          return;
-        }
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'challenge') {
-          void (async () => {
-            let resourceToken: string | undefined;
-            if (msg.resources) {
-              const response = await fetch('/api/im/resources/relay-ticket', {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ hostId, lane, ticket }),
-              });
-              const result = await response.json();
-              if (!response.ok) throw new RpcError(result.error ?? '请先登录后使用中转', response.status);
-              resourceToken = result.token;
-            }
-            if (ws.readyState === WebSocket.OPEN)
-              ws.send(
-                JSON.stringify({
-                  type: 'join',
-                  hostId,
-                  lane,
-                  ticket,
-                  ...(resourceToken ? { resourceToken } : {}),
-                }),
-              );
-          })().catch((error) => {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => {
+          ws.close();
+          reject(new RpcError('电脑未连接或配对已失效', 0));
+        }, 10000);
+        ws.onmessage = (e) => {
+          if (e.data instanceof ArrayBuffer) {
+            wire.onData(new Uint8Array(e.data));
+            return;
+          }
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'challenge') {
+            void (async () => {
+              let resourceToken: string | undefined;
+              if (msg.resources) {
+                const response = await fetch('/api/im/resources/relay-ticket', {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ hostId, lane, ticket }),
+                  signal,
+                });
+                const result = await response.json();
+                if (!response.ok) throw new RpcError(result.error ?? '请先登录后使用中转', response.status);
+                resourceToken = result.token;
+              }
+              if (ws.readyState === WebSocket.OPEN)
+                ws.send(
+                  JSON.stringify({
+                    type: 'join',
+                    hostId,
+                    lane,
+                    ticket,
+                    ...(resourceToken ? { resourceToken } : {}),
+                  }),
+                );
+            })().catch((error) => {
+              clearTimeout(timer);
+              reject(error);
+              ws.close();
+            });
+          }
+          if (msg.type === 'joined') {
             clearTimeout(timer);
-            reject(error);
-            ws.close();
-          });
-        }
-        if (msg.type === 'joined') {
+            resolve();
+          }
+        };
+        ws.onclose = (event) => {
           clearTimeout(timer);
-          resolve();
-        }
-      };
-      ws.onclose = (event) => {
-        clearTimeout(timer);
-        wire.onTransportClosed();
-        reject(new RpcError(event.reason || '电脑离线或配对失效', 0));
-      };
-      ws.onerror = () => ws.close();
-    });
-    return DeviceLink.authenticate(await SecureChannel.open(wire, this.identity!, true, lane, hostId), auth);
+          wire.onTransportClosed();
+          reject(new RpcError(event.reason || '电脑离线或配对失效', 0));
+        };
+        ws.onerror = () => ws.close();
+      });
+      return await DeviceLink.authenticate(
+        await SecureChannel.open(wire, identity, true, lane, hostId),
+        auth,
+      );
+    } finally {
+      signal?.removeEventListener('abort', abort);
+    }
   }
   private async relay(lane: Lane) {
     const key = `relay:${lane}`,
@@ -278,7 +397,7 @@ export class DeviceSession {
     try {
       return await promise;
     } finally {
-      this.opening.delete(key);
+      if (this.opening.get(key) === promise) this.opening.delete(key);
     }
   }
   private attach(link: DeviceLink, path: 'relay' | 'direct', lane: Lane) {
@@ -628,9 +747,12 @@ export class DeviceSession {
     bulk = false,
     backendId = this.backendId,
   ) {
+    const generation = this.generation;
     if (type === 'file') data = { backendId, ...data };
     if (!this.online) await this.connect();
+    if (generation !== this.generation) throw new RpcError('电脑已切换，请重试', 0);
     if (bulk && !this.links.get('direct:bulk')) await this.relay('bulk');
+    if (generation !== this.generation) throw new RpcError('电脑已切换，请重试', 0);
     const link = this.link(bulk ? 'bulk' : 'control');
     const extended =
       bulk || (type === 'file' && (data.action === 'storage-plan' || data.action === 'storage-import'));
@@ -655,7 +777,9 @@ export class DeviceSession {
     return entry?.value;
   }
   async api<T>(path: string, init?: RequestInit, backendId = this.backendId): Promise<T> {
+    const generation = this.generation;
     await this.init();
+    if (generation !== this.generation) throw new RpcError('电脑已切换，请重试', 0);
     if (!this.host) throw new RpcError('请先扫码配对', 401);
     const call = apiCall(
       path,
@@ -672,23 +796,49 @@ export class DeviceSession {
       !['operation.read', 'operations.list', 'status.read'].includes(call.method);
     const key = this.key(`rpc:${contentVersion(call)}`, backendId),
       old = cacheable ? await this.cache.get<{ hash: string; value: T }>(key) : undefined;
+    if (generation !== this.generation) throw new RpcError('电脑已切换，请重试', 0);
     if (!this.online) {
       if (old) return old.value;
       await this.connect();
     }
+    if (generation !== this.generation) throw new RpcError('电脑已切换，请重试', 0);
     const { value } = await this.request('rpc', { call: { ...call, backendId }, knownHash: old?.hash });
+    if (generation !== this.generation) throw new RpcError('电脑已切换，请重试', 0);
     const result = value?.cacheHit && old ? old.value : value;
     if (cacheable) this.cache.put(key, { hash: contentVersion(result), value: result });
     return result;
   }
   async forget() {
     if (!this.host) return;
-    await this.api('/logout', { method: 'POST', body: '{}' });
-    const hostId = this.host.hostId,
-      deviceId = this.host.deviceId;
-    this.disconnect();
+    await this.forgetHost(this.host);
+  }
+  async forgetHost(host: PairedHost) {
+    const scope = this.cache.scope;
+    if (this.host?.hostId === host.hostId) await this.api('/logout', { method: 'POST', body: '{}' });
+    else {
+      const identity = host.identity ?? (await this.cache.identity(scope));
+      const link = await this.openRelay(
+        host.hostId,
+        host.ticket,
+        'control',
+        { type: 'authenticate', protocol: 2, sessionId: browserId() },
+        identity,
+      );
+      try {
+        if (scope !== this.cache.scope) return;
+        await link.rpc(apiCall('/logout', 'POST', {}));
+      } finally {
+        link.close();
+      }
+    }
+    if (scope !== this.cache.scope) return;
+    const { hostId, deviceId } = host;
+    if (this.host?.hostId === hostId) {
+      this.disconnect();
+      this.host = undefined;
+      this.identity = undefined;
+    }
     await this.cache.forget(hostId);
-    this.host = undefined;
     for (const storage of [localStorage, sessionStorage])
       for (const key of Object.keys(storage))
         if (
@@ -698,6 +848,7 @@ export class DeviceSession {
         )
           storage.removeItem(key);
     (await import('./file-client')).clearFileProviders();
+    this.changed();
   }
   disconnect() {
     this.running = false;

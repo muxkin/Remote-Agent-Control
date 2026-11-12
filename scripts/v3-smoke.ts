@@ -9,7 +9,9 @@ import { mathCopyFixture, verifyMathCopy } from './lib/math-copy-smoke.js';
 import sharp from 'sharp';
 const report: any = { fixture: true, checks: {}, errors: [], physicalPhone: false };
 const browser = await chromium.launch({
-  channel: 'chrome',
+  ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+    ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+    : { channel: 'chrome' }),
   args: [`--unsafely-treat-insecure-origin-as-secure=${config.origin}`],
 });
 const context = await browser.newContext({
@@ -162,6 +164,7 @@ try {
   await expect(page.getByRole('button', { name: /测试用户.*个人资料/ })).toBeVisible();
   report.checks.accountProfileAndMessagingNavigation = true;
   await tab('工作台');
+  await page.getByRole('button', { name: '打开 Codex', exact: true }).click();
   await openChat();
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('draft-kept-between-modules');
   expect(await page.evaluate(() => (window as any).__peers.length)).toBe(peerCount);
@@ -229,6 +232,7 @@ try {
   );
   await page.getByRole('button', { name: '返回', exact: true }).click();
   await tab('工作台');
+  await page.getByRole('button', { name: '打开 Codex', exact: true }).click();
   await openChat();
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('draft-kept-between-modules');
   report.checks.clearOnlyContentPreservesIdentityDraftsAndOperations = true;
@@ -323,27 +327,18 @@ try {
   await page.getByRole('button', { name: '返回会话列表' }).click();
   await tab('我的');
   let downloadRequests = 0;
-  await page.route('**/downloads/desktop/releases.json', (route) => {
+  await page.route('**/downloads/desktop/native/rust/linux/x64/latest.json', (route) => {
     if (++downloadRequests === 1) return route.fulfill({ status: 503 });
-    return route.fulfill({
-      json: {
-        files: [
-          { platform: 'linux', arch: 'x64', version: '1.0.0', file: 'AgentSpace-1.0.0.AppImage', size: 2048 },
-          { platform: 'linux', arch: 'x64', version: '1.0.0', file: '../outside.AppImage', size: 2048 },
-        ],
-      },
-    });
+    return route.fulfill({ status: 404 });
   });
   await page.getByRole('button', { name: /电脑适配器/ }).click();
-  await expect(page.getByText('暂时无法读取安装包。')).toBeVisible();
-  await page.getByRole('button', { name: '重试', exact: true }).click();
-  await expect(page.locator('.donation-page a[download]')).toHaveCount(1);
-  await expect(page.getByRole('link', { name: /下载 v1.0.0/ })).toHaveAttribute(
-    'href',
-    '/downloads/desktop/linux/x64/AgentSpace-1.0.0.AppImage',
-  );
+  const linuxInstaller = page.locator('.installer-row').filter({ hasText: 'Linux x64（glibc）' });
+  await expect(linuxInstaller.getByText('暂时无法验证安装包')).toBeVisible();
+  await linuxInstaller.getByRole('button', { name: /^重新检查/ }).click();
+  await expect(linuxInstaller.getByText('暂未发布')).toBeVisible();
+  expect(downloadRequests).toBe(2);
   await page.getByRole('button', { name: '返回', exact: true }).click();
-  await expect(page.locator('.donation-page')).toHaveCount(0);
+  await expect(page.locator('.adapter-downloads')).toHaveCount(0);
 
   await page.route('**/support.json', (route) =>
     route.fulfill({

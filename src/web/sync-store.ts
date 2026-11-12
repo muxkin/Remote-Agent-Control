@@ -84,6 +84,21 @@ export class SyncStore {
       id = await (await this.db).get('private', this.privateKey('active', scope));
     return hosts.find((h) => h.hostId === id) ?? hosts[0];
   }
+  async renameHost(hostId: string, name: string) {
+    const scope = this.scope;
+    const changed = this.onHostChange;
+    const key = this.privateKey('hosts', scope);
+    const tx = (await this.db).transaction('private', 'readwrite');
+    const hosts: PairedHost[] = (await tx.store.get(key)) ?? [];
+    const host = hosts.find((entry) => entry.hostId === hostId);
+    if (host) {
+      host.name = name;
+      await tx.store.put(hosts, key);
+    }
+    await tx.done;
+    if (host && scope === this.scope) await changed?.(hostId, host);
+    return host;
+  }
   async forget(hostId: string, sync = true) {
     const scope = this.scope;
     if (sync) await this.onHostChange?.(hostId);

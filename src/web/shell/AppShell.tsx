@@ -22,6 +22,9 @@ import { Avatar } from '../messaging/ui';
 
 export { PageHeader } from './PageHeader';
 
+const isWorkbenchHome = (route: AppRoute) =>
+  route.page === 'workbench' && !route.backend && !route.thread && !route.host;
+
 export const AppShell = tsxComponent(function AppShell() {
   useAppViewport();
   const routeState = shallowRef(readRoute(new URL(location.href)));
@@ -49,9 +52,9 @@ export const AppShell = tsxComponent(function AppShell() {
   );
   const setWorkspaceVisited = writeRef(workspaceVisitedState);
   const navigate = (next: AppRoute, replace = false) => {
-    if (next.page === 'workbench' && next.thread && !next.host)
+    if (next.page === 'workbench' && (next.backend || next.thread) && !next.host)
       next = { ...next, host: deviceSession.host?.hostId };
-    if (next.page === 'workbench') workbenchRoute.current = next;
+    if (next.page === 'workbench' && !isWorkbenchHome(next)) workbenchRoute.current = next;
     if (routeURL(next) !== location.pathname + location.search) {
       const current = readRoute(new URL(location.href));
       let previousRoute = replace ? history.state?.previousRoute : routeURL(current);
@@ -70,8 +73,13 @@ export const AppShell = tsxComponent(function AppShell() {
     setRoute(next);
     if (next.page === 'workbench' || next.page === 'pair') setWorkspaceVisited(true);
   };
+  let hostRefresh = 0;
   const refreshHosts = async () => {
-    setHosts(await deviceSession.cache.hosts());
+    const refresh = ++hostRefresh;
+    const scope = deviceSession.cache.scope;
+    const hosts = await deviceSession.cache.hosts(scope);
+    if (refresh !== hostRefresh || scope !== deviceSession.cache.scope) return;
+    setHosts(hosts);
     setHostId(deviceSession.host?.hostId ?? '');
   };
   const selectedBackendState = shallowRef(deviceSession.backendId);
@@ -83,6 +91,7 @@ export const AppShell = tsxComponent(function AppShell() {
   const watchInterval = watchRender();
   const watchRoute2 = watchRender();
   const watchSelectedBackend = watchRender();
+  const watchWorkspaceHost = watchRender();
   return () => {
     afterRender(() => {
       window.dispatchEvent(new Event('pocket:app-ready'));
@@ -126,7 +135,7 @@ export const AppShell = tsxComponent(function AppShell() {
     watchRoute(() => {
       const pop = () => {
         const next = readRoute(new URL(location.href));
-        if (next.page === 'workbench') workbenchRoute.current = next;
+        if (next.page === 'workbench' && !isWorkbenchHome(next)) workbenchRoute.current = next;
         setRoute(next);
         if (next.page === 'workbench' || next.page === 'pair') setWorkspaceVisited(true);
       };
@@ -162,9 +171,10 @@ export const AppShell = tsxComponent(function AppShell() {
     watchRoute2(() => {
       if (ready && route.page !== 'pair') void deviceSession.init().catch(() => {});
     }, [route.page, ready]);
-    const chooser = route.page === 'workbench' && !route.backend && !route.thread && !!deviceSession.host;
+    const chooser = isWorkbenchHome(route);
+    const devices = route.page === 'devices';
     const workspaceRoute =
-      route.page === 'workbench' || route.page === 'pair' ? route : workbenchRoute.current;
+      (route.page === 'workbench' && !chooser) || route.page === 'pair' ? route : workbenchRoute.current;
     const backendId = workspaceRoute.backend ?? DEFAULT_BACKEND;
     const selectedBackend = selectedBackendState.value;
     watchSelectedBackend(() => {
@@ -172,6 +182,33 @@ export const AppShell = tsxComponent(function AppShell() {
       setSelectedBackend(backendId);
     }, [backendId]);
     const activeWorkspace = route.page === 'workbench' || route.page === 'pair';
+    const showWorkspace = activeWorkspace && !chooser;
+    const requestedHost = workspaceRoute.page === 'workbench' ? workspaceRoute.host : undefined;
+    const matchingHost = !requestedHost || requestedHost === hostId;
+    const knownHost = hosts.some((host) => host.hostId === requestedHost);
+    watchWorkspaceHost(() => {
+      if (
+        !ready ||
+        !showWorkspace ||
+        route.page !== 'workbench' ||
+        !requestedHost ||
+        matchingHost ||
+        !knownHost
+      )
+        return;
+      const scope = deviceSession.cache.scope;
+      let alive = true;
+      void deviceSession.cache
+        .hosts(scope)
+        .then((pairedHosts) => {
+          const host = pairedHosts.find((entry) => entry.hostId === requestedHost);
+          if (alive && host && scope === deviceSession.cache.scope) return deviceSession.select(host, false);
+        })
+        .catch(() => setError('无法打开这台电脑，请重试'));
+      return () => {
+        alive = false;
+      };
+    }, [ready, showWorkspace, route.page, requestedHost, matchingHost, knownHost, accountId]);
     const root =
       ['messages', 'contacts', 'workbench', 'me'].includes(route.page) &&
       !route.thread &&
@@ -208,37 +245,59 @@ export const AppShell = tsxComponent(function AppShell() {
               class={`app-shell ${root ? 'shell-root' : 'shell-detail'} ${showNavigation ? 'has-navigation' : ''}`}
             >
               <div class="shell-content">
-                {chooser && <BackendChooser key={hostId} navigate={navigate} />}
-                {ready && workspaceVisited && !chooser && selectedBackend === backendId && (
-                  <section class="workspace-module" hidden={!activeWorkspace} aria-label="工作台模块">
-                    <Suspense timeout={0}>
-                      {{
-                        fallback: () => <PageLoading label="正在打开工作台…" />,
-                        default: () => (
-                          <>
-                            <PageBoundary
-                              page="workbench"
-                              backLabel="返回消息"
-                              onBack={() => navigate(resumeMessages())}
-                            >
-                              {() => (
-                                <>
-                                  <AgentWorkspace
-                                    key={`${hostId || 'unpaired'}:${backendId}`}
-                                    active={activeWorkspace}
-                                    route={workspaceRoute}
-                                    navigate={navigate}
-                                    onBusy={setBusy}
-                                  />
-                                </>
-                              )}
-                            </PageBoundary>
-                          </>
-                        ),
-                      }}
-                    </Suspense>
+                {ready && (chooser || devices) && (
+                  <BackendChooser
+                    key={accountId ?? 'local'}
+                    hosts={hosts}
+                    busy={busy}
+                    navigate={navigate}
+                    refreshHosts={refreshHosts}
+                    manage={devices}
+                    back={back}
+                  />
+                )}
+                {ready && showWorkspace && !matchingHost && (
+                  <section class="module-empty" role="status">
+                    <p>{knownHost ? '正在打开电脑…' : '这台电脑已移除或尚未配对。'}</p>
+                    <button class="secondary" onClick={() => navigate({ page: 'workbench' })}>
+                      返回工作台
+                    </button>
                   </section>
                 )}
+                {ready &&
+                  workspaceVisited &&
+                  !isWorkbenchHome(workspaceRoute) &&
+                  matchingHost &&
+                  selectedBackend === backendId && (
+                    <section class="workspace-module" hidden={!showWorkspace} aria-label="工作台模块">
+                      <Suspense timeout={0}>
+                        {{
+                          fallback: () => <PageLoading label="正在打开工作台…" />,
+                          default: () => (
+                            <>
+                              <PageBoundary
+                                page="workbench"
+                                backLabel="返回消息"
+                                onBack={() => navigate(resumeMessages())}
+                              >
+                                {() => (
+                                  <>
+                                    <AgentWorkspace
+                                      key={`${hostId || 'unpaired'}:${backendId}`}
+                                      active={showWorkspace}
+                                      route={workspaceRoute}
+                                      navigate={navigate}
+                                      onBusy={setBusy}
+                                    />
+                                  </>
+                                )}
+                              </PageBoundary>
+                            </>
+                          ),
+                        }}
+                      </Suspense>
+                    </section>
+                  )}
                 {activeWorkspace && !ready && (
                   <div class="page-loading" role="status">
                     正在打开…
@@ -272,7 +331,7 @@ export const AppShell = tsxComponent(function AppShell() {
                     }}
                   </Suspense>
                 )}
-                {!activeWorkspace && !messagingPage && (
+                {!activeWorkspace && !messagingPage && !devices && (
                   <Suspense timeout={0}>
                     {{
                       fallback: () => <PageLoading />,
@@ -286,15 +345,7 @@ export const AppShell = tsxComponent(function AppShell() {
                           >
                             {() => (
                               <>
-                                <MePages
-                                  route={route}
-                                  navigate={navigate}
-                                  back={back}
-                                  hosts={hosts}
-                                  hostId={hostId}
-                                  busy={busy}
-                                  refreshHosts={refreshHosts}
-                                />
+                                <MePages route={route} navigate={navigate} back={back} />
                               </>
                             )}
                           </PageBoundary>
@@ -331,7 +382,7 @@ export const AppShell = tsxComponent(function AppShell() {
                       onClick={() =>
                         navigate(
                           module.id === 'workbench'
-                            ? workbenchRoute.current
+                            ? { page: 'workbench' }
                             : module.id === 'messages'
                               ? route.page === 'messages'
                                 ? route
