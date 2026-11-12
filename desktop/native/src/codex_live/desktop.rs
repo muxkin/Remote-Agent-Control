@@ -95,7 +95,7 @@ impl Thread {
         self.view.borrow().as_ref().is_some_and(|view| {
             view.messages
                 .iter()
-                .any(|message| message["role"] == "assistant" && message["turnId"] == turn)
+                .any(|message| message["turnBoundary"] == true && message["turnId"] == turn)
         })
     }
 
@@ -907,6 +907,7 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
                     "attachments":attachments,"turnId":turn_id,"clientMessageId":request}), None));
             }
         }
+        let mut final_reply = None;
         for (index, item) in items.into_iter().enumerate() {
             let kind = item["type"].as_str().unwrap_or_default();
             let media = history_media::media(item);
@@ -951,11 +952,24 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{turn_id}:{index}"));
+            if role == "user" {
+                final_reply = None;
+            } else if kind == "agentMessage"
+                && (item["phase"].is_null() || item["phase"] == "final_answer")
+            {
+                final_reply = Some(messages.len());
+            }
             messages.push((json!({
                 "id": item_id, "role": role, "text": text, "turnId": turn_id, "attachments": attachments,
                 "phase": item["phase"], "clientMessageId": item["clientUserMessageId"].as_str()
                     .or_else(|| item["clientId"].as_str()).or_else(|| (kind == "userMessage").then_some(request).flatten()),
             }), is_activity.then_some(item)));
+        }
+        if let Some(index) = final_reply
+            && turn["status"] == "completed"
+            && active != Some(turn_id)
+        {
+            messages[index].0["turnBoundary"] = json!(true);
         }
     }
     let mut seen = HashSet::new();

@@ -323,12 +323,12 @@ if (forkCli) {
     forkCli,
     `#!/usr/bin/env node
 if (process.argv[2] === '--version') {
-  console.log('codex-cli 0.167.0-alpha.3.2');
+  console.log('codex-cli 0.167.0-alpha.4.1');
 } else {
   const lines = require('node:readline').createInterface({ input: process.stdin });
   lines.on('line', (line) => {
     const call = JSON.parse(line);
-    if (call.id === 1) console.log(JSON.stringify({ id: 1, result: { userAgent: 'pocket_reply_fork/0.167.0-alpha.3.2 fixture' } }));
+    if (call.id === 1) console.log(JSON.stringify({ id: 1, result: { userAgent: 'pocket_reply_fork/0.167.0-alpha.4.1 fixture' } }));
     if (call.id === 2) {
       require('node:assert/strict').deepEqual(call.params, {
         threadId: '${THREAD}', lastTurnId: 'earlier-turn', excludeTurns: true, threadSource: 'user',
@@ -527,7 +527,8 @@ async function desktopFixture(id = 'default', initialTitle = '测试会话', ren
         turnId: 'earlier-turn',
         status: 'completed',
         items: [
-          { id: 'earlier-message', type: 'agentMessage', text: 'earlier response '.repeat(1000) },
+          { id: 'earlier-progress', type: 'agentMessage', phase: 'commentary', text: 'Preparing response' },
+          { id: 'earlier-message', type: 'agentMessage', phase: 'final_answer', text: 'earlier response '.repeat(1000) },
           {
             id: 'live-command',
             type: 'commandExecution',
@@ -868,6 +869,8 @@ async function testLive(
     await session.rpc(open.request);
     assert.equal(ipc.actions.filter((name) => name === 'navigate_to_codex_page').length, 1);
     await wait(() => view?.synchronized && view?.canSend);
+    assert.equal(update.changed.find((message: any) => message.id === 'earlier-message').turnBoundary, true);
+    assert.equal(update.changed.find((message: any) => message.id === 'earlier-progress').turnBoundary, undefined);
     const full = await session.rpc<{ message: { text: string; truncated: boolean } }>(
       apiCall(`/threads/${THREAD}/content?messageId=earlier-message`),
     );

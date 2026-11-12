@@ -18,7 +18,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-const VERSION: &str = "0.167.0-alpha.3.2";
+// Older app-servers could accept lastTurnId without truncating the history.
+const VERIFIED_VERSIONS: &[&str] = &["0.167.0-alpha.3.2", "0.167.0-alpha.4.1"];
 const CLIENT: &str = "pocket_reply_fork";
 const LINE_LIMIT: u64 = 256 * 1024;
 
@@ -76,7 +77,10 @@ impl ReplyFork {
                 .and_then(Result::ok)
                 .filter(|output| output.status.success())
                 .map(|output| {
-                    String::from_utf8_lossy(&output.stdout).trim() == format!("codex-cli {VERSION}")
+                    String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .strip_prefix("codex-cli ")
+                        .is_some_and(|version| VERIFIED_VERSIONS.contains(&version))
                 }),
             None => Some(false),
         };
@@ -135,7 +139,11 @@ impl ReplyFork {
         ensure!(
             initial["result"]["userAgent"]
                 .as_str()
-                .is_some_and(|agent| { agent.starts_with(&format!("{CLIENT}/{VERSION} ")) }),
+                .and_then(|agent| agent.split_ascii_whitespace().next())
+                .and_then(|agent| agent.split_once('/'))
+                .is_some_and(
+                    |(name, version)| name == CLIENT && VERIFIED_VERSIONS.contains(&version)
+                ),
             "Codex 分支协议版本未经验证"
         );
         write(&mut input, json!({"method":"initialized"})).await?;
@@ -207,10 +215,7 @@ mod tests {
         service.probe().await;
         assert!(!service.supported());
 
-        fs::write(
-            &cli,
-            format!("#!/bin/sh\nprintf 'codex-cli {VERSION}\\n'\n"),
-        )?;
+        fs::write(&cli, "#!/bin/sh\nprintf 'codex-cli 0.167.0-alpha.4.1\\n'\n")?;
         service.probe().await;
         assert!(service.supported());
         Ok(())
