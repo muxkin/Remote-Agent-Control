@@ -51,15 +51,44 @@ export async function verifyMathCopy(page: Page, message: Locator) {
       const box = range.getBoundingClientRect();
       return { x: box.x, y: box.y + box.height / 2 };
     }, offset);
-  const from = await caret(first, 3);
-  const to = await caret(last, 5);
+  const startOffset = 3;
+  const endOffset = 5;
+  const from = await caret(first, startOffset);
+  const to = await caret(last, endOffset);
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
   await page.mouse.move(to.x, to.y, { steps: 15 });
   await page.mouse.up();
   await expect.poll(clipboard).toBe(inline); // Dragging must not run click-to-copy.
+
+  const selectedText = (locator: Locator) =>
+    locator.evaluate((el) => {
+      const selection = window.getSelection();
+      if (!selection?.rangeCount || selection.isCollapsed) return '';
+      const node = el.firstChild!;
+      const range = selection.getRangeAt(0);
+      if (!range.intersectsNode(node)) return '';
+      const fragment = document.createRange();
+      fragment.selectNodeContents(node);
+      if (range.compareBoundaryPoints(Range.START_TO_START, fragment) > 0)
+        fragment.setStart(range.startContainer, range.startOffset);
+      if (range.compareBoundaryPoints(Range.END_TO_END, fragment) < 0)
+        fragment.setEnd(range.endContainer, range.endOffset);
+      return fragment.toString().trim();
+    });
+  const mixedCopy = (start: string, end: string) =>
+    `${start} 加粗 $${inline}$ 后文。\n\n$$\n${display}\n$$\n\n${end}`;
+  const [leading, trailing] = await Promise.all([selectedText(first), selectedText(last)]);
+  expect(leading).toContain('前文');
+  expect(trailing).toContain('末段 截止');
   await page.keyboard.press('ControlOrMeta+c');
-  await expect.poll(clipboard).toBe(`前文 加粗 $${inline}$ 后文。\n\n$$\n${display}\n$$\n\n末段 截止`);
+  await expect.poll(clipboard).toBe(mixedCopy(leading, trailing));
+
+  // Chromium can snap a dragged endpoint to a word boundary. Test copy with exact offsets.
+  await first.evaluate((el, offset) => window.getSelection()!.collapse(el.firstChild!, offset), startOffset);
+  await last.evaluate((el, offset) => window.getSelection()!.extend(el.firstChild!, offset), endOffset);
+  await page.keyboard.press('ControlOrMeta+c');
+  await expect.poll(clipboard).toBe(mixedCopy('前文', '末段 截止'));
 
   // Reverse selection starting and ending within rendered glyphs still copies whole equations.
   const originalSelection = await message.evaluate((el) => {
