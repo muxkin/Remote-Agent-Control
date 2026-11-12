@@ -48,36 +48,35 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Configure Ubuntu APT mirrors
+        if: runner.os == 'Linux'
+        run: |
+          mirror_list=/etc/apt/apt-mirrors.txt
+          if [[ ! -f "$mirror_list" ]]; then exit 0; fi
+
+          mirror=https://mirrors.edge.kernel.org/ubuntu/
+          updated_list=$(mktemp)
+          trap 'rm -f -- "$updated_list"' EXIT
+          printf '%s\tpriority:0\n' "$mirror" > "$updated_list"
+          awk -v mirror="$mirror" '$1 != mirror' "$mirror_list" >> "$updated_list"
+          sudo install -m 0644 "$updated_list" "$mirror_list"
+
+          # Move to the next mirror when a request fails on Jammy.
+          printf '%s\n' 'Acquire::Retries "0";' |
+            sudo tee /etc/apt/apt.conf.d/zzzz-agent-space-mirror-failover >/dev/null
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
       - name: Install Linux desktop test dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
-          if command -v pkexec >/dev/null && command -v zstd >/dev/null; then
-            if command -v desktop-file-validate >/dev/null; then exit 0; fi
-
-            . /etc/os-release
-            if [[ "$ID" == ubuntu && "$VERSION_ID" == 22.04 && "$(dpkg --print-architecture)" == amd64 ]] &&
-               command -v curl >/dev/null; then
-              # Ubuntu Jammy amd64 package and SHA-256 from the Ubuntu package index.
-              package=desktop-file-utils_0.26-1ubuntu3_amd64.deb
-              digest=d9c4e24b44113cf8f9131aa0cb5f663c37d5fdcbc3238c2b06b84f2c2beafc60
-              temp_dir=$(mktemp -d)
-              trap 'rm -rf -- "$temp_dir"' EXIT
-              deb="$temp_dir/$package"
-              url="https://mirrors.kernel.org/ubuntu/pool/main/d/desktop-file-utils/$package"
-              if curl --fail --silent --show-error --location --retry 1 --retry-all-errors \
-                   --connect-timeout 8 --max-time 20 --output "$deb" "$url" &&
-                 printf '%s  %s\n' "$digest" "$deb" | sha256sum --check --strict &&
-                 sudo dpkg -i "$deb" && command -v desktop-file-validate; then
-                exit 0
-              fi
-            fi
+          if command -v desktop-file-validate >/dev/null && command -v pkexec >/dev/null && command -v zstd >/dev/null; then
+            exit 0
           fi
-          sudo apt-get -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
-          sudo apt-get -o Acquire::Retries=1 install -y desktop-file-utils pkexec zstd
+          sudo apt-get -o APT::Update::Error-Mode=any update
+          sudo apt-get install -y desktop-file-utils pkexec zstd
       - if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
       - run: npm ci --ignore-scripts
