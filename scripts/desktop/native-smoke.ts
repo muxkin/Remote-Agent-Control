@@ -71,6 +71,7 @@ const migratedDraftPath = join(legacyState, 'uploads', migratedDraftId, legacyNa
 const migratedNativeId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const migratedNativeDir = join(legacyState, 'native-uploads', migratedNativeId);
 const migratedNativePath = join(migratedNativeDir, 'attachment.txt');
+const FORK_REPLY = 'ed2a5874-cf9b-44d6-a2d6-fb9351af8eee';
 const inlineBytes = Buffer.alloc(420_000, 37);
 const inlineSource = 'data:image/png;base64,' + inlineBytes.toString('base64');
 const inlineRef = 'pocket-inline:' + createHash('sha256').update(inlineSource).digest('hex') + '.png';
@@ -240,6 +241,26 @@ const imageCall = (id: string, paths: string[], outputs: Buffer[]) => [
     },
   },
 ];
+const generatedBytes = await readFile('src/web/public/app-icon-180.png');
+const generatedData = generatedBytes.toString('base64');
+const generatedRef = (data: string) =>
+  'pocket-inline:' + createHash('sha256').update('data:image/png;base64,' + data).digest('hex') + '.png';
+const generatedEvent = activityEvent({
+  type: 'Extension',
+  kind: 'image_gen.generation',
+  status: 'completed',
+  result: generatedData,
+  savedPath: join(directory, 'moved-generated-image.png'),
+});
+const foreignData = (await readFile('src/web/public/app-icon-512.png')).toString('base64');
+const foreignGeneratedEvent = {
+  ...generatedEvent,
+  payload: {
+    ...generatedEvent.payload,
+    thread_id: FORK_REPLY,
+    item: { ...generatedEvent.payload.item, result: foreignData },
+  },
+};
 const historicalTool = activityEvent({
   type: 'CommandExecution',
   command: ['printf', 'historical tool'],
@@ -254,6 +275,8 @@ await writeFile(
       [
         legacyRecord,
         historicalTool,
+        generatedEvent,
+        foreignGeneratedEvent,
         ...imageCall(
           'viewed',
           viewed.map((item) => item.path),
@@ -316,7 +339,6 @@ await mkdir(join(pluginRoot, '1.0.0', '.codex-plugin'), { recursive: true });
 await writeFile(join(skillRoot, 'SKILL.md'), '---\nname: fixture\ndescription: a native skill\n---\n');
 await writeFile(join(pluginRoot, '.codex-remote-plugin-install.json'), '{"remote_plugin_id":"fixture"}');
 await writeFile(join(pluginRoot, '1.0.0', '.codex-plugin', 'plugin.json'), '{"name":"Fixture Plugin"}');
-const FORK_REPLY = 'ed2a5874-cf9b-44d6-a2d6-fb9351af8eee';
 const forkCli = process.platform === 'win32' ? undefined : join(directory, 'fixture-codex');
 if (forkCli) {
   await writeFile(
@@ -2059,10 +2081,12 @@ try {
     await assert.rejects(session.rpc(apiCall(`/threads/${FORK_REPLY}/uploads/${legacyId}/complete`, 'POST')));
     const describe = (path: string) =>
       session.rpc<FileManifest>(apiCall(`/threads/${THREAD}/media`, 'POST', { path }));
+    await assert.rejects(describe(generatedRef(foreignData)));
     await assert.rejects(describe(unpaired), /没有可恢复的数据/);
     for (const [path, expected, mime] of [
       [legacyPath, legacyBytes],
       [inlineRef, inlineBytes],
+      [generatedRef(generatedData), generatedBytes, 'image/png'],
       [projectFile, Buffer.from('project attachment')],
       [`sandbox:./${projectPdf}`, pdfBytes, 'application/pdf'],
       [`sandbox:./${projectPng}`, pngBytes, 'image/png'],

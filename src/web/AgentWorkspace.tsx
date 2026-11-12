@@ -191,7 +191,12 @@ export default tsxComponent(function AgentWorkspace(_props: {
   const setOlder = writeRef(olderState);
   const transcriptRef = shallowRef<HTMLElement | null>(null);
   const followBottom = { current: true };
-  const transcriptTop = { current: 0 };
+  const transcriptScroll = { top: 0, height: 0 };
+  function scrollToLatest(transcript: HTMLElement) {
+    transcript.scrollTop = transcript.scrollHeight;
+    transcriptScroll.top = transcript.scrollTop;
+    transcriptScroll.height = transcript.clientHeight;
+  }
   const viewRef: { current: ThreadView | null } = { current: null };
   const operationSnapshots = { current: new Map<string, Operation>() };
   const recoveredDraft: { current: string | undefined } = { current: undefined };
@@ -206,6 +211,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
   const watchView = watchRender();
   const watchOlder = watchRender();
   const watchView2 = watchRender();
+  const watchTranscript = watchRender();
   const watchDeviceId = watchRender();
   const watchOutgoingOperation = watchRender();
   const watchOutgoingOperation2 = watchRender();
@@ -503,7 +509,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
       setHistoryLoading(false);
       setHistoryCursor('latest');
       historyError.value = '';
-      transcriptTop.current = 0;
+      transcriptScroll.top = 0;
       setOperations(readPending(deviceId, id));
       setError('');
       setThreadError('');
@@ -539,17 +545,31 @@ export default tsxComponent(function AgentWorkspace(_props: {
       const transcript = transcriptRef.value;
       if (previous && transcript) {
         transcript.scrollTop = previous.top + transcript.scrollHeight - previous.height;
-        transcriptTop.current = transcript.scrollTop;
+        transcriptScroll.top = transcript.scrollTop;
+        transcriptScroll.height = transcript.clientHeight;
       }
       historyScroll.current = null;
     }, [older]);
     watchView2(() => {
       const transcript = transcriptRef.value;
-      if (followBottom.current && transcript) {
-        transcript.scrollTop = transcript.scrollHeight;
-        transcriptTop.current = transcript.scrollTop;
-      }
+      if (followBottom.current && transcript) scrollToLatest(transcript);
     }, [view?.messages]);
+    const transcript = transcriptRef.value;
+    watchTranscript(() => {
+      if (!transcript) return;
+      transcriptScroll.height = transcript.clientHeight;
+      const observer = new ResizeObserver(() => {
+        const height = transcript.clientHeight;
+        if (!height || height === transcriptScroll.height) return;
+        if (followBottom.current) scrollToLatest(transcript);
+        else {
+          transcriptScroll.height = height;
+          transcriptScroll.top = transcript.scrollTop;
+        }
+      });
+      observer.observe(transcript);
+      return () => observer.disconnect();
+    }, [transcript]);
     async function pair(e: SubmitEvent) {
       e.preventDefault();
       setBusy(true);
@@ -821,7 +841,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
     }, [outgoingOperation, echoed]);
     watchOutgoingOperation2(() => {
       if (outgoingOperation && followBottom.current && transcriptRef.value)
-        transcriptRef.value.scrollTop = transcriptRef.value.scrollHeight;
+        scrollToLatest(transcriptRef.value);
     }, [outgoingOperation]);
     const canEdit =
       stream &&
@@ -1047,8 +1067,12 @@ export default tsxComponent(function AgentWorkspace(_props: {
                   onScroll={(e) => {
                     const el = e.currentTarget as HTMLElement;
                     const top = el.scrollTop;
-                    const movingUp = top < transcriptTop.current;
-                    transcriptTop.current = top;
+                    // A keyboard or composer resize can move the scroll position
+                    // without the reader navigating away from the latest message.
+                    if (el.clientHeight !== transcriptScroll.height || top === transcriptScroll.top)
+                      return;
+                    const movingUp = top < transcriptScroll.top;
+                    transcriptScroll.top = top;
                     followBottom.current = el.scrollHeight - top - el.clientHeight < 100;
                     if (
                       movingUp &&

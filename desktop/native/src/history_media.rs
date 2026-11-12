@@ -224,16 +224,29 @@ pub fn description(
         {
             calls.clear();
         }
-        if record["type"] == "response_item" {
-            if inline {
-                if let Some(data) = media(p)
+        let completed_item = (record["type"] == "event_msg"
+            && p["type"] == "item_completed"
+            && p["thread_id"]
+                .as_str()
+                .and_then(|id| Uuid::parse_str(id).ok())
+                == Some(thread))
+        .then(|| &p["item"]);
+        if inline {
+            let item = if record["type"] == "response_item" {
+                Some(p)
+            } else {
+                completed_item
+            };
+            if let Some(data) = item.and_then(|item| {
+                media(item)
                     .into_iter()
                     .find(|source| media_reference(source) == reference)
-                {
-                    return embedded(&data);
-                }
-                continue;
+            }) {
+                return embedded(&data);
             }
+            continue;
+        }
+        if record["type"] == "response_item" {
             let path = requested.as_ref().unwrap();
             let text = crate::codex_live::native_text(&p["content"]);
             let (_, attachments) = files::message_attachment_text(&text);
@@ -779,6 +792,18 @@ pub(crate) fn links(text: &str) -> impl Iterator<Item = String> {
 }
 
 #[cfg(feature = "official-plugins")]
+fn generated_image_data(item: &Value) -> Option<String> {
+    let result = item["result"].as_str()?;
+    if result.starts_with("iVBORw0KGgo") && result.len() <= INLINE_LIMIT {
+        Some(format!("data:image/png;base64,{result}"))
+    } else if result.starts_with("data:image/") && result.len() <= INLINE_LIMIT {
+        Some(result.to_owned())
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "official-plugins")]
 pub fn media(item: &Value) -> Vec<String> {
     fn visit(item: &Value, level: u8, result: &mut Vec<String>) {
         if level > 8 || result.len() >= 32 {
@@ -796,6 +821,9 @@ pub fn media(item: &Value) -> Vec<String> {
         let source = match item["type"].as_str() {
             Some("localImage" | "imageView" | "ImageView") => {
                 item["path"].as_str().map(str::to_owned)
+            }
+            Some("Extension" | "extension") if item["kind"] == "image_gen.generation" => {
+                generated_image_data(item)
             }
             Some("imageGeneration") => ["savedPath", "src", "result"]
                 .into_iter()

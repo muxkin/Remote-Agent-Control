@@ -108,6 +108,35 @@ try {
     )
     .toBeGreaterThan(1);
   await galleryMessage.screenshot({ path: '.test-output/v3/mobile-attachment-gallery.png' });
+  const transcript = page.getByRole('region', { name: '聊天记录' });
+  const composer = page.getByLabel('消息', { exact: true });
+  const bottomGap = () => transcript.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+  native.current.turnHistory.history.entitiesByKey.one.items.push({
+    type: 'agentMessage',
+    id: 'mobile-scroll-fixture',
+    text: `手机滚动测试\n\n${'这一段用于让聊天记录超过可视高度。\n\n'.repeat(40)}`,
+  });
+  native.revision++;
+  native.snapshot();
+  await expect(transcript.getByText('手机滚动测试')).toBeAttached();
+  await transcript.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  await expect.poll(bottomGap).toBeLessThan(2);
+  await composer.focus();
+  await page.setViewportSize({ width: 390, height: 500 });
+  await composer.fill('手机输入测试\n第二行\n第三行\n第四行');
+  await expect.poll(bottomGap).toBeLessThan(2);
+  await transcript.evaluate((el) => {
+    el.scrollTop -= 600;
+  });
+  await expect.poll(bottomGap).toBeGreaterThan(500);
+  const readingTop = await transcript.evaluate((el) => el.scrollTop);
+  await composer.fill('仍在查看较早消息');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => transcript.evaluate((el) => el.scrollTop)).toBe(readingTop);
+  await composer.fill('');
+  report.checks.mobileComposerScroll = true;
   report.checks.imageGallery = true;
   const linkedImage = join(config.desktopRoot, 'desktop-preview.png');
   await writeFile(linkedImage, Buffer.from(images[0].image_url.split(',')[1], 'base64'));
