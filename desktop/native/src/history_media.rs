@@ -50,6 +50,17 @@ impl std::fmt::Display for MissingAttachment {
 
 impl std::error::Error for MissingAttachment {}
 
+#[derive(Debug)]
+pub(crate) struct HistoryUnavailable;
+
+impl std::fmt::Display for HistoryUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("无法读取本机历史记录，请在 Codex 桌面打开此会话确认记录是否可用。")
+    }
+}
+
+impl std::error::Error for HistoryUnavailable {}
+
 #[cfg(feature = "official-plugins")]
 #[derive(Default, Clone)]
 pub struct Rollouts(Arc<Mutex<HashMap<PathBuf, Expanded>>>);

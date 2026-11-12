@@ -8,7 +8,7 @@ import { chmod, copyFile, mkdir, mkdtemp, open, readFile, rename, rm, writeFile 
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -265,6 +265,10 @@ await writeFile(
           viewed.map((item) => item.bytes),
         ),
         assistantRecord,
+        ...Array.from({ length: 9 }, () => ({
+          type: 'event_msg',
+          payload: { type: 'internal', trace: 'x'.repeat(80_000) },
+        })),
       ]
         .map((record) => JSON.stringify(record))
         .join('\n') + '\n',
@@ -275,7 +279,8 @@ const historyDb = new DatabaseSync(join(codexHome, 'state_5.sqlite'));
 historyDb.exec("INSERT INTO projects VALUES ('native-project','材料研究',0),('empty-project','空项目',1)");
 historyDb
   .prepare('UPDATE threads SET rollout_path=?,cwd=? WHERE id=?')
-  .run(rollout + '.zst', projectPath, THREAD);
+  .run(relative(codexHome, rollout), projectPath, THREAD);
+await rm(rollout);
 historyDb.close();
 const globalPath = join(codexHome, '.codex-global-state.json');
 const globalFixture = {
@@ -2019,6 +2024,15 @@ try {
     );
     assert.equal(historic.message.text, historicalReply);
     assert.equal(earlierReply.attachments[0].path, inlineRef);
+    await rename(rollout + '.zst', rollout + '.held');
+    try {
+      await assert.rejects(
+        session.rpc(apiCall(`/threads/${THREAD}/history`)),
+        /无法读取本机历史记录/,
+      );
+    } finally {
+      await rename(rollout + '.held', rollout + '.zst');
+    }
     await writeFile(
       join(legacyState, 'uploads', legacyId + '.json'),
       JSON.stringify({

@@ -32,6 +32,7 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
   const setBackends = writeRef(backendsState);
   const recentState = shallowRef<Recent[]>([]);
   const setRecent = writeRef(recentState);
+  const computerOnline = shallowRef(deviceSession.online);
   const loadingState = shallowRef(true);
   const setLoading = writeRef(loadingState);
   const historyLoadingState = shallowRef(true);
@@ -61,7 +62,8 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
 
     watchBackends(() => {
       let active = true,
-        inFlight = false;
+        inFlight = false,
+        refreshAfterConnect = false;
       const refresh = async () => {
         if (inFlight || document.visibilityState === 'hidden') return;
         inFlight = true;
@@ -99,13 +101,16 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
           if (active && version === generation.current) {
             setError('电脑暂时离线，连接恢复后会自动更新。');
             setHistoryError(true);
-            setBackends((current) => current.map((b) => ({ ...b, connected: false })));
           }
         } finally {
           inFlight = false;
           if (active) {
             setLoading(false);
             setHistoryLoading(false);
+            if (refreshAfterConnect) {
+              refreshAfterConnect = false;
+              void refresh();
+            }
           }
         }
       };
@@ -113,8 +118,11 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
       let online = deviceSession.online;
       const unsubscribe = deviceSession.onChange(() => {
         const connected = deviceSession.online;
-        if (connected && !online) void refresh();
-        if (!connected && online) setBackends((current) => current.map((b) => ({ ...b, connected: false })));
+        computerOnline.value = connected;
+        if (connected && !online) {
+          if (inFlight) refreshAfterConnect = true;
+          else void refresh();
+        }
         online = connected;
       });
       const focus = () => void refresh();
@@ -174,9 +182,11 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
                     >
                       <div class="agent-launch-top">
                         <BackendIcon icon={value.icon} product={backend.product} />
-                        <span class={`backend-status ${backend.connected ? 'connected' : ''}`}>
+                        <span
+                          class={`backend-status ${computerOnline.value && backend.connected ? 'connected' : ''}`}
+                        >
                           <i />
-                          {backend.connected ? '已连接' : '未连接'}
+                          {!computerOnline.value ? '电脑未连接' : backend.connected ? '已连接' : '助手未连接'}
                         </span>
                       </div>
                       <h3>{value.name}</h3>

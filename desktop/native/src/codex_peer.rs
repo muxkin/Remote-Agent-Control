@@ -190,12 +190,12 @@ impl Endpoint {
 
     #[cfg(windows)]
     async fn connect(&self, _app_tools: bool) -> Result<Stream> {
-        let expected = if let Some(path) = &self.executable {
-            path.clone()
+        let candidates = if let Some(path) = &self.executable {
+            vec![path.clone()]
         } else {
-            tokio::task::spawn_blocking(windows_executable).await??
+            tokio::task::spawn_blocking(windows_executables).await?
         };
-        crate::windows::codex_pipe(&self.socket, &expected)
+        crate::windows::codex_pipe(&self.socket, &candidates).await
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -273,13 +273,23 @@ fn verify_unix(_stream: &tokio::net::UnixStream, _expected: &Path, _uid: u32) ->
 
 #[cfg(windows)]
 pub(crate) fn windows_executable() -> Result<PathBuf> {
+    let mut paths = windows_executables();
+    anyhow::ensure!(
+        paths.len() == 1,
+        "未找到唯一的 Codex 程序，请显式配置其路径"
+    );
+    Ok(paths.remove(0))
+}
+
+#[cfg(windows)]
+fn windows_executables() -> Vec<PathBuf> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         ProcessRefreshKind::new().with_exe(UpdateKind::Always),
     );
-    let paths = system
+    system
         .processes()
         .values()
         .filter(|process| {
@@ -291,10 +301,7 @@ pub(crate) fn windows_executable() -> Result<PathBuf> {
             path.parent()
                 .is_some_and(|root| root.join("resources/app.asar").is_file())
         })
-        .collect::<std::collections::BTreeSet<_>>();
-    anyhow::ensure!(
-        paths.len() == 1,
-        "未找到唯一的 Codex 程序，请显式配置其路径"
-    );
-    Ok(paths.into_iter().next().unwrap())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }

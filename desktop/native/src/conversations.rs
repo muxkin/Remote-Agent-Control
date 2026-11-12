@@ -229,7 +229,14 @@ impl Change {
             }
         };
         let Ok(mut stream) = tools.connect(tool).await else {
-            return Outcome::Rejected("Codex 桌面未提供此操作".into());
+            return Outcome::Rejected(
+                if matches!(tool, Tool::Open) {
+                    "请先在电脑上的 Codex 桌面打开此会话，工作台同步后即可控制。"
+                } else {
+                    "Codex 桌面未提供此操作"
+                }
+                .into(),
+            );
         };
         let reply = app_tools::call(&mut stream, &anchor, request, tool, arguments).await;
         if matches!(tool, Tool::Open) {

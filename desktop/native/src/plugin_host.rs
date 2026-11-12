@@ -1,5 +1,5 @@
 use crate::{
-    history_media::{MissingAttachment, Source},
+    history_media::{HistoryUnavailable, MissingAttachment, Source},
     plugin_catalog::{Catalog, Package, Switch},
     plugins::{Adapter, Delivery, Media, Observation, RecordCreated, Subscription, View, Write},
     state::{private_directory, private_file},
@@ -162,10 +162,11 @@ impl Process {
         }
         ensure!(response["id"] == id, "原生插件响应标识无效");
         if response.get("error").is_some() {
-            if response["error"]["code"] == -32004 {
-                return Err(MissingAttachment.into());
-            }
-            return Err(Refused.into());
+            return Err(match response["error"]["code"].as_i64() {
+                Some(-32004) => MissingAttachment.into(),
+                Some(-32005) => HistoryUnavailable.into(),
+                _ => Refused.into(),
+            });
         }
         Ok(response
             .get_mut("result")
@@ -438,10 +439,11 @@ impl Host {
             // Cancelling a frame leaves its stream unusable. Keep the child until it is reaped.
             process.ready = false;
             let mut reply = process.request_with_progress(method, args, created).await;
-            process.ready = reply
-                .as_ref()
-                .err()
-                .is_none_or(|error| error.is::<Refused>() || error.is::<MissingAttachment>());
+            process.ready = reply.as_ref().err().is_none_or(|error| {
+                error.is::<Refused>()
+                    || error.is::<MissingAttachment>()
+                    || error.is::<HistoryUnavailable>()
+            });
             if !process.ready {
                 self.upload.store(false, Ordering::Relaxed);
                 let _ = slot.stop().await;

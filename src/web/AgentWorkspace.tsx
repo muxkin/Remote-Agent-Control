@@ -715,6 +715,15 @@ export default tsxComponent(function AgentWorkspace(_props: {
           ...new Map([...page.messages, ...old].map((message) => [message.id, message])).values(),
         ]);
         setHistoryCursor(page.nextCursor);
+        setView((previous) =>
+          previous?.historyUnavailable
+            ? {
+                ...previous,
+                historyUnavailable: false,
+                reason: '历史记录已读取。请在电脑上的 Codex 打开此会话后开始控制。',
+              }
+            : previous,
+        );
         setError('');
       } catch (e) {
         if (generation === historyGeneration.current) setError((e as Error).message);
@@ -1005,7 +1014,11 @@ export default tsxComponent(function AgentWorkspace(_props: {
                       disabled={historyLoading}
                       onClick={() => void loadOlder()}
                     >
-                      {historyLoading ? '正在加载历史记录…' : '加载更早的记录'}
+                      {historyLoading
+                        ? '正在加载历史记录…'
+                        : view?.historyUnavailable && historyCursor === 'latest'
+                          ? '重试读取历史'
+                          : '加载更早的记录'}
                     </button>
                   )}
                   {!view &&
@@ -1114,7 +1127,11 @@ export default tsxComponent(function AgentWorkspace(_props: {
                     </article>
                   )}
                   {view && messages.length === 0 && !outgoing && (
-                    <p class="muted center">此会话暂时没有可显示的消息</p>
+                    <p class="muted center">
+                      {view.historyUnavailable
+                        ? '暂时无法读取此会话的历史记录'
+                        : '此会话暂时没有可显示的消息'}
+                    </p>
                   )}
                   {!!view?.requests?.length && (
                     <RequestCards

@@ -67,11 +67,14 @@ async fn run<T: Instance>() -> Result<()> {
         match result {
             Ok(result) => response["result"] = result,
             Err(error) => {
-                let missing = error.is::<crate::history_media::MissingAttachment>();
-                response["error"] = json!({
-                    "code":if missing { -32004 } else { -32000 },
-                    "message":if missing { "附件不存在" } else { "原生插件请求失败" }
-                });
+                let (code, message) = if error.is::<crate::history_media::MissingAttachment>() {
+                    (-32004, "附件不存在")
+                } else if error.is::<crate::history_media::HistoryUnavailable>() {
+                    (-32005, "无法读取本机历史记录")
+                } else {
+                    (-32000, "原生插件请求失败")
+                };
+                response["error"] = json!({"code": code, "message": message});
             }
         }
         send(&response)?;

@@ -532,7 +532,7 @@ pub(crate) fn status(available: Availability, online: bool) -> Value {
         _ => Some("尚未配置 Codex 历史"),
     };
     json!({
-        "connected":connected,"desktopVersion":null,"supportedVersion":connected,
+        "connected":connected,"desktopIpcConnected":available.ipc_online,"desktopVersion":null,"supportedVersion":connected,
         "writesEnabled":connected,"reason":reason,
         "capabilities":{
             "send":online,"steer":online,"interrupt":online,"modelSettings":online,
@@ -571,8 +571,32 @@ pub(crate) fn info(available: Availability, online: bool) -> Option<Value> {
         );
     }
     Some(json!({
-        "id":ID,"product":"codex","name":"Codex","connected":status["connected"],"version":null,"profile":"rust-native",
+        "id":ID,"product":"codex","name":"Codex","connected":available.ipc_online || status["connected"] == true,"version":null,"profile":"rust-native",
         "presentation":{"description":"Codex 桌面","creation":{"empty":true,"permission":"native","preset":false,"plan":false,"notice":"沿用 Codex 创建权限"},"plan":"settings","fileReferences":false,"exportLog":false,"nativeCommands":false},
         "capabilities":capabilities,
     }))
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_ipc_is_online_without_a_subscribed_thread() {
+        let available = Availability {
+            history: true,
+            desktop: true,
+            ipc_online: true,
+            ..Default::default()
+        };
+        let backend = info(available, false).unwrap();
+        assert_eq!(backend["connected"], true);
+        assert_eq!(backend["capabilities"]["send"]["state"], "unavailable");
+        assert_eq!(status(available, false)["writesEnabled"], false);
+        let disconnected = Availability {
+            ipc_online: false,
+            ..available
+        };
+        assert_eq!(info(disconnected, false).unwrap()["connected"], false);
+    }
 }

@@ -102,6 +102,7 @@ export interface PluginChoice {
   description: string;
 }
 export interface ThreadView extends ThreadSummary {
+  historyUnavailable?: boolean;
   controls?: import('./controls.js').ControlState;
   messages: Message[];
   revision: number;

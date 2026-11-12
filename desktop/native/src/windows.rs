@@ -330,9 +330,10 @@ fn verify(handle: HANDLE, user: &User, directory: bool, policy: OwnerPolicy) -> 
 }
 
 #[cfg(feature = "official-plugins")]
-pub fn codex_pipe(path: &Path, expected: &Path) -> Result<crate::codex_peer::Stream> {
+pub async fn codex_pipe(path: &Path, candidates: &[PathBuf]) -> Result<crate::codex_peer::Stream> {
     use tokio::net::windows::named_pipe::ClientOptions;
     use windows_sys::Win32::{
+        Foundation::ERROR_PIPE_BUSY,
         Storage::FileSystem::SECURITY_IDENTIFICATION,
         System::{
             Pipes::GetNamedPipeServerProcessId,
@@ -349,9 +350,19 @@ pub fn codex_pipe(path: &Path, expected: &Path) -> Result<crate::codex_peer::Str
         "Codex Named Pipe 必须位于本机"
     );
     // Identification-only SQOS prevents the server from impersonating this process.
-    let client = ClientOptions::new()
-        .security_qos_flags(SECURITY_IDENTIFICATION)
-        .open(path)?;
+    ensure!(!candidates.is_empty(), "未找到正在运行的 Codex 桌面程序");
+    let client = loop {
+        match ClientOptions::new()
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(path)
+        {
+            Ok(client) => break client,
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     let mut pid = 0;
     unsafe {
         ok(GetNamedPipeServerProcessId(
@@ -381,11 +392,18 @@ pub fn codex_pipe(path: &Path, expected: &Path) -> Result<crate::codex_peer::Str
         ))?;
     }
     let actual = PathBuf::from(OsString::from_wide(&name[..len as usize])).canonicalize()?;
-    let expected = expected.canonicalize()?;
-    let a = wide(&actual);
-    let b = wide(&expected);
+    let actual = wide(&actual);
     ensure!(
-        unsafe { CompareStringOrdinal(a.as_ptr(), -1, b.as_ptr(), -1, 1) } == CSTR_EQUAL,
+        candidates
+            .iter()
+            .filter_map(|path| path.canonicalize().ok())
+            .any(|path| {
+                let expected = wide(&path);
+                unsafe {
+                    CompareStringOrdinal(actual.as_ptr(), -1, expected.as_ptr(), -1, 1)
+                        == CSTR_EQUAL
+                }
+            }),
         "Codex 对端程序不匹配"
     );
     Ok(Box::new(client))

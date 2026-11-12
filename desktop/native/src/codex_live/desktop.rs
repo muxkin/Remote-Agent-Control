@@ -46,6 +46,10 @@ impl Desktop {
         }
     }
 
+    pub(crate) async fn ipc_available(&self) -> bool {
+        self.endpoint.open().await.is_ok()
+    }
+
     pub fn subscribe(&self, id: Uuid) -> Option<Arc<Thread>> {
         let mut threads = self.threads.lock().expect("desktop mutex poisoned");
         threads.retain(|_, thread| thread.strong_count() > 0);

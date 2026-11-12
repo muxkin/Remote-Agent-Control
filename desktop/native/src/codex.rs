@@ -205,11 +205,14 @@ impl History {
                 let Some((thread, path)) = db.query_row(
                     &format!("SELECT {FIELDS},rollout_path FROM threads {PROJECT_JOIN} WHERE threads.id=?2 AND {VISIBLE}"),
                     params![projects.memberships, id],
-                    |row| Ok((read_thread(row, &projects.names)?, row.get::<_, String>(5)?)),
+                    |row| Ok((read_thread(row, &projects.names)?, row.get::<_, Option<String>>(5)?)),
                 ).optional()? else { return Ok(None); };
                 if method == "thread.read" {
                     return Ok(Some(json!({"thread": thread})));
                 }
+                let path = path
+                    .filter(|path| !path.is_empty())
+                    .ok_or(crate::history_media::HistoryUnavailable)?;
                 let page = self.read_page(id, Path::new(&path), query["cursor"].as_str())?;
                 Ok(Some(
                     json!({"thread": thread, "messages": page.0, "nextCursor": page.1}),
@@ -356,7 +359,23 @@ impl History {
     }
 
     pub fn open_rollout(&self, path: &Path) -> Result<File> {
-        let path = path.canonicalize().context("会话记录无法读取")?;
+        use crate::history_media::HistoryUnavailable;
+
+        let path = self.home.join(path);
+        let path = path
+            .canonicalize()
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+                {
+                    path.with_extension("jsonl.zst").canonicalize()
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|_| HistoryUnavailable)?;
         let allowed = ["sessions", "archived_sessions"].iter().any(|root| {
             let directory = self.home.join(root);
             directory
@@ -367,11 +386,12 @@ impl History {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        ensure!(
-            allowed && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst")),
-            "会话记录路径无效"
-        );
-        self.rollouts.open(&path)
+        if !allowed || !(name.ends_with(".jsonl") || name.ends_with(".jsonl.zst")) {
+            return Err(HistoryUnavailable.into());
+        }
+        self.rollouts
+            .open(&path)
+            .map_err(|_| HistoryUnavailable.into())
     }
 
     pub fn content(&self, id: Uuid, message_id: &str) -> Result<Option<Value>> {
@@ -413,7 +433,7 @@ impl History {
         let end = cursor.map(str::parse::<u64>).transpose()?.unwrap_or(length);
         ensure!(end <= length, "历史游标已失效");
         let mut window = HISTORY_BYTES;
-        let (start, bytes, first) = loop {
+        let (start, first, messages) = loop {
             let start = end.saturating_sub(window);
             file.seek(SeekFrom::Start(start.saturating_sub(1)))?;
             let mut bytes = Vec::with_capacity((end - start + 1) as usize);
@@ -428,23 +448,22 @@ impl History {
                     .position(|byte| *byte == b'\n')
                     .map_or(bytes.len(), |position| position + 1)
             };
-            // Large inline media can occupy a full window. Parse one bounded record
-            // while keeping its base64 bytes out of the returned messages.
-            if start == 0 || first < bytes.len() || window >= crate::history_media::MAX_LINE {
-                break (start, bytes, first);
+            let mut offset = start.saturating_sub(1) + first as u64;
+            let mut messages = Vec::new();
+            for line in bytes[first..].split_inclusive(|byte| *byte == b'\n') {
+                if line.ends_with(b"\n") {
+                    if let Some(message) = rollout_message(line, id, offset, false) {
+                        messages.push((offset, message));
+                    }
+                }
+                offset += line.len() as u64;
+            }
+            // A large record or a suffix of internal events can hide the last visible message.
+            if start == 0 || !messages.is_empty() || window >= crate::history_media::MAX_LINE {
+                break (start, first, messages);
             }
             window = (window * 2).min(crate::history_media::MAX_LINE);
         };
-        let mut offset = start.saturating_sub(1) + first as u64;
-        let mut messages = Vec::new();
-        for line in bytes[first..].split_inclusive(|byte| *byte == b'\n') {
-            if line.ends_with(b"\n") {
-                if let Some(message) = rollout_message(line, id, offset, false) {
-                    messages.push((offset, message));
-                }
-            }
-            offset += line.len() as u64;
-        }
         let skipped = messages.len().saturating_sub(100);
         let next = if skipped > 0 {
             Some(messages[skipped].0.to_string())

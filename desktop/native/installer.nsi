@@ -9,6 +9,7 @@ OutFile "${OUTPUT_FILE}"
 InstallDir "$LOCALAPPDATA\Programs\Agent Space Adapter"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
+AllowSkipFiles off
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "Agent Space Adapter"
 VIAddVersionKey "FileDescription" "Agent Space Adapter Setup"
@@ -25,6 +26,9 @@ VIAddVersionKey "LegalCopyright" "Agent Space contributors"
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+LangString AdapterWriteFailed ${LANG_ENGLISH} "Could not replace Agent Space Adapter. Quit it from the system tray, then click Retry. If it is already closed, check that you can write to the installation folder."
+LangString AdapterWriteFailed ${LANG_SIMPCHINESE} "无法更新 Agent 空间适配器。请从任务栏右下角的托盘菜单退出适配器，再点「重试」。如果适配器已退出，请检查安装目录的写入权限。"
+
 Function .onInit
   ${IfNot} ${RunningX64}
     MessageBox MB_OK|MB_ICONSTOP "This installer requires 64-bit Windows." /SD IDOK
@@ -36,9 +40,16 @@ FunctionEnd
 
 Section "Install"
   SetOutPath "$INSTDIR"
+retry_adapter:
   ClearErrors
+  SetOverwrite try
   File "${PACKAGE_DIR}\agent-space-native.exe"
-  IfErrors in_use
+  SetOverwrite on
+  IfErrors 0 adapter_written
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(AdapterWriteFailed)" /SD IDCANCEL IDRETRY retry_adapter
+  SetErrorLevel 1
+  Quit
+adapter_written:
   File "${PACKAGE_DIR}\LICENSE"
   File "${PACKAGE_DIR}\README.txt"
   File "${PACKAGE_DIR}\THIRD-PARTY-NOTICES.txt"

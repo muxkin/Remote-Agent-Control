@@ -15,7 +15,10 @@ use serde_json::Value;
 use serde_json::json;
 use std::path::PathBuf;
 #[cfg(feature = "official-plugins")]
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 #[cfg(feature = "official-plugins")]
 use uuid::Uuid;
 
@@ -23,6 +26,8 @@ use uuid::Uuid;
 pub(crate) struct Availability {
     pub history: bool,
     pub desktop: bool,
+    #[serde(default)]
+    pub ipc_online: bool,
     pub open: bool,
     pub create: bool,
     pub rename: bool,
@@ -45,6 +50,7 @@ pub(crate) struct Options {
 pub(crate) struct Local {
     history: History,
     desktop: Option<Desktop>,
+    ipc_online: AtomicBool,
 }
 
 #[cfg(feature = "official-plugins")]
@@ -58,7 +64,11 @@ impl Local {
             Endpoint::discover(home, options, named)
                 .map(|endpoint| Desktop::new(endpoint, history.clone(), options.cli.as_deref()))
         };
-        Ok(Self { history, desktop })
+        Ok(Self {
+            history,
+            desktop,
+            ipc_online: AtomicBool::new(false),
+        })
     }
 
     pub(crate) fn availability(&self) -> Availability {
@@ -70,6 +80,7 @@ impl Local {
         Availability {
             history: true,
             desktop: self.desktop.is_some(),
+            ipc_online: self.ipc_online.load(Ordering::Relaxed),
             open: catalog.has(Tool::Open),
             create: catalog.can_create(),
             rename: catalog.has(Tool::Rename),
@@ -83,7 +94,12 @@ impl Local {
 
     pub(crate) async fn refresh(&self) -> Availability {
         if let Some(desktop) = &self.desktop {
-            tokio::join!(desktop.tools.refresh(), desktop.reply_fork.probe());
+            let (ipc_online, _, _) = tokio::join!(
+                desktop.ipc_available(),
+                desktop.tools.refresh(),
+                desktop.reply_fork.probe()
+            );
+            self.ipc_online.store(ipc_online, Ordering::Relaxed);
         }
         self.availability()
     }

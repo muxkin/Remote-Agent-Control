@@ -194,6 +194,9 @@ impl DeviceSession {
                         Err(error) if error.is::<history_media::MissingAttachment>() => {
                             json!({"type":"response","id":id,"status":404,"error":error.to_string()})
                         }
+                        Err(error) if error.is::<history_media::HistoryUnavailable>() => {
+                            json!({"type":"response","id":id,"status":404,"error":error.to_string()})
+                        }
                         Err(_) => json!({"type":"response","id":id,"status":400,"error":"请求未完成，请核对本机会话和参数"}),
                     };
                     reply_packet(io, value, &reply_bytes).await?;
@@ -275,9 +278,13 @@ impl DeviceSession {
             .read("history.read", &params, &Value::Null, None)
             .await
             .ok()
-            .flatten()
-            .unwrap_or_default();
-        let fallback = json!({"thread": summary["thread"], "messages": page["messages"]});
+            .flatten();
+        let history_unavailable = page.is_none();
+        let fallback = json!({
+            "thread": summary["thread"],
+            "messages": page.map(|page| page["messages"].clone()),
+            "historyUnavailable": history_unavailable,
+        });
         let live = connector.watch(id);
         self.watches.insert(
             key,
@@ -336,19 +343,28 @@ impl DeviceSession {
                     None
                 } else {
                     let mut summary = watch.fallback["thread"].clone();
-                    let reason = if self
+                    let history_unavailable = watch.fallback["historyUnavailable"] == true;
+                    let reason = if history_unavailable {
+                        "历史记录暂时无法读取。请在电脑的 Codex 桌面打开此会话。"
+                    } else if self
                         .last_status
                         .get(backend)
                         .is_some_and(|status| status["capabilities"]["openThread"] == true)
                     {
                         "已加载历史。选择「继续此会话」连接桌面。"
+                    } else if self
+                        .last_status
+                        .get(backend)
+                        .is_some_and(|status| status["desktopIpcConnected"] == true)
+                    {
+                        "已连接 Codex 桌面。请在电脑上打开此会话后开始控制。"
                     } else {
-                        "已加载历史。请在电脑上打开此会话后开始控制。"
+                        "已加载历史。请确认电脑上的 Codex 桌面已启动，并打开此会话。"
                     };
                     let properties = json!({
                         "revision":0,"owner":false,"synchronized":false,"runtimeStatus":"notLoaded",
                         "activeTurnId":null,"model":null,"pendingRequests":0,"canSend":false,"canInterrupt":false,
-                        "reason":reason,
+                        "reason":reason,"historyUnavailable":history_unavailable,
                     });
                     if let Some(thread) = summary.as_object_mut() {
                         thread.extend(properties.as_object().unwrap().clone());
