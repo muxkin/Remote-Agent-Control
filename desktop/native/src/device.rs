@@ -102,6 +102,7 @@ impl DeviceSession {
             tokio::select! {
                 Some(result) = storage_jobs.join_next(), if !storage_jobs.is_empty() => {
                     if let Ok((id, result)) = result {
+                        self.ensure_device()?;
                         let response = match result {
                             Ok(value) => json!({"type":"response","id":id,"result":value}),
                             Err(_) => json!({"type":"response","id":id,"status":503,"error":"对象存储操作未完成"}),
@@ -228,11 +229,9 @@ impl DeviceSession {
     }
 
     fn ensure_device(&self) -> Result<()> {
-        let current = self
-            .db
-            .lock()
-            .expect("database mutex poisoned")
-            .device(self.peer)?;
+        let db = self.db.lock().expect("database mutex poisoned");
+        ensure!(!db.relay_revoked, "电脑的服务授权已撤销");
+        let current = db.device(self.peer)?;
         ensure!(
             current.is_some_and(|value| value.id == self.device.id),
             "设备已撤销"

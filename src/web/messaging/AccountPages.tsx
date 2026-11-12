@@ -8,8 +8,8 @@ import { Icon } from '../Icon';
 import { messaging, useMessaging } from './context';
 import { Avatar, UserIdentity, Notice as ErrorNotice, Confirm, errorText, time, type Navigate } from './ui';
 import ResourceSettings from './ResourceSettings';
-export const AccountForm = tsxComponent(function AccountForm() {
-  const modeState = shallowRef<'register' | 'login' | 'recovery'>('register');
+export const AccountForm = tsxComponent(function AccountForm(props: { initialMode?: 'login' }) {
+  const modeState = shallowRef<'register' | 'login' | 'recovery'>(props.initialMode ?? 'register');
   const setMode = writeRef(modeState);
   const requiresCodeState = shallowRef(false);
   const setRequiresCode = writeRef(requiresCodeState);

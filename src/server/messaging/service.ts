@@ -8,6 +8,7 @@ import { MessagingObjects } from './objects.js';
 import { registerMessaging as registerCore } from './service-core.js';
 import type { MessageHandler, MessageRoute, MessagingHttp, MessagingRequest } from './http.js';
 import type { ResourcePolicyProvider } from '../../shared/resources.js';
+import type { DesktopAuthorizations } from '../desktop-authorization.js';
 import { ResourceService } from '../resources/service.js';
 
 export interface MessagingConfig {
@@ -18,6 +19,7 @@ export interface MessagingConfig {
   callIce?: CallIceConfig;
   storage?: StorageAdapter;
   resourcePolicy?: ResourcePolicyProvider;
+  desktops?: DesktopAuthorizations;
   clientAddress: (request: FastifyRequest['raw']) => string;
 }
 export async function registerMessaging(parent: FastifyInstance, config: MessagingConfig) {

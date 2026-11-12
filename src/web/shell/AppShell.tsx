@@ -17,6 +17,7 @@ import { PageBoundary, PageLoading } from './PageBoundary';
 import { AccountSecurity } from '../messaging/AccountSecurity';
 import { onAccountSessionChange, syncAccountHosts, accountSyncError } from '../account-session';
 import { messaging } from '../messaging/context';
+import { DesktopAuthorizationPage, readDesktopAuthorization } from './DesktopAuthorizationPage';
 import { Avatar } from '../messaging/ui';
 
 export { PageHeader } from './PageHeader';
@@ -25,6 +26,10 @@ export const AppShell = tsxComponent(function AppShell() {
   useAppViewport();
   const routeState = shallowRef(readRoute(new URL(location.href)));
   const setRoute = writeRef(routeState);
+  let desktopRequest =
+    routeState.value.page === 'desktop-authorization' ? readDesktopAuthorization(location.hash) : undefined;
+  if (routeState.value.page === 'desktop-authorization' && location.hash)
+    history.replaceState(history.state, '', location.pathname + location.search);
   const workbenchRoute: { current: AppRoute } = {
     current: routeState.value.page === 'workbench' ? routeState.value : { page: 'workbench' },
   };
@@ -180,6 +185,21 @@ export const AppShell = tsxComponent(function AppShell() {
           ? 'contacts'
           : 'me';
     const back = () => backTo(parentRoute(route), navigate);
+    if (route.page === 'desktop-authorization') {
+      return (
+        <AccountSecurity>
+          {() => (
+            <DesktopAuthorizationPage
+              request={desktopRequest}
+              finish={() => {
+                desktopRequest = undefined;
+                navigate({ page: 'workbench' }, true);
+              }}
+            />
+          )}
+        </AccountSecurity>
+      );
+    }
     return (
       <AccountSecurity>
         {() => (

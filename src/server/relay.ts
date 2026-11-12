@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { RelayRoute } from '../shared/relay-protocol.js';
 import { RelayAdmission, relayClientAddress } from './relay-admission.js';
 import { RelayCore, relayResourceFailure, type RelaySession } from './relay-core.js';
+import { DesktopEnrollmentStore } from './desktop-authorization.js';
 import type { ResourcePolicyProvider } from '../shared/resources.js';
 
 export interface RelayConfig {
@@ -45,6 +46,7 @@ export async function buildRelay(config: RelayConfig) {
   db.exec('CREATE TABLE IF NOT EXISTS hosts (id TEXT PRIMARY KEY, created INTEGER NOT NULL)');
   const counters = { controlBytes: 0, bulkBytes: 0, rejected: 0 };
   const origin = new URL(config.origin);
+  const desktops = new DesktopEnrollmentStore(db, origin.origin);
   const headers = edgeSecurityHeaders(config.assetOrigin, config.uploadOrigins);
   app.addHook('onRequest', async (req, reply) => {
     for (const [key, value] of Object.entries(headers)) reply.header(key, value);
@@ -59,6 +61,17 @@ export async function buildRelay(config: RelayConfig) {
     clientAddress,
     storage: config.messaging?.storage,
     resourcePolicy: config.messaging?.resourcePolicy,
+    desktops: {
+      approve: (account, request) => desktops.approve(account, request),
+      list: (account) => desktops.list(account),
+      ready: (account, id, ticket) =>
+        desktops.ownsRequest(account, id, ticket) && core.desktopReady(id, ticket),
+      revoke: (account, id) => {
+        if (!desktops.revoke(account, id)) return false;
+        core.revokeDesktop(id);
+        return true;
+      },
+    },
   });
   const releases = fileReleaseStore(config.releaseRoot ?? join(config.webRoot, '..'));
   app.route({
@@ -142,6 +155,7 @@ export async function buildRelay(config: RelayConfig) {
       },
     },
     {
+      desktopStatus: (id) => desktops.status(id),
       hasHost: (id) => !!db.prepare('SELECT id FROM hosts WHERE id=?').get(id),
       enrollHost: (id) => {
         db.prepare('INSERT OR IGNORE INTO hosts VALUES (?,?)').run(id, Date.now());

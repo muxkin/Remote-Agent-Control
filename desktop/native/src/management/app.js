@@ -81,6 +81,11 @@ function render(state) {
   el('phase').textContent = phaseNames[state.phase] || '正在启动';
   el('phase').dataset.phase = state.phase;
   el('connect').hidden = ready;
+  if (!ready && state.packageOrigin && !el('origin').defaultValue) {
+    el('origin').defaultValue = state.packageOrigin;
+    el('service-address').hidden = true;
+    el('edit-origin').hidden = false;
+  }
   el('connected').hidden = !ready;
   el('origin-value').textContent = state.origin || '';
   if (state.origin) el('workbench').href = state.origin;
@@ -143,18 +148,33 @@ async function action(button, run) {
   await refresh();
 }
 
+el('edit-origin').addEventListener('click', () => {
+  el('edit-origin').hidden = true;
+  el('service-address').hidden = false;
+  el('origin').focus();
+});
 el('connect').addEventListener('submit', (event) => {
   event.preventDefault();
   if (connecting) return;
   connecting = true;
-  const button = event.submitter || el('connect').querySelector('button');
+  const button = event.submitter || el('sign-in');
   action(button, async () => {
-    await post('/api/connect', { origin: el('origin').value.trim(), enrollment: el('enrollment').value.trim() });
-    el('enrollment').value = '';
-    pairingAfterConnect = true;
-    notify();
+    const origin = el('origin').value.trim();
+    if (button.id === 'legacy-connect') {
+      await post('/api/connect', { origin, enrollment: el('enrollment').value.trim() });
+      el('enrollment').value = '';
+      pairingAfterConnect = true;
+      notify();
+    } else {
+      await post('/api/authorize', { origin });
+      notify('请在浏览器打开的 Agent 空间页面确认添加电脑。');
+    }
   }).finally(() => { connecting = false; });
 });
+el('authorize').addEventListener('click', () => action(el('authorize'), async () => {
+  await post('/api/authorize');
+  notify('请在浏览器打开的 Agent 空间页面确认添加电脑。');
+}));
 el('pair').addEventListener('click', () => action(el('pair'), async () => {
   await post('/api/pair');
   notify('正在生成配对码…');

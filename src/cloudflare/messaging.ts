@@ -9,6 +9,7 @@ import { originFor } from './security.js';
 import type { Env } from './env.js';
 import { resourceProvider } from '../server/resources/lago.js';
 import { ResourceService, ResourceError } from '../server/resources/service.js';
+import type { RelayHub } from './relay.js';
 import type { RelayAccount } from '../shared/resources.js';
 
 export class MessagingHub extends DurableObject<Env> {
@@ -26,10 +27,17 @@ export class MessagingHub extends DurableObject<Env> {
     db.exec(
       'CREATE TABLE IF NOT EXISTS rate_limits(key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL)',
     );
+    const relay = () => env.RELAY.get(env.RELAY.idFromName('relay-v2')) as DurableObjectStub<RelayHub>;
     this.ready = registerMessaging(this.app, {
       store: this.store,
       origin: originFor(env),
       registrationCode: env.POCKET_IM_REGISTRATION_CODE,
+      desktops: {
+        approve: (...args) => relay().approveDesktop(...args),
+        list: (...args) => relay().listDesktops(...args),
+        ready: (...args) => relay().desktopReady(...args),
+        revoke: (...args) => relay().revokeDesktop(...args),
+      },
       humanContacts: env.POCKET_IM_HUMAN_CONTACTS === 'true',
       callIce: callIceConfig({
         POCKET_IM_CALL_STUN_URLS: env.POCKET_IM_CALL_STUN_URLS,

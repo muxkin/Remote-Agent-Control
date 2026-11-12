@@ -14,6 +14,8 @@ import type { Lane } from '../shared/secure-channel.js';
 import type { RelayAccount } from '../shared/resources.js';
 import { ResourceError } from './resources/service.js';
 
+const desktopRevoked = 'Desktop authorization revoked';
+
 export const relayLimits = {
   connections: 1024,
   pending: 256,
@@ -38,6 +40,7 @@ export interface RelaySession {
 }
 export interface RelayStorage {
   hasHost(id: string): boolean;
+  desktopStatus?(id: string): boolean | undefined;
   enrollHost(id: string): void;
   route(host: string, ticket: string): RelayRoute | undefined;
   replaceRoutes(host: string, routes: RelayRoute[]): void;
@@ -110,6 +113,17 @@ export class RelayCore<S> {
       const a = this.runtime.data(s);
       return a.kind === 'host' && a.hostId === id && a.lane === lane;
     });
+  }
+  desktopReady(hostId: string, ticket: string) {
+    const route = this.storage.route(hostId, ticket);
+    return !!this.host(hostId, 'control') && !!route && !route.peerId && route.expires > Date.now();
+  }
+  revokeDesktop(hostId: string) {
+    for (const socket of this.sockets()) {
+      const session = this.runtime.data(socket);
+      if (session.kind === 'host' && session.hostId === hostId) this.close(socket, 1008, desktopRevoked);
+    }
+    this.storage.clearRoutes(hostId);
   }
   private send(socket: S | undefined, value: string | Uint8Array) {
     if (!socket || this.runtime.data(socket).closed || !this.runtime.isOpen(socket)) return false;
@@ -221,7 +235,9 @@ export class RelayCore<S> {
           )
             throw Error();
           if (!this.validPending(socket)) return this.reject(socket);
-          if (!this.storage.hasHost(parsed.hostId)) {
+          const desktop = this.storage.desktopStatus?.(parsed.hostId);
+          if (desktop === false) return this.reject(socket, desktopRevoked);
+          if (desktop === undefined && !this.storage.hasHost(parsed.hostId)) {
             if (!equal(parsed.enrollment ?? '', this.enrollment)) throw Error();
             this.storage.enrollHost(parsed.hostId);
           }

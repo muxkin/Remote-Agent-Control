@@ -3,7 +3,9 @@ import { shallowRef, defineAsyncComponent as lazy, Suspense, type VNodeChild } f
 import { watchRender, writeRef } from '../render-effects';
 import type { IconName } from '../icon-paths';
 
-import { useMessaging } from '../messaging/context';
+import type { AccountDesktop } from '../../shared/desktop-authorization';
+import { syncAccountHosts } from '../account-session';
+import { messaging, useMessaging } from '../messaging/context';
 import { Avatar } from '../messaging/ui';
 import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
@@ -51,6 +53,9 @@ export default tsxComponent(function MePages(_props: {
   const setNotice = writeRef(noticeState);
   const confirmRemoveState = shallowRef(false);
   const setConfirmRemove = writeRef(confirmRemoveState);
+  const accountDesktops = shallowRef<AccountDesktop[]>([]);
+  const revokeDesktop = shallowRef<string>();
+  const watchDesktops = watchRender();
   const watchNotice = watchRender();
   const watchUsage = watchRender();
   return ({ route, navigate, back, hosts, hostId, busy, refreshHosts }) => {
@@ -63,7 +68,20 @@ export default tsxComponent(function MePages(_props: {
     watchNotice(() => {
       setNotice('');
       setConfirmRemove(false);
-    }, [route.page]);
+      revokeDesktop.value = undefined;
+    }, [route.page, user?.id]);
+    watchDesktops(() => {
+      accountDesktops.value = [];
+      if (route.page !== 'devices' || user?.kind !== 'human') return;
+      const controller = new AbortController();
+      void messaging
+        .request<{ devices: AccountDesktop[] }>('/desktop-devices', 'GET', undefined, controller.signal)
+        .then(({ devices }) => {
+          if (!controller.signal.aborted) accountDesktops.value = devices;
+        })
+        .catch(() => {});
+      return () => controller.abort();
+    }, [route.page, user?.id]);
     watchUsage(() => {
       if (route.page !== 'settings') return;
       let alive = true;
@@ -235,6 +253,64 @@ export default tsxComponent(function MePages(_props: {
                 onClick={() => navigate({ page: 'pair' })}
               />
             </section>
+            {!!accountDesktops.value.length && (
+              <section class="settings-group" aria-label="账号授权的电脑">
+                <h2>账号授权的电脑</h2>
+                {accountDesktops.value.map((desktop) => (
+                  <div key={desktop.hostId} class="inline-confirm">
+                    <p>
+                      {desktop.name} · {desktop.hostId.slice(-12)}
+                    </p>
+                    {revokeDesktop.value === desktop.hostId ? (
+                      <div>
+                        <button
+                          disabled={working}
+                          onClick={() => {
+                            revokeDesktop.value = undefined;
+                          }}
+                        >
+                          取消
+                        </button>
+                        <button
+                          class="danger"
+                          disabled={working || busy}
+                          onClick={() =>
+                            void run(async () => {
+                              if (!user) return;
+                              await messaging.request(`/desktop-devices/${desktop.hostId}`, 'DELETE', {
+                                accountId: user.id,
+                              });
+                              if (messaging.account.user?.id !== user.id) return;
+                              if (deviceSession.host?.hostId === desktop.hostId)
+                                deviceSession.resetAccount(user.id);
+                              await deviceSession.cache.forget(desktop.hostId);
+                              await syncAccountHosts(messaging.account);
+                              await refreshHosts();
+                              accountDesktops.value = accountDesktops.value.filter(
+                                ({ hostId }) => hostId !== desktop.hostId,
+                              );
+                              revokeDesktop.value = undefined;
+                              setNotice('已撤销这台电脑的服务授权');
+                            })
+                          }
+                        >
+                          确认撤销
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        disabled={working || busy}
+                        onClick={() => {
+                          revokeDesktop.value = desktop.hostId;
+                        }}
+                      >
+                        撤销授权
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </section>
+            )}
             {!!hostId && (
               <section class="settings-group">
                 {confirmRemove ? (

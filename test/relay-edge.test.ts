@@ -1,4 +1,5 @@
-import { relayContract } from './contracts/relay.js';
+import { AccountClient } from '../src/client/account.js';
+import { desktopAuthorizationContract, relayContract } from './contracts/relay.js';
 import { afterEach, expect, it } from 'vitest';
 import { request } from 'node:http';
 import { once } from 'node:events';
@@ -182,4 +183,31 @@ it('does not allocate a client after it disconnects during route discovery', asy
 relayContract(async () => {
   const instance = await setup();
   return { connect: (auth) => instance.open('198.51.100.1', auth), enrollment: instance.enrollment };
+});
+
+desktopAuthorizationContract(async () => {
+  const instance = await setup();
+  const origin = 'http://relay.test';
+  return {
+    origin,
+    enrollment: instance.enrollment,
+    connect: (auth) => instance.open('198.51.100.1', auth),
+    session() {
+      let cookie = '';
+      const request = async <T>(path: string, method = 'GET', body?: unknown): Promise<T> => {
+        const response = await instance.relay.app.inject({
+          method: method as 'GET',
+          url: `/api/im${path}`,
+          headers: { host: 'relay.test', origin, cookie },
+          payload: body as object,
+        });
+        if (response.cookies[0]) cookie = `${response.cookies[0].name}=${response.cookies[0].value}`;
+        const data = response.json();
+        if (response.statusCode >= 400)
+          throw Object.assign(Error(data.error), { status: response.statusCode });
+        return data as T;
+      };
+      return { request, account: new AccountClient(request) };
+    },
+  };
 });

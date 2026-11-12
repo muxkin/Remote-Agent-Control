@@ -1,4 +1,4 @@
-import { relayContract } from '../contracts/relay.js';
+import { desktopAuthorizationContract, relayContract } from '../contracts/relay.js';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { execFileSync } from 'node:child_process';
@@ -441,3 +441,5 @@ it('serves only the public desktop release prefix from R2, with resumable downlo
   expect((await fetch(`${origin}/downloads/desktop/private/hidden.png`)).status).toBe(404);
   expect((await fetch(`${origin}/downloads/desktop/releases.json`)).status).toBe(404);
 });
+
+desktopAuthorizationContract(async () => ({ origin, enrollment, connect, session }));

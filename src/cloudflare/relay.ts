@@ -2,11 +2,15 @@ import { DurableObject } from 'cloudflare:workers';
 import { RelayCore, relayLimits, type RelaySession } from '../server/relay-core.js';
 import type { Env } from './env.js';
 import { originFor } from './security.js';
+import type { DesktopAuthorization } from '../shared/desktop-authorization.js';
+import { DesktopEnrollmentStore } from '../server/desktop-authorization.js';
+import { DurableDatabase } from './database.js';
 import type { MessagingHub } from './messaging.js';
 
 /** One hub per deployment preserves the v2 /connect handshake and global admission limits. */
 export class RelayHub extends DurableObject<Env> {
   private core: RelayCore<WebSocket>;
+  private desktops: DesktopEnrollmentStore;
   private billing() {
     return this.env.MESSAGING.get(
       this.env.MESSAGING.idFromName('accounts-v1'),
@@ -20,6 +24,7 @@ export class RelayHub extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS sources(ip TEXT PRIMARY KEY, attempts INTEGER NOT NULL, failures INTEGER NOT NULL, reset INTEGER NOT NULL);
     `);
     if (!ctx.getWebSockets().length) ctx.storage.sql.exec('DELETE FROM routes');
+    this.desktops = new DesktopEnrollmentStore(new DurableDatabase(ctx.storage), originFor(env));
     this.core = new RelayCore<WebSocket>(
       {
         sockets: () => this.ctx.getWebSockets(),
@@ -55,6 +60,7 @@ export class RelayHub extends DurableObject<Env> {
         },
       },
       {
+        desktopStatus: (id) => this.desktops.status(id),
         hasHost: (id) => !!ctx.storage.sql.exec('SELECT id FROM hosts WHERE id=?', id).toArray().length,
         enrollHost: (id) => {
           ctx.storage.sql.exec('INSERT OR IGNORE INTO hosts VALUES (?,?)', id, Date.now());
@@ -95,6 +101,20 @@ export class RelayHub extends DurableObject<Env> {
           }
         : undefined,
     );
+  }
+  approveDesktop(account: string, request: DesktopAuthorization) {
+    return this.desktops.approve(account, request);
+  }
+  listDesktops(account: string) {
+    return this.desktops.list(account);
+  }
+  desktopReady(account: string, hostId: string, ticket: string) {
+    return this.desktops.ownsRequest(account, hostId, ticket) && this.core.desktopReady(hostId, ticket);
+  }
+  revokeDesktop(account: string, hostId: string) {
+    if (!this.desktops.revoke(account, hostId)) return false;
+    this.core.revokeDesktop(hostId);
+    return true;
   }
   private sockets() {
     return this.core.sockets();

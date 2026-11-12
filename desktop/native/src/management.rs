@@ -1,5 +1,6 @@
 use crate::{
-    gateway::{Phase, Snapshot},
+    desktop_authorization::AuthorizationLink,
+    gateway::{Database, Phase, Snapshot},
     state::{private_directory, private_file},
     update::UpdateCommand,
     update_preferences::Preferences,
@@ -45,16 +46,24 @@ pub(crate) enum TrayEvent {
     Quit,
 }
 
-pub(crate) type Connect = Box<dyn FnMut(&str, String) -> Result<String> + Send>;
+pub(crate) type Connect = Box<dyn FnMut(&str, String) -> Result<Connected> + Send>;
+
+pub(crate) struct Connected {
+    pub(crate) origin: String,
+    pub(crate) db: Database,
+}
 
 pub(crate) struct Startup {
-    pub(crate) origin: Option<String>,
+    pub(crate) connected: Option<Connected>,
+    pub(crate) package_origin: Option<&'static str>,
     pub(crate) error: Option<String>,
     pub(crate) connect: Connect,
 }
 
 struct Connection {
-    origin: Option<String>,
+    connected: Option<Connected>,
+    authorization: Option<AuthorizationLink>,
+    package_origin: Option<&'static str>,
     error: Option<String>,
     connect: Connect,
 }
@@ -188,7 +197,9 @@ impl Manager {
             auth: Uuid::new_v4(),
             tickets: Mutex::new(HashMap::new()),
             connection: Mutex::new(Connection {
-                origin: startup.origin,
+                connected: startup.connected,
+                authorization: None,
+                package_origin: startup.package_origin,
                 error: startup.error,
                 connect: startup.connect,
             }),
@@ -307,6 +318,12 @@ struct Enrollment {
 }
 
 #[derive(Deserialize)]
+struct AuthorizationRequest {
+    #[serde(default)]
+    origin: String,
+}
+
+#[derive(Deserialize)]
 struct UpdateSettings {
     automatic: bool,
     base: String,
@@ -371,6 +388,32 @@ impl Panel {
         let path = request.uri().path();
         if request.method() == Method::GET {
             match path {
+                "/authorize/callback" => {
+                    let url = self
+                        .connection
+                        .lock()
+                        .expect("connection mutex")
+                        .authorization
+                        .as_mut()
+                        .and_then(|link| link.complete(request.uri().query()?));
+                    return match url {
+                        Some(url) => {
+                            let mut response = reply(
+                                StatusCode::SEE_OTHER,
+                                "text/plain; charset=utf-8",
+                                Bytes::new(),
+                            );
+                            response.headers_mut().insert(
+                                header::LOCATION,
+                                url.as_str().parse().expect("valid URL header"),
+                            );
+                            response
+                        }
+                        None => {
+                            failure(StatusCode::GONE, "授权链接已失效，请从适配器重新打开登录页")
+                        }
+                    };
+                }
                 "/" => return reply(StatusCode::OK, "text/html; charset=utf-8", HTML),
                 "/style.css" => return reply(StatusCode::OK, "text/css; charset=utf-8", CSS),
                 "/app.js" => {
@@ -410,6 +453,7 @@ impl Panel {
             (&Method::GET, "/api/status") => return json_reply(StatusCode::OK, self.status()),
             (&Method::GET, "/api/pair-qr") => return self.qr(),
             (&Method::POST, "/api/connect") => self.connect(body(request).await).await,
+            (&Method::POST, "/api/authorize") => self.authorize(body(request).await).await,
             (&Method::POST, "/api/pair") => {
                 if self.updates.borrow().phase != Phase::Online {
                     Err(anyhow::anyhow!("连接服务后才能生成配对码"))
@@ -456,7 +500,7 @@ impl Panel {
         let connection = self.connection.lock().expect("connection mutex");
         let phase = match snapshot.phase {
             Phase::Setup => {
-                if connection.origin.is_some() {
+                if connection.connected.is_some() {
                     "connecting"
                 } else {
                     "setup"
@@ -473,7 +517,8 @@ impl Panel {
             .collect();
         json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "origin": connection.origin,
+            "origin": connection.connected.as_ref().map(|state| &state.origin),
+            "packageOrigin": connection.package_origin,
             "setupError": connection.error,
             "phase": phase,
             "pairing": snapshot.pairing.filter(|pair| pair.expires_at > crate::state::now())
@@ -518,12 +563,41 @@ impl Panel {
         let panel = self.clone();
         tokio::task::spawn_blocking(move || {
             let mut connection = panel.connection.lock().expect("connection mutex");
-            ensure!(connection.origin.is_none(), "请先从设置中选择切换服务");
-            let origin =
+            ensure!(connection.connected.is_none(), "请先从设置中选择切换服务");
+            let connected =
                 (connection.connect)(payload.origin.trim(), payload.enrollment.trim().to_owned())?;
-            connection.origin = Some(origin);
+            connection.connected = Some(connected);
             connection.error = None;
             Ok(())
+        })
+        .await?
+    }
+
+    async fn authorize(self: &Arc<Self>, payload: Result<AuthorizationRequest>) -> Result<()> {
+        let payload = payload?;
+        let panel = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = panel.connection.lock().expect("connection mutex");
+            if connection.connected.is_none() {
+                let origin = payload.origin.trim();
+                connection.connected = Some((connection.connect)(origin, String::new())?);
+                connection.error = None;
+            }
+            let Connection {
+                connected,
+                authorization,
+                ..
+            } = &mut *connection;
+            let connected = connected.as_ref().context("适配器尚未连接")?;
+            let mut db = connected.db.lock().expect("database mutex poisoned");
+            let url = AuthorizationLink::open(
+                authorization,
+                &mut db,
+                &connected.origin,
+                panel.instance.port,
+            )?;
+            drop(db);
+            open_url(&url, false)
         })
         .await?
     }
@@ -603,7 +677,8 @@ mod tests {
             &runtime,
             owner,
             Startup {
-                origin: Some("https://example.test".into()),
+                connected: None,
+                package_origin: Some("https://package.example.test"),
                 error: None,
                 connect: Box::new(|_, _| unreachable!()),
             },
@@ -643,6 +718,16 @@ mod tests {
                 StatusCode::UNAUTHORIZED
             );
             let token = session["token"].as_str().context("missing token")?;
+            let state: Value = client
+                .get(&status)
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            assert!(state["origin"].is_null());
+            assert_eq!(state["packageOrigin"], "https://package.example.test");
             assert_eq!(
                 client
                     .get(&status)

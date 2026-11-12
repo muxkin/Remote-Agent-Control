@@ -57,7 +57,7 @@ onUnmounted(() => installerRequests.abort());
   <div class="adapter-downloads">
     <header class="adapter-intro">
       <h2>连接你的电脑</h2>
-      <p>在电脑上安装并打开适配器，再用手机扫码配对。</p>
+      <p>安装适配器后点击「登录并连接」。手机登录同一账号，即可在工作台访问这台电脑。</p>
     </header>
 
     <section aria-labelledby="adapter-installer-title">

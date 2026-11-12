@@ -11,7 +11,8 @@ export type AppPage =
   | 'donation'
   | 'downloads'
   | 'about'
-  | 'pair';
+  | 'pair'
+  | 'desktop-authorization';
 export interface AppRoute {
   page: AppPage;
   backend?: string;
@@ -33,6 +34,7 @@ const pages: AppPage[] = [
   'downloads',
   'about',
   'pair',
+  'desktop-authorization',
 ];
 export function readRoute(url: URL): AppRoute {
   if (new URLSearchParams(url.hash.slice(1)).has('pair')) return { page: 'pair' };

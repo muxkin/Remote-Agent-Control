@@ -8,6 +8,8 @@ import { ChatError, type MessagingStore } from './store-core.js';
 import type { MessagingObjects, MediaKind } from './objects.js';
 import { registerAccounts, vaultSchema } from './accounts.js';
 import { ResourceError } from '../resources/service.js';
+import type { DesktopAuthorizations } from '../desktop-authorization.js';
+import { desktopAuthorizationSchema, desktopTicketSchema } from '../../shared/desktop-authorization.js';
 import { hostIdSchema, laneSchema, routeSchema } from '../../shared/relay-protocol.js';
 import { assertEncryptedDatabase } from './encryption-state.js';
 import { attachmentMime } from './media.js';
@@ -48,6 +50,7 @@ export interface MessagingConfig {
   humanContacts?: boolean;
   callIce?: CallIceConfig;
   storage?: boolean;
+  desktops?: DesktopAuthorizations;
 }
 
 /** Shared account/message routes; each provider supplies its HTTP and persistence adapters. */
@@ -157,6 +160,55 @@ export async function registerMessaging(app: MessagingHttp, config: MessagingCon
         error instanceof ChatError || error instanceof ResourceError ? error.message : '请求未完成，请重试',
     });
   });
+  if (config.desktops) {
+    const desktops = config.desktops;
+    const owner = (req: MessagingRequest, accountId: string) => {
+      const user = human(req);
+      if (user.id !== accountId || !user.encrypted) throw new ChatError(403, '请登录并解锁对应账号');
+      return user.id;
+    };
+    app.post('/desktop-devices/approve', async (req) => {
+      const { accountId, authorization } = z
+        .object({
+          accountId: userId,
+          authorization: desktopAuthorizationSchema,
+        })
+        .parse(req.body);
+      const account = owner(req, accountId);
+      take(`desktop-approve:${account}`, 20);
+      switch (await desktops.approve(account, authorization)) {
+        case 'ok':
+          return { ok: true };
+        case 'expired':
+          throw new ChatError(410, '授权请求已过期，请在适配器重新打开登录页');
+        case 'invalid':
+          throw new ChatError(400, '电脑签名无效');
+        case 'conflict':
+          throw new ChatError(409, '这台电脑已由另一个账号登记');
+        case 'limit':
+          throw new ChatError(409, '账号已达到电脑数量上限');
+      }
+    });
+    app.post('/desktop-devices/ready', async (req) => {
+      const { accountId, hostId, ticket } = z
+        .object({
+          accountId: userId,
+          hostId: hostIdSchema,
+          ticket: desktopTicketSchema,
+        })
+        .parse(req.body);
+      const account = owner(req, accountId);
+      take(`desktop-ready:${account}`, 120);
+      return { ready: await desktops.ready(account, hostId, ticket) };
+    });
+    app.get('/desktop-devices', async (req) => ({ devices: await desktops.list(human(req).id) }));
+    app.delete('/desktop-devices/:id', async (req) => {
+      const { id } = z.object({ id: hostIdSchema }).parse(req.params);
+      const { accountId } = z.object({ accountId: userId }).parse(req.body);
+      if (!(await desktops.revoke(owner(req, accountId), id))) throw new ChatError(404, '找不到这台电脑');
+      return { ok: true };
+    });
+  }
   const messageParams = (req: MessagingRequest) =>
     z.object({ id: z.string().uuid(), messageId: z.string().uuid() }).parse(req.params);
   const fileParams = (req: MessagingRequest) =>

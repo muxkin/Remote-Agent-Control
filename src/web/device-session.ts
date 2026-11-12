@@ -108,7 +108,7 @@ export class DeviceSession {
         this.waking = false;
       });
   };
-  async pair(hostId: string, code: string, name: string) {
+  async pair(hostId: string, code: string, name: string, hostName?: string) {
     this.disconnect();
     const generation = this.generation;
     const identity = this.identity ?? (await this.cache.identity());
@@ -129,7 +129,7 @@ export class DeviceSession {
     }
     this.host = {
       hostId,
-      name: ready.hostName,
+      name: hostName ?? ready.hostName,
       deviceId: ready.device.id,
       ticket: ready.ticket,
       phoneId: this.identity.peerId,

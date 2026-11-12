@@ -1,6 +1,11 @@
 name: Pure Rust desktop installer checks
 on:
   workflow_dispatch:
+    inputs:
+      service_origin:
+        description: 'HTTPS service origin for first-run setup (empty for generic packages)'
+        type: string
+        required: false
   push:
     tags: [native-rust-qa-v*]
   pull_request:
@@ -46,6 +51,8 @@ jobs:
             target: x86_64-apple-darwin
             binary: agent-space-native
     runs-on: ${{ matrix.os }}
+    env:
+      POCKET_NATIVE_DEFAULT_ORIGIN: ${{ inputs.service_origin }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,6 +64,8 @@ jobs:
       - if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
       - run: npm ci --ignore-scripts
+      - name: Validate the bundled service origin
+        run: node -e "const value = process.env.POCKET_NATIVE_DEFAULT_ORIGIN; if (value) { const url = new URL(value); if (url.protocol !== 'https:' || url.origin !== value) throw Error('Expected an HTTPS origin without a trailing slash'); }"
       - name: Build the Rust adapter with system tray
         working-directory: desktop/native
         env:
@@ -72,6 +81,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           docker run --rm --user "$(id -u):$(id -g)" \
+            -e POCKET_NATIVE_DEFAULT_ORIGIN \
             --volume "$PWD:/src" --workdir /src/desktop/native \
             rust:1.95.0-alpine sh -ec '
               cargo build --release --locked --target x86_64-unknown-linux-musl \
@@ -116,6 +126,7 @@ jobs:
         run: |
           docker build --target build -f scripts/desktop/native-musl.Dockerfile -t agent-space-musl-build scripts/desktop
           docker run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/src" --workdir /src \
+            -e POCKET_NATIVE_DEFAULT_ORIGIN \
             agent-space-musl-build sh -ec '
               export CARGO_TARGET_DIR=/src/dist/native-musl-target
               cargo build --manifest-path desktop/native/Cargo.toml --release --locked \

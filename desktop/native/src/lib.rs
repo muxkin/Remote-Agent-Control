@@ -11,6 +11,7 @@ mod codex_live;
 #[cfg(feature = "official-plugins")]
 mod codex_peer;
 mod codex_service;
+mod desktop_authorization;
 mod device;
 mod direct;
 #[cfg(feature = "official-plugins")]
@@ -158,6 +159,12 @@ pub fn start() -> Result<()> {
     migration::initialize(&directory)?;
     let source = migration::source();
     let environment = migration::GatewayEnvironment::load(&directory, source)?;
+    let package_origin = option_env!("POCKET_NATIVE_DEFAULT_ORIGIN").filter(|value| {
+        url::Url::parse(value).is_ok_and(|url| {
+            url.scheme() == "https" && url.origin().ascii_serialization() == *value
+        })
+    });
+    let explicit_enrollment = env::var("POCKET_NATIVE_ENROLLMENT").ok();
     let configured_origin = if configure {
         None
     } else {
@@ -173,9 +180,17 @@ pub fn start() -> Result<()> {
         } else {
             origin
         }
+        .or(package_origin
+            // Interactive setup connects after the user chooses how to authorize the device.
+            .filter(|_| {
+                headless
+                    || explicit_enrollment
+                        .as_ref()
+                        .is_some_and(|key| !key.is_empty())
+            })
+            .map(str::to_owned))
     };
-    let enrollment = env::var("POCKET_NATIVE_ENROLLMENT")
-        .ok()
+    let enrollment = explicit_enrollment
         .or_else(|| {
             configured_origin
                 .as_deref()
@@ -194,7 +209,7 @@ pub fn start() -> Result<()> {
     let im_runtime = im_workers.clone();
     let run_directory = directory.clone();
     let run_executable = executable.clone();
-    let mut connect = move |origin: &str, enrollment: String| -> Result<String> {
+    let mut connect = move |origin: &str, enrollment: String| -> Result<management::Connected> {
         let mut config = RelayConfig::new(origin, enrollment)?;
         let db = Arc::new(Mutex::new(state::Store::open(&directory)?));
         let (plugins, codex) = plugins::Registry::load(&directory, &handle, bundled, &environment)?;
@@ -228,12 +243,18 @@ pub fn start() -> Result<()> {
             &environment,
             headless,
         ));
-        handle.spawn(gateway::run(config, db, receiver, state.clone(), gate));
-        Ok(origin)
+        handle.spawn(gateway::run(
+            config,
+            db.clone(),
+            receiver,
+            state.clone(),
+            gate,
+        ));
+        Ok(management::Connected { origin, db })
     };
-    let (origin, error) = match configured_origin {
+    let (connected, error) = match configured_origin {
         Some(origin) => match connect(&origin, enrollment) {
-            Ok(origin) => (Some(origin), None),
+            Ok(connected) => (Some(connected), None),
             Err(error) if headless => return Err(error),
             Err(error) => (None, Some(error.to_string())),
         },
@@ -245,7 +266,8 @@ pub fn start() -> Result<()> {
             &runtime,
             owner,
             management::Startup {
-                origin,
+                connected,
+                package_origin,
                 error,
                 connect: Box::new(connect),
             },
@@ -266,7 +288,7 @@ pub fn start() -> Result<()> {
         }
         Ok(())
     } else {
-        ensure!(origin.is_some(), "请先设置 POCKET_NATIVE_ORIGIN");
+        ensure!(connected.is_some(), "请先设置 POCKET_NATIVE_ORIGIN");
         let result = runtime.block_on(run_headless(updates, pair, print_pair));
         runtime.block_on(im_workers.shutdown());
         result

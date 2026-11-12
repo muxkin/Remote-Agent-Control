@@ -47,6 +47,7 @@ pub struct Store {
     pub(crate) db: Connection,
     pub(crate) directory: std::path::PathBuf,
     pub identity: Keypair,
+    pub(crate) relay_revoked: bool,
     pub(crate) downloads: std::collections::HashMap<Uuid, crate::files::Download>,
     _lock: File,
 }
@@ -141,6 +142,7 @@ impl Store {
             db,
             directory: directory.to_owned(),
             identity,
+            relay_revoked: false,
             downloads: Default::default(),
             _lock: lock,
         })

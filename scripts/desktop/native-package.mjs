@@ -82,7 +82,7 @@ try {
       ? `Agent 空间电脑适配器 ${version} · Linux x64 musl 桌面版
 
 将完整目录解压到当前用户可写的位置，双击或运行 ./agent-space-native。
-首次启动会在默认浏览器打开本机设置，填入服务地址后用手机扫码配对。
+首次启动会在默认浏览器打开本机设置，点击「登录并连接」并确认添加电脑。
 可从系统托盘或应用菜单再次打开设置。关闭浏览器后继续后台运行，支持签名自动更新。
 系统没有托盘或浏览器时，可运行 ./agent-space-native --print-settings 获取本机设置链接。
 保留 agent-space-native 和 official-plugins 的相对位置。
@@ -98,7 +98,7 @@ try {
 `
       : `Agent 空间电脑适配器 ${version} · Rust 托盘版
 
-${platform === 'darwin' ? '将 Agent Space Adapter 拖到 Applications 后打开' : `安装后从应用菜单打开，便携包也可直接解包运行 ${name}`}，默认浏览器会打开本机设置。填写服务地址后，用手机扫描配对码。
+${platform === 'darwin' ? '将 Agent Space Adapter 拖到 Applications 后打开' : `安装后从应用菜单打开，便携包也可直接解包运行 ${name}`}，默认浏览器会打开本机设置。点击「登录并连接」，在服务网页确认添加这台电脑。
 关闭浏览器后保持后台运行。托盘可再次打开设置、检查更新或退出。
 在本机设置选择「切换服务」可修改服务地址。
 预览使用独立状态目录。打开本机 Codex 会话后，可从手机查看和控制。

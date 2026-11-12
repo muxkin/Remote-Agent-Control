@@ -216,6 +216,16 @@ async fn run_connection(
     pairing: &mut Option<Pairing>,
     gate: &UpdateGate,
 ) -> Result<()> {
+    let revoked =
+        |frame: &Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>| {
+            if lane == Lane::Control && frame.as_ref().is_some_and(|frame| {
+                frame.code
+                    == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+                    && frame.reason == "Desktop authorization revoked"
+            }) {
+                db.lock().expect("database mutex poisoned").relay_revoked = true;
+            }
+        };
     let mut url = config.origin.join("/connect")?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
         .map_err(|_| anyhow::anyhow!("无法构造中继地址"))?;
@@ -248,8 +258,13 @@ async fn run_connection(
                 "signature": signature, "enrollment": config.enrollment,
             })))
             .await?;
-        let Some(Ok(Message::Text(value))) = socket.next().await else {
-            bail!("中继拒绝注册")
+        let value = match socket.next().await {
+            Some(Ok(Message::Text(value))) => value,
+            Some(Ok(Message::Close(frame))) => {
+                revoked(&frame);
+                bail!("中继拒绝注册")
+            }
+            _ => bail!("中继拒绝注册"),
         };
         ensure!(
             matches!(
@@ -263,11 +278,11 @@ async fn run_connection(
     .await??;
     let mut routes = read_routes(db)?;
     if lane == Lane::Control {
-        let directory = db
-            .lock()
-            .expect("database mutex poisoned")
-            .directory
-            .clone();
+        let directory = {
+            let mut store = db.lock().expect("database mutex poisoned");
+            store.relay_revoked = false;
+            store.directory.clone()
+        };
         // The same enrolled device can reconnect without persisting the enrollment secret.
         let _ = crate::state::remember_origin(
             &directory,
@@ -360,7 +375,10 @@ async fn run_connection(
                             }
                         }
                     }
-                    Message::Close(_) => bail!("中继已关闭"),
+                    Message::Close(frame) => {
+                        revoked(&frame);
+                        bail!("中继已关闭");
+                    }
                     Message::Ping(_) => timeout(Duration::from_secs(5), socket.flush()).await??,
                     _ => {}
                 }

@@ -24,17 +24,24 @@
           <span id="phase" class="status"></span>
         </div>
         <form id="connect" hidden>
-          <p>填入 Agent 空间服务地址。连接成功后，即可在这里生成手机配对码。</p>
-          <label for="origin">服务地址</label>
-          <input id="origin" name="origin" type="url" placeholder="https://…" autocomplete="url" spellcheck="false" maxlength="2048" required>
-          <label for="enrollment">接入密钥 <span class="muted">服务要求时填写</span></label>
-          <input id="enrollment" name="enrollment" type="password" maxlength="512" autocomplete="off">
-          <button type="submit" class="primary">连接服务</button>
+          <div id="service-address">
+            <label for="origin">服务地址</label>
+            <input id="origin" name="origin" type="url" placeholder="https://…" autocomplete="url" spellcheck="false" maxlength="2048" required>
+          </div>
+          <button id="sign-in" type="submit" class="primary">登录并连接</button>
+          <button id="edit-origin" type="button" hidden>修改服务地址</button>
+          <details id="legacy-enrollment">
+            <summary>使用接入密钥</summary>
+            <label for="enrollment">接入密钥</label>
+            <input id="enrollment" name="enrollment" type="password" maxlength="512" autocomplete="off">
+            <button id="legacy-connect" type="submit">连接服务</button>
+          </details>
         </form>
         <div id="connected" hidden>
           <p id="origin-value" class="break"></p>
           <div class="actions">
             <a id="workbench" class="button" target="_blank" rel="noopener noreferrer">打开工作台</a>
+            <button id="authorize" type="button">用账号添加这台电脑</button>
             <button id="change" type="button">切换服务</button>
           </div>
         </div>

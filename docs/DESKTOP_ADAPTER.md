@@ -123,7 +123,7 @@ cd desktop/native
 cargo build --release --locked
 ```
 
-安装后从应用菜单打开适配器。首次启动会打开默认浏览器，填写服务地址和可选的接入密钥后即可扫码配对。关闭浏览器后适配器继续运行。托盘菜单可以打开设置、检查更新和退出；点击应用入口也可重新打开当前适配器的设置页。在设置中可切换服务和启用登录自启动。管理页面只在本机回环地址监听。如果默认浏览器未打开，可运行 `agent-space-native --print-settings` 获得短期本机链接。服务器可继续用 `--headless --print-pair` 启动并输出配对链接。服务地址和密钥也可用 `POCKET_NATIVE_ORIGIN` 和 `POCKET_NATIVE_ENROLLMENT` 预填。
+安装后从应用菜单打开适配器。首次启动会打开默认浏览器，点击「登录并连接」并在本站确认添加电脑。通用包首次连接需要选择服务地址。关闭浏览器后适配器继续运行。托盘菜单可以打开设置、检查更新和退出；点击应用入口也可重新打开当前适配器的设置页。在设置中可切换服务和启用登录自启动。管理页面只在本机回环地址监听。如果默认浏览器未打开，可运行 `agent-space-native --print-settings` 获得短期本机链接。服务器可继续用 `--headless --print-pair` 启动并输出配对链接。服务地址和密钥也可用 `POCKET_NATIVE_ORIGIN` 和 `POCKET_NATIVE_ENROLLMENT` 预填。
 
 默认状态目录为平台用户数据目录下的 `agent-space-native-preview`，也可用 `POCKET_NATIVE_STATE_DIR` 选择独立私有目录。Windows 会检查当前用户和 SYSTEM 的 ACL，Linux 会检查目录和文件的属主与权限。用独立目录试用，以免两个网关以同一身份争用中继。
 
@@ -214,6 +214,18 @@ Windows 的 Python 目录包含 `python.exe`；macOS/Linux 包含 `bin/python3` 
 用 `node --import tsx scripts/desktop/payload-smoke.ts` 检查已准备的目录，也可把安装包解包后的 `resources/gateway` 作为参数传入。该检查使用临时数据库和中继，验证官方插件解包、网关注册、生成二维码和退出，不依赖本机运行的 Agent。
 
 平台路径为 `win32|darwin|linux` 和 `x64|arm64`；各架构使用自己的更新清单。macOS 发布需要 DMG 与更新 ZIP；Windows 需要 EXE 与 blockmap；Linux 使用 AppImage。生产 Windows/macOS 构建必须设置 `CSC_LINK` / `WIN_CSC_LINK` / `CSC_NAME`，并按 electron-builder 文档配置证书密码、macOS notarization 等。无证书时可运行 `npm run desktop:package -- --preview` 生成仅用于验收的包，预览包不启用自动更新。不能把预览包当作正式发布。
+
+## 按站点打包 Rust 适配器
+
+站点下载页读取本站的签名发布清单。发布前用 `POCKET_NATIVE_DEFAULT_ORIGIN` 构建各站点的 Rust 二进制，再分别打包并签名。值为纯 HTTPS origin（例如 `https://agent.example.com`），不带路径、尾斜杠或凭据。运行 GitHub Actions 的 **Pure Rust desktop installer checks** 时可填写 `service_origin`，每个站点单独运行并保存该次构建的产物。本地构建时，在运行 `cargo build --release --locked` 前设置同一环境变量。
+
+新安装首次打开时，设置页自动选用打包地址。点击「登录并连接」，在本站用已有账号登录并确认「添加这台电脑」。浏览器经适配器的本机回跳完成授权。电脑上线后，浏览器自动执行加密配对并同步到账号，手机登录同一站点和账号即可访问。
+
+授权请求由电脑的设备密钥签名，绑定站点、设备身份和五分钟有效的配对请求。浏览器确认后才能通过一次性本机回跳取得原始配对码。服务验证账号会话和电脑签名，登记设备公钥。后续连接使用设备签名。用户可从「我的 → 我的设备」撤销该电脑的服务授权，服务关闭中继连接并拒绝重连。
+
+已有电脑继续使用已保存的地址和配对。显式配置、已保存的地址和迁移得到的地址优先于打包地址。高级设置保留接入密钥方式，供旧服务及无浏览器主机使用。
+
+各站点使用各自的发布存储，将该站点产物用 `publish.mjs --native-version <版本> --rust-native` 发布到本站。同一站点已经发布的版本需要递增版本号后再发布。面向 GitHub 的通用安装包继续使用空的构建默认值。
 
 ## 发布到 Cloudflare
 
