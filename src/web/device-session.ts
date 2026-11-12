@@ -18,6 +18,8 @@ export interface DeviceOverview {
   recent: (ThreadSummary & { backendId: string })[];
 }
 
+const WORKBENCH_RECENT_LIMIT = 24;
+
 export class DeviceSession {
   readonly cache = new SyncStore();
   backendId = DEFAULT_BACKEND;
@@ -198,13 +200,13 @@ export class DeviceSession {
           recent: [...recent]
             .flatMap(([backendId, threads]) => threads.map((thread) => ({ ...thread, backendId })))
             .sort((a, b) => b.updatedAt - a.updatedAt)
-            .slice(0, 16),
+            .slice(0, WORKBENCH_RECENT_LIMIT),
         });
     };
     await Promise.all(
       backends.map(async (backend) => {
         const result = await cached<{ threads: ThreadSummary[] }>('/threads', backend.id);
-        if (result) recent.set(backend.id, result.threads.slice(0, 8));
+        if (result) recent.set(backend.id, result.threads);
       }),
     );
     emit();
@@ -243,7 +245,7 @@ export class DeviceSession {
         backends.map(async (backend) => {
           if (backend.capabilities?.history.state === 'unsupported') return;
           const { threads } = await read<{ threads: ThreadSummary[] }>('/threads', backend.id);
-          recent.set(backend.id, threads.slice(0, 8));
+          recent.set(backend.id, threads);
           emit();
         }),
       );

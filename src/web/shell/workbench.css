@@ -24,17 +24,21 @@
   color: white;
 }
 .workbench-home {
+  --workbench-canvas: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --workbench-tint: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  --workbench-border: color-mix(in srgb, var(--accent) 16%, var(--line));
   height: 100%;
   overflow-y: auto;
-  padding: clamp(20px, 5vw, 52px) clamp(16px, 5vw, 76px) 40px;
-  background: var(--surface);
+  padding: clamp(24px, 7vw, 76px) clamp(16px, 5vw, 76px) 40px;
+  background: var(--workbench-canvas);
 }
 .workbench-home > * {
   max-width: 1120px;
   margin-inline: auto;
 }
 .workbench-heading,
-.workbench-title {
+.workbench-title,
+.workbench-actions {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -44,7 +48,7 @@
   padding-bottom: 26px;
 }
 .workbench-heading h1 {
-  font-size: clamp(24px, 4vw, 34px);
+  font-size: clamp(27px, 4vw, 38px);
   line-height: 1.25;
   margin: 0;
 }
@@ -58,23 +62,32 @@
   font-weight: 600;
 }
 .workbench-add {
-  min-height: 40px;
+  min-height: 46px;
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 14px;
+}
+.workbench-add:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
 }
 .computer-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  align-items: start;
+  gap: 20px;
 }
 .workbench-search {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: min(100%, 320px);
-  margin-inline: max(0px, calc((100% - 1120px) / 2)) auto;
-  margin-bottom: 16px;
+  width: clamp(200px, 28vw, 340px);
   padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: 1px solid var(--workbench-border);
+  border-radius: 11px;
+  background: var(--surface);
   color: var(--muted);
 }
 .workbench-search:focus-within {
@@ -83,46 +96,58 @@
 .workbench-search input {
   min-width: 0;
   flex: 1;
-  min-height: 38px;
+  min-height: 44px;
   padding: 4px 0;
   border: 0;
   background: transparent;
+  font-size: 14px;
+  font-weight: 400;
+  outline: none;
 }
 .computer-card {
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 15px;
+  padding: 18px;
+  border: 1px solid var(--workbench-border);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 7%, transparent);
 }
 .computer-header {
   min-width: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, max-content) auto minmax(32px, 1fr);
   gap: 10px;
   align-items: center;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 2px 4px 16px;
 }
 .computer-icon {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
   color: var(--accent);
 }
 .computer-header h2 {
   margin: 0;
-  font-size: 17px;
+  font-size: 19px;
   overflow-wrap: anywhere;
 }
 .computer-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--muted) 9%, var(--surface));
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
 }
 .computer-status[data-online='true'] {
   color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
 }
 .computer-status i {
   display: inline-block;
@@ -130,11 +155,10 @@
   height: 7px;
   border-radius: 50%;
   background: currentColor;
-  margin-inline-end: 5px;
-  vertical-align: 1px;
 }
 .computer-menu {
   position: relative;
+  justify-self: end;
 }
 .computer-menu-items {
   position: absolute;
@@ -174,11 +198,13 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 0;
-  margin: 0 16px;
+  min-height: 61px;
+  padding: 9px 12px;
+  border-radius: 13px;
+  background: var(--workbench-tint);
 }
 .computer-tool + .computer-tool {
-  border-top: 1px solid var(--line);
+  margin-top: 8px;
 }
 .computer-tool .backend-icon {
   flex: none;
@@ -200,14 +226,19 @@
 .computer-open {
   min-height: 34px;
   padding: 5px 8px;
-  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--line));
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  border: 0;
+  background: transparent;
   color: var(--accent);
   font-size: 13px;
 }
-.computer-action,
-.computer-recents {
-  padding: 10px 16px;
+.computer-open:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.computer-tool .computer-tool-settings {
+  color: var(--muted);
+}
+.computer-action {
+  padding: 10px 4px;
   border-top: 1px solid var(--line);
 }
 .computer-action label {
@@ -221,12 +252,38 @@
   margin-top: 8px;
 }
 .computer-recents h3 {
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  margin: 0 0 6px;
+  padding-inline: 7px;
+}
+.computer-recents h3 svg,
+.computer-recents button svg {
+  flex: none;
   color: var(--muted);
-  margin: 0 0 4px;
+}
+.computer-recents {
+  padding-top: 18px;
+}
+.computer-recent-list {
+  max-block-size: 185px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border-radius: 8px;
+}
+.computer-recent-list:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .computer-recents button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   width: 100%;
+  min-height: 37px;
+  padding-inline: 7px;
+  font-size: 14px;
 }
 .computer-recents span {
   overflow: hidden;
@@ -256,5 +313,38 @@
   .computer-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
+  }
+}
+@media (max-width: 560px) {
+  .workbench-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding-bottom: 16px;
+  }
+  .workbench-actions {
+    display: contents;
+  }
+  .workbench-search {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+  .workbench-add {
+    grid-column: 2;
+    grid-row: 1;
+    min-height: 40px;
+    padding-inline: 10px;
+  }
+  .computer-card {
+    padding: 12px;
+  }
+  .computer-header {
+    gap: 7px;
+    padding-inline: 1px;
+  }
+  .computer-tool {
+    gap: 6px;
+    padding-inline: 8px;
   }
 }

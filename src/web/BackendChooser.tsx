@@ -130,30 +130,32 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
             )}
             <h1>{manage ? '管理电脑' : '工作台'}</h1>
           </div>
-          <button
-            class="workbench-add"
-            disabled={busy || working.value}
-            onClick={() => navigate({ page: 'pair' })}
-          >
-            <Icon name="plusCircle" size={18} />
-            添加电脑
-          </button>
+          <div class="workbench-actions">
+            {!manage && !!computers.length && (
+              <label class="workbench-search">
+                <Icon name="search" size={18} />
+                <input
+                  type="search"
+                  aria-label="搜索电脑、工具或最近会话"
+                  placeholder="搜索电脑、工具或最近会话"
+                  maxlength={120}
+                  value={query.value}
+                  onInput={(event) => {
+                    query.value = (event.currentTarget as HTMLInputElement).value;
+                  }}
+                />
+              </label>
+            )}
+            <button
+              class="workbench-add"
+              disabled={busy || working.value}
+              onClick={() => navigate({ page: 'pair' })}
+            >
+              <Icon name="plus" size={18} />
+              添加电脑
+            </button>
+          </div>
         </header>
-        {!manage && !!computers.length && (
-          <label class="workbench-search">
-            <Icon name="search" size={18} />
-            <input
-              type="search"
-              aria-label="搜索电脑、工具或最近会话"
-              placeholder="搜索电脑、工具或最近会话"
-              maxlength={120}
-              value={query.value}
-              onInput={(event) => {
-                query.value = (event.currentTarget as HTMLInputElement).value;
-              }}
-            />
-          </label>
-        )}
         {!computers.length && (
           <section class="workbench-empty">
             <Icon name="monitor" size={28} />
@@ -173,7 +175,7 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
             const matchingRecents = filter
               ? snapshot.recent.filter((thread) => matches(`${thread.title} ${thread.projectName ?? ''}`))
               : [];
-            const recents = matchingRecents.length ? matchingRecents : snapshot.recent.slice(0, 3);
+            const recents = matchingRecents.length ? matchingRecents : snapshot.recent;
             const online = snapshot.online;
             const status = !host ? '等待配对同步' : online === null ? '正在检查' : online ? '在线' : '离线';
             const selectedAction = action.value?.hostId === hostId ? action.value.kind : undefined;
@@ -347,17 +349,6 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
                           <small>{snapshot.toolsChecked ? '工具未连接' : '工具状态待确认'}</small>
                         )}
                       </div>
-                      {(online || cached) && (
-                        <button
-                          class="computer-open"
-                          aria-label={`打开 ${appearance.name}`}
-                          disabled={busy || working.value}
-                          onClick={() => open(hostId, backend.id)}
-                        >
-                          {online && connected ? '打开会话' : cached ? '查看历史' : '打开工作区'}
-                          <Icon name="chevron" size={16} />
-                        </button>
-                      )}
                       {online && host && (
                         <button
                           class="icon-button computer-tool-settings"
@@ -373,6 +364,17 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
                           }
                         >
                           <Icon name="sliders" size={16} />
+                        </button>
+                      )}
+                      {(online || cached) && (
+                        <button
+                          class="computer-open"
+                          aria-label={`打开 ${appearance.name}`}
+                          disabled={busy || working.value}
+                          onClick={() => open(hostId, backend.id)}
+                        >
+                          {online && connected ? '打开会话' : cached ? '查看历史' : '打开工作区'}
+                          <Icon name="arrow" size={16} />
                         </button>
                       )}
                     </div>
@@ -400,17 +402,28 @@ export const BackendChooser = tsxComponent(function BackendChooser(_props: {
                 )}
                 {!manage && !!recents.length && (
                   <section class="computer-recents" aria-label={`${name}的最近会话`}>
-                    <h3>最近会话</h3>
-                    {recents.map((thread) => (
-                      <button
-                        key={JSON.stringify([thread.backendId, thread.id])}
-                        disabled={busy || working.value}
-                        onClick={() => open(hostId, thread.backendId, thread.id)}
-                      >
-                        <span>{thread.title || '未命名会话'}</span>
-                        <Icon name="chevron" size={16} />
-                      </button>
-                    ))}
+                    <h3>
+                      <Icon name="clock" size={17} />
+                      最近会话
+                    </h3>
+                    <div
+                      class="computer-recent-list"
+                      role="group"
+                      aria-label="会话列表"
+                      tabindex={recents.length > 5 ? 0 : undefined}
+                    >
+                      {recents.map((thread) => (
+                        <button
+                          key={JSON.stringify([thread.backendId, thread.id])}
+                          disabled={busy || working.value}
+                          onClick={() => open(hostId, thread.backendId, thread.id)}
+                        >
+                          <Icon name="chat" size={16} />
+                          <span>{thread.title || '未命名会话'}</span>
+                          <Icon name="chevron" size={16} />
+                        </button>
+                      ))}
+                    </div>
                   </section>
                 )}
               </article>

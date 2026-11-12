@@ -1,6 +1,9 @@
 /** Exercise host routing with two independent simulated desktops sharing the same conversation ID. */
 import { chromium, expect } from '@playwright/test';
 import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { CodexBackend } from '../packages/adapter-codex/src/backend.js';
 import { DesktopAdapter } from '../packages/adapter-codex/src/desktop.js';
 import { HistoryIndex } from '../packages/adapter-codex/src/history.js';
@@ -15,6 +18,13 @@ const { config, host, store, native, close } = await import('./v2-fixture.js');
 const other = fixtureConfig();
 other.relay = config.relay;
 historyFixture(other);
+const db = new DatabaseSync(join(other.codexHome, 'state_5.sqlite'));
+const addRecent = db.prepare(
+  'INSERT INTO threads (id, title, cwd, updated_at_ms, archived, thread_source, rollout_path) SELECT ?, ?, cwd, ?, archived, thread_source, rollout_path FROM threads WHERE id = ?',
+);
+for (let index = 1; index <= 12; index++)
+  addRecent.run(randomUUID(), `实验记录 ${String(index).padStart(2, '0')}`, 100 - index, THREAD);
+db.close();
 const otherStore = new Store(other.stateDir);
 const otherTransport = new FakeTransport();
 const registry = new BackendRegistry().register(
@@ -81,6 +91,24 @@ try {
   await expect(lab).toBeVisible();
   await expect(office).toHaveCount(0);
   await search.clear();
+  const recentList = lab.locator('.computer-recent-list');
+  await expect(recentList.getByRole('button')).toHaveCount(13);
+  expect(
+    await recentList.evaluate((element) => ({
+      scrollable: element.scrollHeight > element.clientHeight,
+      width: getComputedStyle(element, '::-webkit-scrollbar').width,
+      radius: getComputedStyle(element, '::-webkit-scrollbar-thumb').borderRadius,
+    })),
+  ).toEqual({ scrollable: true, width: '8px', radius: '10px' });
+  await recentList.focus();
+  await page.keyboard.press('End');
+  await expect.poll(() => recentList.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.keyboard.press('Home');
+  await expect.poll(() => recentList.evaluate((element) => element.scrollTop)).toBe(0);
+  await recentList.blur();
+  await page.mouse.move(2, 2);
+  const screenshots = process.env.WORKBENCH_SCREENSHOT_DIR;
+  if (screenshots) await page.screenshot({ path: join(screenshots, 'workbench-desktop.png') });
   const desktopColumns = await page
     .locator('.computer-grid')
     .evaluate((element) => getComputedStyle(element).gridTemplateColumns);
@@ -116,10 +144,16 @@ try {
 
   await workbench();
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(lab.getByText('离线', { exact: true })).toBeVisible();
   const mobileColumns = await page
     .locator('.computer-grid')
     .evaluate((element) => getComputedStyle(element).gridTemplateColumns);
   expect(mobileColumns.split(' ')).toHaveLength(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const add = await page.getByRole('button', { name: '添加电脑', exact: true }).boundingBox();
+  const mobileSearch = await page.getByRole('searchbox').boundingBox();
+  expect(mobileSearch!.y).toBeGreaterThan(add!.y + add!.height);
+  if (screenshots) await page.screenshot({ path: join(screenshots, 'workbench-mobile.png') });
   expect(errors).toEqual([]);
   console.log(
     'Workbench devices: parallel discovery, scoped tool and recent links, offline history, rename, mobile grid.',
