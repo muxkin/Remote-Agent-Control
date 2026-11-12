@@ -23,6 +23,7 @@ function fixture(
     size?: number;
     fields?: Record<string, unknown>;
     trusted?: boolean;
+    directBase?: string;
   } = {},
 ) {
   const rust = options.channel !== 'hybrid';
@@ -57,7 +58,7 @@ function fixture(
     read: async () => new Response(manifest).body,
   };
   const fetch = vi.fn((path: string, init: RequestInit) =>
-    desktopRelease(new Request(new URL(path, 'https://updates.example'), init), store),
+    desktopRelease(new Request(new URL(path, 'https://updates.example'), init), store, options.directBase),
   );
   vi.stubGlobal('fetch', fetch);
   return { fetch, file, base };
@@ -79,6 +80,20 @@ it.each(nativeInstallerTargets)('shows a signed, available $platform/$arch insta
     base + file,
     expect.objectContaining({ method: 'HEAD', redirect: 'error' }),
   );
+});
+
+it('hands a verified installer to the browser download manager through the direct route', async () => {
+  const target = nativeInstallerTargets[0];
+  const { base, file, fetch } = fixture(target, { directBase: 'https://downloads.example/site' });
+  const direct = base.replace('/desktop/native/', '/desktop/direct/native/') + file;
+  await expect(loadNativeInstaller(target, 'rust', signal, key)).resolves.toMatchObject({ href: direct });
+  expect(fetch).toHaveBeenCalledWith(direct, expect.objectContaining({ method: 'HEAD', redirect: 'error' }));
+  const response = await fetch(direct, { method: 'GET' });
+  expect(response.status).toBe(307);
+  expect(response.headers.get('Location')).toBe(
+    `https://downloads.example/site/desktop-releases/native/rust/${target.platform}/${target.arch}/${file}`,
+  );
+  expect(response.body).toBeNull();
 });
 
 it('keeps the old Linux feed separate and exposes it from its original path', async () => {

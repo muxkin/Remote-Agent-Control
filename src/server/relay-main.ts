@@ -14,6 +14,7 @@ const app = await buildRelay({
   releaseRoot: process.env.POCKET_DESKTOP_RELEASE_ROOT
     ? resolve(process.env.POCKET_DESKTOP_RELEASE_ROOT)
     : undefined,
+  releaseDownloadBase: process.env.POCKET_DESKTOP_DOWNLOAD_BASE,
   database: join(state, 'relay.sqlite'),
   enrollmentSecret: process.env.POCKET_RELAY_ENROLLMENT ?? '',
   messaging: {

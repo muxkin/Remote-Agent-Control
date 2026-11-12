@@ -217,7 +217,7 @@ Windows 的 Python 目录包含 `python.exe`；macOS/Linux 包含 `bin/python3` 
 
 ## 按站点打包 Rust 适配器
 
-站点下载页读取本站的签名发布清单。发布前用 `POCKET_NATIVE_DEFAULT_ORIGIN` 构建各站点的 Rust 二进制，再分别打包并签名。值为纯 HTTPS origin（例如 `https://agent.example.com`），不带路径、尾斜杠或凭据。运行 GitHub Actions 的 **Pure Rust desktop installer checks** 时可填写 `service_origin`，每个站点单独运行并保存该次构建的产物。本地构建时，在运行 `cargo build --release --locked` 前设置同一环境变量。
+站点下载页读取本站的签名发布清单。站点专用包在内部构建环境生成、验收和签名。把 `POCKET_NATIVE_DEFAULT_ORIGIN` 保存在 Git 忽略的 `local/` 下，每站使用独立的构建参数文件。其值为纯 HTTPS origin，不带路径、尾斜杠或凭据。构建前加载该文件并将变量导出给 Cargo。公开 GitHub Actions 只构建通用包，工作流没有站点参数入口。GitHub 发布内容限于通用源码、通用安装包和插件、校验文件及脱敏模板。
 
 新安装首次打开时，设置页自动选用打包地址。点击「登录并连接」，在本站用已有账号登录并确认「添加这台电脑」。浏览器经适配器的本机回跳完成授权。电脑上线后，浏览器自动执行加密配对并同步到账号，手机登录同一站点和账号即可访问。
 
@@ -232,6 +232,8 @@ Windows 的 Python 目录包含 `python.exe`；macOS/Linux 包含 `bin/python3` 
 Worker 的 `/downloads/desktop/` 使用共享下载契约，只允许发布清单、固定格式的安装包和 blockmap，不暴露消息附件。支持 HEAD、ETag、单区间 Range 断点下载。清单不长期缓存，带版本的安装包不可覆盖。
 
 默认使用现有 `IM_MEDIA` R2 bucket 的 `desktop-releases/` 独立前缀；也可配置 `DESKTOP_RELEASES` binding 指向独立发布 bucket。原消息 bucket 及其鉴权不变。无需开启整个 bucket 的公共访问，也无需 GitHub Release。Node 部署可在 `dist/desktop-releases` 放置相同文件，使用相同前端和下载接口。
+
+需要直发时，在两种运行时的私有部署配置中设置 `POCKET_DESKTOP_DOWNLOAD_BASE`，例如 `https://downloads.example.com/site/`。使用独立的发布对象存储，将已验签的安装包同步到该地址下的 `desktop-releases/`，并设置附件下载文件名。下载页探测本站的 `/downloads/desktop/direct/` 路径。GET 通过 307 交给浏览器下载器从对象存储下载，HEAD 返回包的长度。先验证对象的长度和 SHA-512，再更新清单。旧版更新器拒绝重定向，仍从原有路径升级。支持直发的更新器可跟随一次 HTTPS 安装包跳转，并继续校验签名清单中的长度和 SHA-512。
 
 先更新 Worker，再发布已验证的安装包：
 

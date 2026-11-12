@@ -149,9 +149,19 @@ async function serveRelease() {
   const requests = [];
   const root = `/${platform}/${arch}/`;
   const good = '/downloads/desktop/native/rust' + root;
+  const direct = '/downloads/desktop/direct/native/rust' + root;
+  const object = '/public-installer' + root + filename;
   server = createServer({ key: await readFile(key), cert: await readFile(certificate) }, (req, res) => {
     const path = req.url ?? '';
     requests.push(path);
+    if (path === direct + filename) {
+      res.writeHead(307, { Location: object }).end();
+      return;
+    }
+    if (path === object) {
+      res.writeHead(200, { 'Content-Length': payload.length }).end(payload);
+      return;
+    }
     for (const name of ['good', 'corrupt', 'foreign', 'redirect', 'partial', 'abandoned']) {
       const prefix = name === 'good' ? good : '/' + name + root;
       if (path === prefix + 'latest.json') {
@@ -179,7 +189,7 @@ async function serveRelease() {
   await new Promise((done, fail) => server.once('error', fail).listen(0, '127.0.0.1', done));
   const address = server.address();
   assert(address && typeof address !== 'string');
-  return { origin: `https://127.0.0.1:${address.port}/`, ca, requests, root, good };
+  return { origin: `https://127.0.0.1:${address.port}/`, ca, requests, root, good, direct, object };
 }
 
 try {
@@ -194,7 +204,7 @@ try {
     : await digest(oldBinary);
   assert.equal(await digest(installed), previous, 'The old installer did not install the expected executable');
   assert.notEqual(previous, expected, 'The update fixture needs distinct old and new executables');
-  const { origin, ca, requests, root, good } = await serveRelease();
+  const { origin, ca, requests, root, good, direct, object } = await serveRelease();
   const env = {
     POCKET_QA_UPDATE_ORIGIN: origin,
     POCKET_QA_UPDATE_CA: ca,
@@ -220,7 +230,9 @@ try {
   }
   process.stdout.write(result.stdout);
   assert.equal(requests.filter((path) => path === good + 'latest.json').length, 1);
-  assert(requests.includes(good + filename));
+  assert(requests.includes(direct + filename));
+  assert(requests.includes(object));
+  assert(!requests.includes(good + filename));
   assert(requests.includes('/corrupt' + root + filename));
   assert(requests.includes('/partial' + root + filename));
   assert(requests.includes('/abandoned' + root + filename));

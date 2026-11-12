@@ -11,7 +11,9 @@ export const nativeInstallerTargets = [
 ] as const;
 
 export const linuxMuslInstallerTarget = {
-  platform: 'linux', arch: 'x64-musl', suffix: 'linux-x64-musl-desktop.tar.zst',
+  platform: 'linux',
+  arch: 'x64-musl',
+  suffix: 'linux-x64-musl-desktop.tar.zst',
 } as const;
 
 export type NativeInstallerTarget = (typeof nativeInstallerTargets)[number] | typeof linuxMuslInstallerTarget;
@@ -50,13 +52,43 @@ export function releaseKey(path: string) {
   return `desktop-releases/${name}`;
 }
 /** Same public download contract for Node and Workers; storage is the only adapter. */
-export async function desktopRelease(request: Request, store: ReleaseStore): Promise<Response> {
+export async function desktopRelease(
+  request: Request,
+  store: ReleaseStore,
+  directBase?: string,
+): Promise<Response> {
   if (!['GET', 'HEAD'].includes(request.method))
     return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD' } });
-  const key = releaseKey(new URL(request.url).pathname);
+  const path = new URL(request.url).pathname;
+  const direct = path.startsWith('/downloads/desktop/direct/');
+  const key = releaseKey(direct ? path.replace('/desktop/direct/', '/desktop/') : path);
   if (!key) return new Response(null, { status: 404 });
+  let destination: URL | undefined;
+  if (direct) {
+    if (
+      !directBase ||
+      !key.startsWith('desktop-releases/native/rust/') ||
+      !key.includes('/AgentSpace-Native-')
+    )
+      return new Response(null, { status: 404, headers: { 'Cache-Control': 'no-store' } });
+    let base: URL;
+    try {
+      base = new URL(directBase);
+    } catch {
+      return new Response(null, { status: 503 });
+    }
+    if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash)
+      return new Response(null, { status: 503 });
+    base.pathname = base.pathname.replace(/\/?$/, '/');
+    destination = new URL(key, base);
+  }
   const info = await store.head(key);
   if (!info) return new Response(null, { status: 404, headers: { 'Cache-Control': 'no-store' } });
+  if (destination && request.method === 'GET')
+    return new Response(null, {
+      status: 307,
+      headers: { Location: destination.href, 'Cache-Control': 'no-store' },
+    });
   const manifest = /\.(json|yml)$/.test(key);
   const headers: Record<string, string> = {
     'Content-Type': key.endsWith('.json')

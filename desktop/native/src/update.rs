@@ -273,6 +273,45 @@ struct UpdateSource {
     target: Target,
 }
 
+async fn download_package(client: &Http, url: Url) -> Result<reqwest::Response> {
+    let direct = url
+        .path()
+        .strip_prefix("/downloads/desktop/native/rust/")
+        .map(|suffix| url.join(&format!("/downloads/desktop/direct/native/rust/{suffix}")))
+        .transpose()?;
+    let response = match direct {
+        Some(direct) => {
+            let response = client.get(direct).send().await?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                client.get(url).send().await?
+            } else {
+                response
+            }
+        }
+        None => client.get(url).send().await?,
+    };
+    if response.status() != reqwest::StatusCode::TEMPORARY_REDIRECT
+        && response.status() != reqwest::StatusCode::PERMANENT_REDIRECT
+    {
+        return Ok(response);
+    }
+    let destination = response.url().join(
+        response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .context("下载跳转缺少目标地址")?
+            .to_str()?,
+    )?;
+    ensure!(
+        destination.scheme() == "https"
+            && destination.username().is_empty()
+            && destination.password().is_none()
+            && destination.fragment().is_none(),
+        "下载跳转目标无效"
+    );
+    Ok(client.get(destination).send().await?)
+}
+
 async fn stage(source: &UpdateSource, directory: &Path) -> Result<Option<Staged>> {
     let UpdateSource {
         client,
@@ -311,7 +350,7 @@ async fn stage(source: &UpdateSource, directory: &Path) -> Result<Option<Staged>
     private_file(&manifest_file, true)?.write_all(&manifest)?;
     let path = temporary.path().join(&release.file);
     let mut output = tokio::fs::File::from_std(private_file(&path, true)?);
-    let mut response = client.get(base.join(&release.file)?).send().await?;
+    let mut response = download_package(client, base.join(&release.file)?).await?;
     ensure!(response.status().is_success(), "无法下载更新包");
     if let Some(length) = response.content_length() {
         ensure!(length == release.size, "更新包长度无效");

@@ -86,8 +86,12 @@ export async function loadNativeInstaller(
   )
     throw new Error('Invalid native release');
 
-  const href = base + release.file;
-  const artifact = await fetch(href, { ...options, method: 'HEAD' });
+  let href = base + release.file;
+  const direct = href.replace('/desktop/native/rust/', '/desktop/direct/native/rust/');
+  let artifact = await fetch(direct, { ...options, method: 'HEAD' });
+  if (artifact.status === 404 && direct !== href)
+    artifact = await fetch(href, { ...options, method: 'HEAD' });
+  else href = direct;
   if (!artifact.ok || artifact.headers.get('Content-Length') !== String(release.size))
     throw new Error('Release installer unavailable');
   return {

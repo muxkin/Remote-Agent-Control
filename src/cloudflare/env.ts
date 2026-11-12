@@ -6,6 +6,7 @@ export interface Env extends ResourceEnvironment {
   ASSETS: Fetcher;
   IM_MEDIA: R2Bucket;
   DESKTOP_RELEASES?: R2Bucket;
+  POCKET_DESKTOP_DOWNLOAD_BASE?: string;
   IMAGES: ImagesBinding;
   POCKET_PUBLIC_ORIGIN: string;
   POCKET_RELAY_ENROLLMENT: string;

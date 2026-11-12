@@ -14,13 +14,17 @@ export default {
       return env.RELAY.get(env.RELAY.idFromName('relay-v2')).fetch(request);
     } else if (url.pathname.startsWith('/downloads/desktop/')) {
       const bucket = env.DESKTOP_RELEASES ?? env.IM_MEDIA;
-      response = await desktopRelease(request, {
-        head: async (key) => {
-          const object = await bucket.head(key);
-          return object ? { size: object.size, etag: object.httpEtag } : null;
+      response = await desktopRelease(
+        request,
+        {
+          head: async (key) => {
+            const object = await bucket.head(key);
+            return object ? { size: object.size, etag: object.httpEtag } : null;
+          },
+          read: async (key, range) => (await bucket.get(key, range ? { range } : undefined))?.body ?? null,
         },
-        read: async (key, range) => (await bucket.get(key, range ? { range } : undefined))?.body ?? null,
-      });
+        env.POCKET_DESKTOP_DOWNLOAD_BASE,
+      );
     } else if (url.pathname.startsWith('/api/im/')) {
       response = await env.MESSAGING.get(env.MESSAGING.idFromName('accounts-v1')).fetch(request);
     } else if (url.pathname === '/health') {

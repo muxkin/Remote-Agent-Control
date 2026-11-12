@@ -21,6 +21,7 @@ export interface RelayConfig {
   origin: string;
   webRoot: string;
   releaseRoot?: string;
+  releaseDownloadBase?: string;
   database?: string;
   enrollmentSecret: string;
   assetOrigin: string | null;
@@ -82,7 +83,7 @@ export async function buildRelay(config: RelayConfig) {
         method: req.method,
         headers: req.headers as Record<string, string>,
       });
-      const result = await desktopRelease(request, releases);
+      const result = await desktopRelease(request, releases, config.releaseDownloadBase);
       reply.code(result.status);
       result.headers.forEach((value, key) => reply.header(key, value));
       return reply.send(result.body ? Readable.fromWeb(result.body as any) : undefined);
