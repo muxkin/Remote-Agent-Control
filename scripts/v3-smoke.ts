@@ -76,16 +76,17 @@ try {
   const fixtureItems = fixtureTurn.items;
   const compaction = { type: 'contextCompaction', id: 'compact-fixture', status: 'inProgress', trigger: 'automatic' };
   fixtureItems.push(
-    { type: 'subAgentActivity', id: 'repair-ui-started', kind: 'started', agentThreadId: 'repair-ui', agentPath: '/界面修复' },
-    { type: 'subAgentActivity', id: 'repair-qa-started', kind: 'started', agentThreadId: 'repair-qa', agentPath: '/验证' },
+    { type: 'subAgentActivity', id: 'repair-ui-started', kind: 'started', agentThreadId: 'repair-ui', agentPath: '/root/separate_plugin' },
+    { type: 'subAgentActivity', id: 'repair-qa-started', kind: 'started', agentThreadId: 'repair-qa', agentPath: '/root/reader_layout' },
+    { type: 'subAgentActivity', id: 'layout-verify-started', kind: 'started', agentThreadId: 'layout-verify', agentPath: '/root/layout_verify' },
     { type: 'commandExecution', id: 'repair-tool', status: 'completed', command: 'printf fixture' },
     compaction,
   );
   native.revision++;
   native.snapshot();
-  const startedAgents = page.locator('.transcript-notice').filter({ hasText: '界面修复、验证 开始工作' });
+  const startedAgents = page.locator('.transcript-notice').filter({ hasText: 'Separate plugin、Reader layout、Layout verify 开始工作' });
   await expect(startedAgents).toBeVisible();
-  await expect(startedAgents.locator('.subagent-icon')).toHaveCount(2);
+  await expect(startedAgents.locator('.subagent-icon')).toHaveCount(3);
   await expect(startedAgents.locator('.subagent-icon-0')).toHaveCount(1);
   await expect(startedAgents.locator('.subagent-icon-1')).toHaveCount(1);
   await expect(page.getByText('本轮用时 17 分 36 秒', { exact: true })).toBeAttached();
@@ -97,13 +98,13 @@ try {
   await expect(page.getByRole('status').filter({ hasText: '正在压缩上下文' })).toBeVisible();
   compaction.status = 'completed';
   fixtureItems.push({
-    type: 'subAgentActivity', id: 'repair-qa-completed', kind: 'completed', agentThreadId: 'repair-qa', agentPath: '/验证',
+    type: 'subAgentActivity', id: 'repair-qa-completed', kind: 'completed', agentThreadId: 'repair-qa', agentPath: '/root/reader_layout',
   });
   native.revision++;
   native.snapshot();
   await expect(page.getByRole('status').filter({ hasText: '已自动压缩上下文' })).toHaveCount(1);
   await expect(page.getByText('正在压缩上下文', { exact: true })).toHaveCount(0);
-  await expect(page.locator('.transcript-notice').filter({ hasText: '验证 已完成' })).toBeVisible();
+  await expect(page.locator('.transcript-notice').filter({ hasText: 'Reader layout 已完成' })).toBeVisible();
   await screenshot('codex-timeline-events-mobile');
   report.checks.codexTimelineEvents = true;
   native.current.turnHistory.history.entitiesByKey.one.items.push({

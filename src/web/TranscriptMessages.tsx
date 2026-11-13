@@ -135,6 +135,12 @@ function CompactionNotice({ activity }: { activity: Extract<CodexActivity, { kin
 
 const agentIcons = ['grid', 'target', 'branch', 'bot'] as const;
 type SubagentActivity = Extract<CodexActivity, { kind: 'subagent' }>;
+function subagentName(name: string) {
+  return /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(name)
+    ? name[0].toUpperCase() + name.slice(1).replaceAll('_', ' ')
+    : name;
+}
+
 function SubagentNotice({
   agents,
   state,
@@ -161,7 +167,7 @@ function SubagentNotice({
         })}
       </span>
       <span>
-        {unique.map((agent) => agent.name).join('、')} {action}
+        {unique.map((agent) => subagentName(agent.name)).join('、')} {action}
       </span>
     </div>
   );
