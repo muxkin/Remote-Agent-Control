@@ -119,6 +119,7 @@ export interface ThreadView extends ThreadSummary {
   owner: boolean;
   synchronized: boolean;
   activeTurnId: string | null;
+  codexActivity?: 'thinking' | 'tool' | 'compacting' | 'responding';
   runtimeStatus: string;
   model: string | null;
   reasoningEffort?: string | null;

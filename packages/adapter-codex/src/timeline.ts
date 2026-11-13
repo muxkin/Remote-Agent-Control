@@ -233,6 +233,18 @@ export function normalizedView(state: Json, revision: number, writable: boolean)
   const active = turns.findLast((t) => t.status === 'inProgress');
   const runtimeStatus = state.threadRuntimeStatus?.type ?? (active ? 'active' : 'idle');
   const activeTurnId = active?.turnId ?? active?.id ?? null;
+  const last = active ? orderedEntities(active.items).at(-1) : undefined;
+  const running = ['inProgress', 'in_progress', 'running'].includes(last?.status);
+  let codexActivity: ThreadView['codexActivity'];
+  if (active) {
+    if (running && ['contextCompaction', 'ContextCompaction'].includes(last?.type))
+      codexActivity = 'compacting';
+    else if (last?.type === 'agentMessage' && last.phase === 'final_answer') codexActivity = 'responding';
+    else if (running && ['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch'].includes(last?.type))
+      codexActivity = 'tool';
+    else codexActivity = 'thinking';
+  }
+
   const pendingRequests = Array.isArray(state.requests)
     ? state.requests.length
     : Object.keys(state.requests ?? {}).length;
@@ -247,6 +259,7 @@ export function normalizedView(state: Json, revision: number, writable: boolean)
     synchronized: true,
     messages: messagesOf(state),
     activeTurnId,
+    codexActivity,
     runtimeStatus,
     model: state.latestModel ?? null,
     reasoningEffort: state.latestReasoningEffort ?? null,

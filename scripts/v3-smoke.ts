@@ -69,6 +69,17 @@ try {
   native.snapshot();
   const timer = page.locator('.turn-timing');
   await expect(timer).toHaveText(/^已工作/);
+  const activity = page.locator('.codex-live-activity');
+  await expect(activity).toHaveText('正在思考…');
+  const runningTool = { type: 'commandExecution', id: 'activity-tool', status: 'inProgress', command: 'printf activity' };
+  fixtureTurn.items.push(runningTool);
+  native.revision++;
+  native.snapshot();
+  await expect(activity).toHaveText('正在执行工具…');
+  fixtureTurn.items.pop();
+  native.revision++;
+  native.snapshot();
+  await expect(activity).toHaveText('正在思考…');
   const initialElapsed = await timer.innerText();
   await expect(timer).not.toHaveText(initialElapsed);
   fixtureTurn.status = 'completed';
@@ -86,6 +97,7 @@ try {
   native.snapshot();
   const startedAgents = page.locator('.transcript-notice').filter({ hasText: 'Separate plugin、Reader layout、Layout verify 开始工作' });
   await expect(startedAgents).toBeVisible();
+  await expect(activity).toHaveCount(0);
   await expect(startedAgents.locator('.subagent-icon')).toHaveCount(3);
   await expect(startedAgents.locator('.subagent-icon-0')).toHaveCount(1);
   await expect(startedAgents.locator('.subagent-icon-1')).toHaveCount(1);
@@ -182,7 +194,11 @@ try {
     el.scrollTop -= 600;
   });
   await expect.poll(bottomGap).toBeGreaterThan(500);
-  const readingTop = await transcript.evaluate((el) => el.scrollTop);
+  const readingTop = await transcript.evaluate(async (el) => {
+    // Allow the intentional scroll event and the composer resize observer to settle.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return el.scrollTop;
+  });
   await composer.fill('仍在查看较早消息');
   await page.setViewportSize({ width: 390, height: 844 });
   await expect.poll(() => transcript.evaluate((el) => el.scrollTop)).toBe(readingTop);
@@ -465,6 +481,38 @@ try {
   await page.getByRole('button', { name: '确认删除' }).click();
   await expect(page.getByRole('button', { name: '选择测试深色' })).toHaveCount(0);
   report.checks.migratedSettingsRoutes = true;
+
+  await page.goto(`${config.origin}/?page=workbench`);
+  await page.getByRole("button", { name: "打开 Codex", exact: true }).click();
+  await openChat();
+  await expect(composer).toBeEnabled();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const previousResponse = native.response;
+  const nextTurnId = crypto.randomUUID();
+  native.response = { result: { result: { turn: { id: nextTurnId } } } };
+  const outgoingText = `发送中的 Markdown\n\n\`\`\`text\n${'console fixture\n'.repeat(43)}\`\`\``;
+  await composer.fill(outgoingText);
+  await composer.evaluate((el: HTMLTextAreaElement) => el.form!.requestSubmit());
+  const optimistic = transcript.locator('.outgoing-message');
+  await expect(optimistic.locator('.code-block')).toBeVisible();
+  await expect.poll(bottomGap).toBeLessThan(2);
+  const requestId = await optimistic.getAttribute('data-outgoing-id');
+  const history = native.current.turnHistory.history;
+  history.islands[0].entries.push({ value: 'desktop-send' });
+  history.entitiesByKey['desktop-send'] = {
+    turnId: nextTurnId,
+    status: 'completed',
+    items: [{ type: 'userMessage', id: 'desktop-send-echo', clientMessageId: requestId,
+      content: [{ type: 'text', text: outgoingText }] }],
+  };
+  native.revision++;
+  native.snapshot();
+  await expect(optimistic).toHaveCount(0);
+  await expect(transcript.locator('[data-user-turn="desktop-send-echo"] .code-block')).toBeVisible();
+  await expect.poll(bottomGap).toBeLessThan(2);
+  native.response = previousResponse;
+  await page.setViewportSize({ width: 390, height: 844 });
+  report.checks.desktopPendingMessageScroll = true;
 
   report.checks.noUncaughtErrors = report.errors.length === 0;
   report.passed = Object.values(report.checks).every(Boolean);

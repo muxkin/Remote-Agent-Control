@@ -28,6 +28,7 @@ import { mergeOperation, readPending, rememberOperation } from './operation-stat
 import { ModelSettings, modelLabel, settingsUpdate, type ModelUpdate } from './ModelSettings';
 import { RequestCards, type RequestResponse } from './RequestCards';
 import { NewConversation, type NewConversationInput } from './NewConversation';
+import { MessageContent } from './MessageContent';
 import { TranscriptMessages } from './TranscriptMessages';
 import { TurnNavigation } from './TurnNavigation';
 import { ThreadTools } from './ThreadTools';
@@ -190,6 +191,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
   const olderState = shallowRef<Message[]>([]);
   const setOlder = writeRef(olderState);
   const transcriptRef = shallowRef<HTMLElement | null>(null);
+  const transcriptContentRef = shallowRef<HTMLElement | null>(null);
   const followBottom = { current: true };
   const transcriptScroll = { top: 0, height: 0 };
   function scrollToLatest(transcript: HTMLElement) {
@@ -211,6 +213,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
   const watchView = watchRender();
   const watchOlder = watchRender();
   const watchView2 = watchRender();
+  const watchCodexActivity = watchRender();
   const watchTranscript = watchRender();
   const watchDeviceId = watchRender();
   const watchOutgoingOperation = watchRender();
@@ -543,7 +546,9 @@ export default tsxComponent(function AgentWorkspace(_props: {
     watchOlder(() => {
       const previous = historyScroll.current;
       const transcript = transcriptRef.value;
-      if (previous && transcript) {
+      if (transcript && followBottom.current) {
+        scrollToLatest(transcript);
+      } else if (previous && transcript) {
         transcript.scrollTop = previous.top + transcript.scrollHeight - previous.height;
         transcriptScroll.top = transcript.scrollTop;
         transcriptScroll.height = transcript.clientHeight;
@@ -555,21 +560,24 @@ export default tsxComponent(function AgentWorkspace(_props: {
       if (followBottom.current && transcript) scrollToLatest(transcript);
     }, [view?.messages]);
     const transcript = transcriptRef.value;
+    const transcriptContent = transcriptContentRef.value;
     watchTranscript(() => {
-      if (!transcript) return;
+      if (!transcript || !transcriptContent) return;
       transcriptScroll.height = transcript.clientHeight;
       const observer = new ResizeObserver(() => {
         const height = transcript.clientHeight;
-        if (!height || height === transcriptScroll.height) return;
+        if (!height) return;
         if (followBottom.current) scrollToLatest(transcript);
-        else {
+        else if (height !== transcriptScroll.height) {
+          transcript.scrollTop = transcriptScroll.top;
           transcriptScroll.height = height;
           transcriptScroll.top = transcript.scrollTop;
         }
       });
       observer.observe(transcript);
+      observer.observe(transcriptContent);
       return () => observer.disconnect();
-    }, [transcript]);
+    }, [transcript, transcriptContent]);
     async function pair(e: SubmitEvent) {
       e.preventDefault();
       setBusy(true);
@@ -766,8 +774,8 @@ export default tsxComponent(function AgentWorkspace(_props: {
         if (selectedId.current === id && generation === historyGeneration.current) {
           const transcript = transcriptRef.value;
           if (transcript && (added.length || cursor !== historyCursorState.value)) {
-            historyScroll.current = { top: transcript.scrollTop, height: transcript.scrollHeight };
-            followBottom.current = false;
+            if (!followBottom.current)
+              historyScroll.current = { top: transcript.scrollTop, height: transcript.scrollHeight };
             setOlder((old) => [...added, ...old]);
           }
           setHistoryCursor(cursor);
@@ -806,6 +814,17 @@ export default tsxComponent(function AgentWorkspace(_props: {
             codexDisplayMessage(message, !!view?.activeTurnId && message.turnId === view.activeTurnId) ?? [],
         )
       : combined;
+    const activeMessage = messages.findLast((message) => message.turnId === view?.activeTurnId);
+    const activity = view?.codexActivity ??
+      (activeMessage?.role === 'assistant' && activeMessage.phase === 'final_answer' ? 'responding' : 'thinking');
+    const showCodexActivity = codex && !!stream && !!view?.synchronized && !!view.activeTurnId &&
+      !view.pendingRequests && !view.requests?.length && activity !== 'responding' &&
+      !(activity === 'compacting' && activeMessage?.codex?.kind === 'compaction' &&
+        activeMessage.codex.state === 'running');
+    watchCodexActivity(() => {
+      if (showCodexActivity && followBottom.current && transcriptRef.value)
+        scrollToLatest(transcriptRef.value);
+    }, [showCodexActivity]);
     const outgoing = drafts.outgoing;
     const outgoingOperation = outgoing?.operation;
     watchDeviceId(() => {
@@ -1083,6 +1102,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
                       void loadOlder();
                   }}
                 >
+                  <div class="transcript-content" ref={transcriptContentRef}>
                   {view && historyCursor && (
                     <div class="older">
                       {historyError.value && <span role="status">{historyError.value}</span>}
@@ -1132,7 +1152,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
                   {outgoing && !echoed && (
                     <article class="message user outgoing-message" data-outgoing-id={outgoing.operation.id}>
                       <div class="message-role">你</div>
-                      <OutgoingContent text={outgoing.draft.text} files={outgoing.draft.uploads}>
+                      <OutgoingContent text="" files={outgoing.draft.uploads}>
                         {() => (
                           <>
                             {(!!outgoing.draft.skills.length || !!outgoing.draft.plugins.length) && (
@@ -1143,6 +1163,14 @@ export default tsxComponent(function AgentWorkspace(_props: {
                                   </span>
                                 ))}
                               </div>
+                            )}
+                            {outgoing.draft.text && (
+                              <MessageContent
+                                message={{ id: outgoing.operation.id, role: 'user', text: outgoing.draft.text }}
+                                threadId={selected.id}
+                                streaming={false}
+                                codex={codex}
+                              />
                             )}
                           </>
                         )}
@@ -1200,7 +1228,13 @@ export default tsxComponent(function AgentWorkspace(_props: {
                       </OutgoingStatus>
                     </article>
                   )}
-                  {view && messages.length === 0 && !outgoing && (
+                  {showCodexActivity && (
+                    <div class="transcript-notice codex-live-activity" role="status">
+                      <span class="codex-activity-dot" aria-hidden="true" />
+                      <span>{{ thinking: '正在思考…', tool: '正在执行工具…', compacting: '正在压缩上下文…', responding: '' }[activity]}</span>
+                    </div>
+                  )}
+                  {view && messages.length === 0 && !outgoing && !showCodexActivity && (
                     <p class="muted center">
                       {view.historyUnavailable
                         ? '暂时无法读取此会话的历史记录'
@@ -1224,6 +1258,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
                       onRespond={(response) => act('respond', response)}
                     />
                   )}
+                  </div>
                 </section>
                 <TurnNavigation
                   key={selected.id}

@@ -881,3 +881,35 @@ textarea:focus {
 .activity-group.activity-group-inline > summary span {
   flex: none;
 }
+
+.codex-live-activity {
+  align-items: center;
+  min-height: 24px;
+}
+.codex-activity-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+  animation: codex-activity-pulse 1.5s ease-in-out infinite alternate;
+}
+@keyframes codex-activity-pulse {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .codex-activity-dot { animation: none; }
+}
+
+/* Transcript follow and history prepending already preserve their own scroll position. */
+.transcript-stage .transcript {
+  overflow-anchor: none;
+}
+
+.transcript-content {
+  display: flow-root;
+}
+.transcript-content > .outgoing-message {
+  content-visibility: visible;
+}

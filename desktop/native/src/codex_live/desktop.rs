@@ -834,11 +834,26 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
     } else {
         ordered(&state["turns"])
     };
-    let active = native_turns
+    let active_turn = native_turns
         .iter()
         .rev()
-        .find(|turn| turn["status"] == "inProgress")
-        .and_then(|turn| turn["turnId"].as_str().or_else(|| turn["id"].as_str()));
+        .find(|turn| turn["status"] == "inProgress");
+    let active =
+        active_turn.and_then(|turn| turn["turnId"].as_str().or_else(|| turn["id"].as_str()));
+    let codex_activity = active_turn.map(|turn| {
+        let items = ordered(&turn["items"]);
+        let item = items.last().copied().unwrap_or(&Value::Null);
+        let running = matches!(
+            item["status"].as_str(),
+            Some("inProgress" | "in_progress" | "running")
+        );
+        match item["type"].as_str() {
+            Some("contextCompaction" | "ContextCompaction") if running => "compacting",
+            Some("agentMessage") if item["phase"] == "final_answer" => "responding",
+            _ if running && tool_activity::summary(item).is_some() => "tool",
+            _ => "thinking",
+        }
+    });
     let pending = requests::pending(state);
     let items: Vec<_> = native_turns
         .iter()
@@ -1034,7 +1049,7 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
         thread: json!({
             "id": id, "title": state["title"].as_str().unwrap_or("未命名会话"), "cwd": state["cwd"].as_str().unwrap_or(""),
             "updatedAt": state["updatedAt"].as_i64().unwrap_or(0), "revision": revision,
-            "owner": true, "synchronized": true, "runtimeStatus": runtime, "activeTurnId": active,
+            "owner": true, "synchronized": true, "runtimeStatus": runtime, "activeTurnId": active, "codexActivity": codex_activity,
             "model": state["latestModel"], "reasoningEffort": state["latestReasoningEffort"],
             "serviceTier": state["latestThreadSettings"]["serviceTier"], "mode": state["latestCollaborationMode"]["mode"].as_str().unwrap_or("default"),
             "pendingRequests": pending.len(), "requests": requests,
