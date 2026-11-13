@@ -152,6 +152,12 @@ try {
       thumbnails.evaluateAll((elements) => new Set(elements.map((el) => el.getBoundingClientRect().y)).size),
     )
     .toBeGreaterThan(1);
+  // Let lazy thumbnails finish sizing before measuring the transcript scroll offset.
+  await expect
+    .poll(() => thumbnails.locator('img').evaluateAll((images) =>
+      images.filter((image) => (image as HTMLImageElement).naturalWidth > 0).length,
+    ))
+    .toBe(5);
   await galleryMessage.screenshot({ path: '.test-output/v3/mobile-attachment-gallery.png' });
   const transcript = page.getByRole('region', { name: '聊天记录' });
   const composer = page.getByLabel('消息', { exact: true });
