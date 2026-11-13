@@ -1,0 +1,77 @@
+.selection-translation-trigger {
+  position: fixed;
+  z-index: 100;
+  transform: translateX(-50%);
+  min-width: 72px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  color: var(--accent);
+  background: var(--surface-raised);
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.selection-translation-content {
+  display: grid;
+  gap: 14px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.selection-translation-content p {
+  margin: 0;
+}
+
+.selection-translation-original,
+.selection-translation-result {
+  padding: 12px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.selection-translation-original {
+  max-height: 28dvh;
+  overflow: auto;
+  color: var(--muted);
+  background: var(--surface-subtle);
+}
+
+.selection-translation-result {
+  color: var(--on-soft);
+  background: var(--soft);
+}
+
+.selection-translation-language,
+.selection-translation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.selection-translation-language select {
+  min-height: 40px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.selection-translation-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.selection-translation-actions a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent);
+  text-underline-offset: 3px;
+}

@@ -6,6 +6,10 @@ import { config, host, store, native, close } from './v2-fixture.js';
 import { THREAD, TURN } from '../test/helpers.js';
 import { saveRecoveryCode } from './lib/messaging-smoke.js';
 import { mathCopyFixture, verifyMathCopy } from './lib/math-copy-smoke.js';
+import {
+  selectionTranslationFixture,
+  verifyOnDeviceSelectionTranslation,
+} from './lib/selection-translation-smoke.js';
 import sharp from 'sharp';
 const report: any = { fixture: true, checks: {}, errors: [], physicalPhone: false };
 const browser = await chromium.launch({
@@ -128,6 +132,19 @@ try {
   native.snapshot();
   await page.setViewportSize({ width: 1440, height: 900 });
   await verifyMathCopy(page, page.locator('.message.assistant').filter({ hasText: '起始 前文' }));
+  fixtureItems.push({ type: 'agentMessage', id: 'translation-fixture', text: selectionTranslationFixture });
+  native.revision++;
+  native.snapshot();
+  await verifyOnDeviceSelectionTranslation(
+    page,
+    page.locator('[data-selection-translation]').getByText(selectionTranslationFixture, { exact: true }),
+    page.getByLabel('消息', { exact: true }),
+    '.test-output/v3/selection-translation.png',
+  );
+  report.checks.onDeviceSelectionTranslation = true;
+  fixtureItems.pop();
+  native.revision++;
+  native.snapshot();
   const images = await Promise.all(
     ['#246f5c', '#5971a0', '#ab763e', '#8a5b74', '#285d77'].map(async (background, index) => {
       const png = await sharp({

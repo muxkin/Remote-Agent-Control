@@ -15,6 +15,11 @@ import { assertEncryptedDatabase } from './encryption-state.js';
 import { attachmentMime } from './media.js';
 import { interactionInput, interactionResponse } from './interaction.js';
 import type { ChatUser } from '../../shared/messaging.js';
+import {
+  SELECTION_TRANSLATION_LANGUAGES,
+  SELECTION_TRANSLATION_MAX_LENGTH,
+} from '../../shared/selection-translation.js';
+import type { SelectionTranslator } from './translation.js';
 
 const username = z
   .string()
@@ -51,6 +56,7 @@ export interface MessagingConfig {
   callIce?: CallIceConfig;
   storage?: boolean;
   desktops?: DesktopAuthorizations;
+  translate?: SelectionTranslator;
 }
 
 /** Shared account/message routes; each provider supplies its HTTP and persistence adapters. */
@@ -159,6 +165,31 @@ export async function registerMessaging(app: MessagingHttp, config: MessagingCon
       error:
         error instanceof ChatError || error instanceof ResourceError ? error.message : '请求未完成，请重试',
     });
+  });
+  const translate = config.translate;
+  app.get('/translation', (req) => {
+    human(req);
+    return { available: !!translate };
+  });
+  app.post('/translation', { bodyLimit: 12 * 1024 }, async (req) => {
+    const user = human(req);
+    if (!translate) throw new ChatError(503, '站内翻译服务尚未配置');
+    const { text, targetLanguage } = z
+      .object({
+        text: z
+          .string()
+          .max(SELECTION_TRANSLATION_MAX_LENGTH, '最多可翻译 2000 个字符')
+          .trim()
+          .min(1, '请选择要翻译的文字'),
+        targetLanguage: z.enum(SELECTION_TRANSLATION_LANGUAGES),
+      })
+      .parse(req.body);
+    take(`translation:${user.id}`, 20);
+    try {
+      return { translatedText: await translate(text, targetLanguage) };
+    } catch {
+      throw new ChatError(502, '翻译服务暂不可用，请稍后重试');
+    }
   });
   if (config.desktops) {
     const desktops = config.desktops;

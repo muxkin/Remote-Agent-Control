@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { callIceConfig } from './messaging/calls.js';
+import { translationProvider } from './messaging/translation.js';
 import { resolve, join } from 'node:path';
 import { buildRelay } from './relay.js';
 import { loadStorage } from './object-storage.js';
@@ -23,6 +24,7 @@ const app = await buildRelay({
     registrationCode: process.env.POCKET_IM_REGISTRATION_CODE,
     humanContacts: process.env.POCKET_IM_HUMAN_CONTACTS === 'true',
     callIce: callIceConfig(process.env),
+    translate: translationProvider(process.env),
     storage: process.env.POCKET_IM_MEDIA_ADAPTER
       ? await loadStorage(
           { adapterPath: resolve(process.env.POCKET_IM_MEDIA_ADAPTER) },

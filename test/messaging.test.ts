@@ -11,13 +11,14 @@ import { MessagingStore } from './messaging-fixtures.js';
 import { EncryptedMessagingClient } from '../src/client/encrypted-messaging.js';
 import { AccountClient } from '../src/client/account.js';
 import { protectAccount } from '../src/shared/account-crypto.js';
+import { translationProvider } from '../src/server/messaging/translation.js';
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   vi.unstubAllGlobals();
 });
-async function fixture(registrationCode?: string) {
+async function fixture(registrationCode?: string, translation?: { fetch: typeof fetch; apiKey?: string }) {
   const origin = 'https://chat.test';
   const relay = await buildRelay({
     origin,
@@ -25,12 +26,25 @@ async function fixture(registrationCode?: string) {
     assetOrigin: null,
     uploadOrigins: [],
     enrollmentSecret: 'test-messaging-relay-enrollment-secret',
-    messaging: { humanContacts: true, registrationCode },
+    messaging: {
+      humanContacts: true,
+      registrationCode,
+      translate:
+        translation &&
+        translationProvider({
+          POCKET_TRANSLATION_URL: 'https://translate.test/translate',
+          POCKET_TRANSLATION_API_KEY: translation.apiKey,
+        }),
+    },
   });
   cleanups.push(() => relay.app.close());
-  vi.stubGlobal('fetch', async (input: string, init: RequestInit = {}) => {
-    const url = new URL(input),
-      headers = new Headers(init.headers);
+  vi.stubGlobal('fetch', async (input: string | URL, init: RequestInit = {}) => {
+    const url = new URL(input);
+    if (url.origin === 'https://translate.test') {
+      if (!translation) throw Error('Translation was disabled in this test');
+      return translation.fetch(input, init);
+    }
+    const headers = new Headers(init.headers);
     const result = await relay.app.inject({
       method: (init.method ?? 'GET') as 'GET',
       url: url.pathname + url.search,
@@ -188,6 +202,64 @@ async function fixture(registrationCode?: string) {
   }
   return { request, human, app: relay.app, client: (cookie: string) => clients.get(cookie)! };
 }
+
+it('reports disabled selection translation to signed-in users', async () => {
+  const { request, human } = await fixture();
+  const selected = { text: 'Selected text', targetLanguage: 'zh' };
+  expect((await request('/translation')).status).toBe(401);
+  expect((await request('/translation', 'POST', selected)).status).toBe(401);
+  const alice = await human('alice');
+  const capability = await request('/translation', 'GET', undefined, alice.cookie);
+  expect(capability.body).toEqual({ available: false });
+  expect(capability.headers['cache-control']).toBe('no-store');
+  expect((await request('/translation', 'POST', selected, alice.cookie)).status).toBe(503);
+});
+
+it('translates a bounded selection for a signed-in user and hides upstream failures', async () => {
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(Response.json({ translatedText: 'Translated text' }))
+    .mockResolvedValueOnce(Response.json({ error: 'upstream sensitive detail' }, { status: 500 }));
+  const { request, human } = await fixture(undefined, { fetch, apiKey: 'fixture-api-key' });
+  const alice = await human('alice');
+  const capability = await request('/translation', 'GET', undefined, alice.cookie);
+  expect(capability.body).toEqual({ available: true });
+  const selected = '字'.repeat(2000);
+  for (const body of [
+    { text: ' ', targetLanguage: 'en' },
+    { text: selected + '字', targetLanguage: 'en' },
+    { text: selected, targetLanguage: 'fr' },
+  ]) {
+    expect((await request('/translation', 'POST', body, alice.cookie)).status).toBe(400);
+  }
+  expect(
+    (await request('/translation', 'POST', { text: '字'.repeat(6000), targetLanguage: 'en' }, alice.cookie))
+      .status,
+  ).toBe(413);
+  const input = { text: selected, targetLanguage: 'en' };
+  expect(
+    (await request('/translation', 'POST', input, alice.cookie, { origin: 'https://other.test' })).status,
+  ).toBe(403);
+  expect(fetch).not.toHaveBeenCalled();
+  const result = await request('/translation', 'POST', input, alice.cookie);
+  expect(result.body).toEqual({ translatedText: 'Translated text' });
+  expect(result.headers['cache-control']).toBe('no-store');
+  expect(fetch).toHaveBeenCalledOnce();
+  const [endpoint, init] = fetch.mock.calls[0];
+  expect(String(endpoint)).toBe('https://translate.test/translate');
+  expect(init?.method).toBe('POST');
+  expect(init?.redirect).toBe('manual');
+  expect(JSON.parse(String(init?.body))).toEqual({
+    q: selected,
+    source: 'auto',
+    target: 'en',
+    format: 'text',
+    api_key: 'fixture-api-key',
+  });
+  const failure = await request('/translation', 'POST', input, alice.cookie);
+  expect(failure.status).toBe(502);
+  expect(failure.body.error).not.toContain('upstream sensitive detail');
+});
 
 it('registers real human accounts, restores sessions, persists profile and enforces login/logout', async () => {
   const { request, human } = await fixture();

@@ -6,6 +6,10 @@ import { join, resolve } from 'node:path';
 import { buildRelay } from '../src/server/relay.ts';
 import { mathCopyFixture, verifyMathCopy } from './lib/math-copy-smoke.ts';
 import {
+  selectionTranslationFixture,
+  verifySiteSelectionTranslation,
+} from './lib/selection-translation-smoke.ts';
+import {
   saveRecoveryCode,
   registerAgentFixture,
   browserAccountFixture,
@@ -32,10 +36,12 @@ const relay = await buildRelay({
 });
 await relay.app.listen({ host, port });
 const browser = await chromium.launch({
-  channel: 'chrome',
+  ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+    ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+    : { channel: 'chrome' }),
   args: [`--unsafely-treat-insecure-origin-as-secure=${origin}`],
 });
-const context = await browser.newContext({ viewport: { width: 1488, height: 1056 } }),
+const context = await browser.newContext({ viewport: { width: 1488, height: 1056 }, hasTouch: true }),
   page = await context.newPage();
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
@@ -196,6 +202,15 @@ try {
   await page.setViewportSize({ width: 1488, height: 1056 });
   const copyFixture = await agentClient.send(cid, mathCopyFixture, 'formula-copy');
   await verifyMathCopy(page, page.locator(`[data-message-id="${copyFixture.message.id}"]`));
+  const translation = await agentClient.send(cid, selectionTranslationFixture, 'selection-translation');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await verifySiteSelectionTranslation(
+    page,
+    page
+      .locator(`[data-message-id="${translation.message.id}"] [data-selection-translation]`)
+      .getByText(selectionTranslationFixture, { exact: true }),
+    join(out, 'mobile-selection-translation.png'),
+  );
   expect(errors).toEqual([]);
   await writeFile(
     out + '/result.json',
@@ -208,6 +223,7 @@ try {
         responsive: [390, 320],
         mathTypography: true,
         mathCopy: true,
+        selectionTranslation: true,
         errors,
       },
       null,

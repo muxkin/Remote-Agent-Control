@@ -79,7 +79,7 @@ export const MessageContent = tsxComponent(function MessageContent(_props: {
             ))}
           </div>
         )}
-        <div class="message-text">
+        <div class="message-text" data-selection-translation={displayed.role !== 'tool' ? '' : undefined}>
           {displayed.role !== 'tool' || displayed.id.includes(':media:') ? (
             <Suspense timeout={0}>
               {{

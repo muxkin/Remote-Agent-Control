@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { callIceConfig } from '../server/messaging/calls.js';
+import { translationProvider } from '../server/messaging/translation.js';
 import { WorkerMessagingHttp } from './http.js';
 import { ChatError, MessagingStore } from '../server/messaging/store-core.js';
 import { registerMessaging } from '../server/messaging/service-core.js';
@@ -39,6 +40,7 @@ export class MessagingHub extends DurableObject<Env> {
         revoke: (...args) => relay().revokeDesktop(...args),
       },
       humanContacts: env.POCKET_IM_HUMAN_CONTACTS === 'true',
+      translate: translationProvider(env),
       callIce: callIceConfig({
         POCKET_IM_CALL_STUN_URLS: env.POCKET_IM_CALL_STUN_URLS,
         POCKET_IM_CALL_TURN_URLS: env.POCKET_IM_CALL_TURN_URLS,

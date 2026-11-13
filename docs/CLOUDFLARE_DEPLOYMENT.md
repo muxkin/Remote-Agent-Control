@@ -54,6 +54,8 @@ npm run deploy:cf    # 发布自己的 CF 实例
 
 CF 脚本不会自动读取 `local/gateway.env`，也不覆盖 VPS 的 `dist/web`。默认使用同源静态资源。需要专门的 CF 构建环境文件时显式设置 `POCKET_CF_ENV_FILE`；需要 CDN 时使用 `POCKET_CF_ASSET_BASE` 或在该文件中设置 `POCKET_ASSET_BASE`，并将相同值写入 Wrangler 的 `vars.POCKET_ASSET_BASE`、自行发布 CDN 文件。现有 Gateway 外部对象存储还需要在 `vars.POCKET_UPLOAD_ORIGINS` 中允许其精确 HTTPS origin。
 
+需要提供站内划词翻译时，在 `vars.POCKET_TRANSLATION_URL` 中设置 Worker 可访问的 LibreTranslate HTTPS 地址，例如 `https://translate.example.com/translate`。服务需要密钥时，运行 `npx wrangler secret put POCKET_TRANSLATION_API_KEY`。所选文字仅在用户主动选择站内翻译时发给该服务。具体说明见 [VPS 部署指南](CLOUD_DEPLOYMENT.md#可选的站内划词翻译)。
+
 ## 接入电脑与消息账户
 
 在**接入这个新实例的电脑**上配置自己的 `local/gateway.env`：

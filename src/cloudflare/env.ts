@@ -1,6 +1,7 @@
 import type { ResourceEnvironment } from '../server/resources/lago.js';
+import type { TranslationEnvironment } from '../server/messaging/translation.js';
 
-export interface Env extends ResourceEnvironment {
+export interface Env extends ResourceEnvironment, TranslationEnvironment {
   RELAY: DurableObjectNamespace;
   MESSAGING: DurableObjectNamespace;
   ASSETS: Fetcher;

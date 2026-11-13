@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
 import type { CallIceConfig } from './messaging/calls.js';
+import type { SelectionTranslator } from './messaging/translation.js';
 import { desktopRelease } from '../shared/desktop-releases.js';
 import { fileReleaseStore } from './desktop-releases.js';
 import Fastify from 'fastify';
@@ -32,6 +33,7 @@ export interface RelayConfig {
     registrationCode?: string;
     humanContacts?: boolean;
     callIce?: CallIceConfig;
+    translate?: SelectionTranslator;
     storage?: StorageAdapter;
     resourcePolicy?: ResourcePolicyProvider;
   };
@@ -59,6 +61,7 @@ export async function buildRelay(config: RelayConfig) {
     registrationCode: config.messaging?.registrationCode,
     humanContacts: config.messaging?.humanContacts,
     callIce: config.messaging?.callIce,
+    translate: config.messaging?.translate,
     clientAddress,
     storage: config.messaging?.storage,
     resourcePolicy: config.messaging?.resourcePolicy,

@@ -655,21 +655,23 @@ export default tsxComponent(function ChatView(initialProps: { id: string; naviga
                                 sender?.kind === 'agent' &&
                                 /^(?:…+|\.{3,})$/.test(message.text.trim())
                               ) && (
-                                <Suspense timeout={0}>
-                                  {{
-                                    fallback: () => <div class="im-plain">{message.text}</div>,
-                                    default: () => (
-                                      <>
-                                        <RichMessage
-                                          preserveLineBreaks={sender?.kind !== 'agent'}
-                                          text={message.text}
-                                          threadId={id}
-                                          streaming={message.state === 'streaming'}
-                                        />
-                                      </>
-                                    ),
-                                  }}
-                                </Suspense>
+                                <div data-selection-translation="">
+                                  <Suspense timeout={0}>
+                                    {{
+                                      fallback: () => <div class="im-plain">{message.text}</div>,
+                                      default: () => (
+                                        <>
+                                          <RichMessage
+                                            preserveLineBreaks={sender?.kind !== 'agent'}
+                                            text={message.text}
+                                            threadId={id}
+                                            streaming={message.state === 'streaming'}
+                                          />
+                                        </>
+                                      ),
+                                    }}
+                                  </Suspense>
+                                </div>
                               )}
                             {message.interaction && (
                               <InteractionCard

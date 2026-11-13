@@ -46,6 +46,12 @@ POCKET_WEB_ROOT=/opt/codex-pocket/current/dist/web
 
 反向代理保留同源请求信息，转发 `/api/im/*`，超时大于 25 秒且不缓存 API；上传入口允许至少 10 MiB 请求体。UID 及分配器状态均作为十进制字符串存储，账户数据库是发号的唯一来源，不能复制后在多个独立节点发号。即时聊天正文、附件和账号配对信息统一由客户端加密，服务端只保存这些内容的密文。已有数据先按 [一次性迁移](ACCOUNT_MIGRATION.md) 保留并转换，再启动新版服务；服务不运行混合数据模型。详见 [账号同步与加密存储](ACCOUNT_ENCRYPTION.md)。设备遥控仍使用独立 Noise 通道。接口、CLI 和运维限制见 [即时消息说明](MESSAGING.md)。
 
+### 可选的站内划词翻译
+
+在中继的私有环境文件中设置 `POCKET_TRANSLATION_URL=https://translate.example.com/translate`，指向已安装中文和英文模型的 LibreTranslate 服务。同机部署可使用 `http://127.0.0.1:5000/translate`。服务需要密钥时设置 `POCKET_TRANSLATION_API_KEY`。
+
+用户主动选择站内翻译后，应用将所选文字发送给此服务，应用的消息数据库不会保存原文或译文。按翻译服务的实际配置管理日志和缓存。
+
 ## 代理地址与连接配额
 
 中继默认不信任转发头。`POCKET_RELAY_TRUSTED_PROXIES` 只列出受控反向代理的 IP/CIDR，不要填整个客户端网段。程序使用 `@fastify/proxy-addr` 从 socket 地址向外检查 `X-Forwarded-For`，遇到第一个不可信地址即停止，并统一 IPv4、IPv6 和 IPv4-mapped 地址格式。只读最左侧头部或仅按代理跳数信任都不安全。

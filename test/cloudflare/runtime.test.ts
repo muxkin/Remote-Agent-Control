@@ -26,6 +26,7 @@ import { apiCall } from '../../src/shared/rpc.js';
 let mf: Miniflare, origin: string;
 const enrollment = 'isolated-cloudflare-test-enrollment-32';
 const sockets: WebSocket[] = [];
+const translationRequests: unknown[] = [];
 beforeAll(async () => {
   mkdirSync('.implementation/cloudflare-test/assets', { recursive: true });
   writeFileSync('.implementation/cloudflare-test/assets/index.html', '<html>isolated test</html>');
@@ -60,6 +61,7 @@ beforeAll(async () => {
         POCKET_PUBLIC_ORIGIN: origin,
         POCKET_RELAY_ENROLLMENT: enrollment,
         POCKET_IM_HUMAN_CONTACTS: 'true',
+        POCKET_TRANSLATION_URL: 'https://translate.test/translate',
       },
       durableObjects: {
         RELAY: { className: 'RelayHub', useSQLite: true },
@@ -67,6 +69,12 @@ beforeAll(async () => {
       },
       r2Buckets: ['IM_MEDIA'],
       images: { binding: 'IMAGES' },
+      outboundService: async (request: Request) => {
+        if (request.url !== 'https://translate.test/translate' || request.method !== 'POST')
+          return new Response(null, { status: 404 });
+        translationRequests.push(await request.json());
+        return Response.json({ translatedText: '测试译文' });
+      },
       serviceBindings: {
         ASSETS: async (request) =>
           new Response('<html>test application</html>', {
@@ -239,6 +247,17 @@ it('uses the existing account, encrypted messaging, recovery and R2 attachment p
       { timeout: 10000 },
     )
     .toBe('expired');
+});
+
+it('translates a signed-in user’s selection through the configured Worker provider', async () => {
+  const reader = session();
+  await reader.account.register('translation-reader', 'Reader', 'strong-password-reader');
+  expect(await reader.request('/translation')).toEqual({ available: true });
+  expect(translationRequests).toEqual([]);
+  expect(
+    await reader.request('/translation', 'POST', { text: ' Selected text ', targetLanguage: 'zh' }),
+  ).toEqual({ translatedText: '测试译文' });
+  expect(translationRequests).toEqual([{ q: 'Selected text', source: 'auto', target: 'zh', format: 'text' }]);
 });
 
 it('processes avatars through the Images binding with authenticated download', async () => {
