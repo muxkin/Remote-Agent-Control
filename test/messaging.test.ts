@@ -18,7 +18,10 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   vi.unstubAllGlobals();
 });
-async function fixture(registrationCode?: string, translation?: { fetch: typeof fetch; apiKey?: string }) {
+async function fixture(
+  registrationCode?: string,
+  translation?: { fetch: typeof fetch; site?: { apiKey?: string } },
+) {
   const origin = 'https://chat.test';
   const relay = await buildRelay({
     origin,
@@ -30,17 +33,17 @@ async function fixture(registrationCode?: string, translation?: { fetch: typeof 
       humanContacts: true,
       registrationCode,
       translate:
-        translation &&
+        translation?.site &&
         translationProvider({
           POCKET_TRANSLATION_URL: 'https://translate.test/translate',
-          POCKET_TRANSLATION_API_KEY: translation.apiKey,
+          POCKET_TRANSLATION_API_KEY: translation.site.apiKey,
         }),
     },
   });
   cleanups.push(() => relay.app.close());
   vi.stubGlobal('fetch', async (input: string | URL, init: RequestInit = {}) => {
     const url = new URL(input);
-    if (url.origin === 'https://translate.test') {
+    if (url.origin !== origin) {
       if (!translation) throw Error('Translation was disabled in this test');
       return translation.fetch(input, init);
     }
@@ -220,7 +223,7 @@ it('translates a bounded selection for a signed-in user and hides upstream failu
     .fn<typeof globalThis.fetch>()
     .mockResolvedValueOnce(Response.json({ translatedText: 'Translated text' }))
     .mockResolvedValueOnce(Response.json({ error: 'upstream sensitive detail' }, { status: 500 }));
-  const { request, human } = await fixture(undefined, { fetch, apiKey: 'fixture-api-key' });
+  const { request, human } = await fixture(undefined, { fetch, site: { apiKey: 'fixture-api-key' } });
   const alice = await human('alice');
   const capability = await request('/translation', 'GET', undefined, alice.cookie);
   expect(capability.body).toEqual({ available: true });
@@ -259,6 +262,91 @@ it('translates a bounded selection for a signed-in user and hides upstream failu
   const failure = await request('/translation', 'POST', input, alice.cookie);
   expect(failure.status).toBe(502);
   expect(failure.body.error).not.toContain('upstream sensitive detail');
+});
+
+it('routes personal translation to the selected official provider without exposing upstream secrets', async () => {
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(Response.json({ tgt_text: '保留 + & 及换行', apikey: 'test-key' }))
+    .mockResolvedValueOnce(
+      Response.json({ choices: [{ finish_reason: 'stop', message: { content: 'Translated' } }] }),
+    )
+    .mockResolvedValueOnce(Response.json({ error_code: '13001', error_msg: 'sensitive response test-key' }))
+    .mockResolvedValueOnce(Response.json({ error: 'sensitive response test-key' }, { status: 401 }))
+    .mockResolvedValueOnce(Response.json({ error: 'sensitive response test-key' }, { status: 402 }))
+    .mockResolvedValueOnce(Response.json({ error: 'sensitive response test-key' }, { status: 429 }))
+    .mockResolvedValueOnce(Response.json({ error_code: '13008', error_msg: 'sensitive response test-key' }))
+    .mockResolvedValueOnce(Response.redirect('https://other.test', 307));
+  const { request, human } = await fixture(undefined, { fetch });
+  const alice = await human('alice');
+  expect((await request('/translation', 'GET', undefined, alice.cookie)).body).toEqual({ available: false });
+  const text = 'Preserve + & and\nnewlines';
+  const niutrans = { id: 'niutrans', apiKey: 'test-key' };
+  const deepseek = { id: 'deepseek', apiKey: 'test-key' };
+  const submit = (provider: unknown, targetLanguage = 'zh', cookie = alice.cookie) =>
+    request('/translation', 'POST', { text, targetLanguage, provider }, cookie);
+  expect((await submit(niutrans, 'zh', '')).status).toBe(401);
+  expect((await submit({ ...niutrans, endpoint: 'https://other.test' })).status).toBe(400);
+  expect((await submit({ ...niutrans, apiKey: 'test\nkey' })).status).toBe(400);
+  expect((await submit({ ...deepseek, model: 'unlisted' })).status).toBe(400);
+  expect(fetch).not.toHaveBeenCalled();
+
+  const n = await submit(niutrans);
+  expect(n.body).toEqual({ translatedText: '保留 + & 及换行' });
+  expect(n.headers['cache-control']).toBe('no-store');
+  const [niuUrl, niuInit] = fetch.mock.calls[0];
+  expect(String(niuUrl)).toBe('https://api.niutrans.com/NiuTransServer/translation');
+  expect(niuInit).toMatchObject({ method: 'POST', redirect: 'manual' });
+  expect(Object.fromEntries(new URLSearchParams(String(niuInit?.body)))).toEqual({
+    from: 'auto',
+    to: 'zh',
+    apikey: 'test-key',
+    src_text: text,
+  });
+
+  const d = await submit(deepseek, 'en');
+  expect(d.body).toEqual({ translatedText: 'Translated' });
+  const [dsUrl, dsInit] = fetch.mock.calls[1];
+  expect(String(dsUrl)).toBe('https://api.deepseek.com/chat/completions');
+  expect(dsInit).toMatchObject({ method: 'POST', redirect: 'manual' });
+  expect(new Headers(dsInit?.headers).get('authorization')).toBe('Bearer test-key');
+  expect(JSON.parse(String(dsInit?.body))).toMatchObject({
+    model: 'deepseek-flash',
+    thinking: { type: 'disabled' },
+    messages: [
+      { role: 'system', content: expect.stringContaining('into English') },
+      { role: 'user', content: text },
+    ],
+  });
+
+  expect((await submit(niutrans)).body.error).toBe('翻译服务未授权或额度不足，请检查 API Key 和账户额度。');
+  expect((await submit(deepseek)).body.error).toBe('API Key 无效，请检查翻译设置。');
+  expect((await submit(deepseek)).body.error).toBe('翻译服务余额或额度不足。');
+  expect((await submit(deepseek)).body.error).toBe('翻译服务请求过于频繁，请稍后重试。');
+  expect(await submit(niutrans)).toMatchObject({
+    status: 504,
+    body: { error: '翻译请求超时，请稍后重试。' },
+  });
+  expect((await submit(deepseek)).body.error).toBe('翻译服务暂不可用，请稍后重试');
+  expect(fetch).toHaveBeenCalledTimes(8);
+});
+
+it('shares translation limits across personal and site engines', async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async (endpoint) => {
+    if (String(endpoint).startsWith('https://api.niutrans.com')) return Response.json({ tgt_text: '译文' });
+    return Response.json({ translatedText: '译文' });
+  });
+  const { request, human } = await fixture(undefined, { fetch, site: {} });
+  const alice = await human('alice');
+  const selection = { text: 'Selected text', targetLanguage: 'zh' };
+  const personal = { ...selection, provider: { id: 'niutrans', apiKey: 'test-key' } };
+  for (let i = 0; i < 20; i++) {
+    const result = await request('/translation', 'POST', i % 2 ? selection : personal, alice.cookie);
+    expect(result.status).toBe(200);
+  }
+  const limited = await request('/translation', 'POST', personal, alice.cookie);
+  expect(limited.status).toBe(429);
+  expect(fetch).toHaveBeenCalledTimes(20);
 });
 
 it('registers real human accounts, restores sessions, persists profile and enforces login/logout', async () => {

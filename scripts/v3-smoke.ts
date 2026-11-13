@@ -10,6 +10,7 @@ import {
   selectionTranslationFixture,
   verifyOnDeviceSelectionTranslation,
 } from './lib/selection-translation-smoke.js';
+import { customTranslationFixture, verifyTranslationSettings } from './lib/translation-settings-smoke.js';
 import sharp from 'sharp';
 const report: any = { fixture: true, checks: {}, errors: [], physicalPhone: false };
 const browser = await chromium.launch({
@@ -530,6 +531,13 @@ try {
   native.response = previousResponse;
   await page.setViewportSize({ width: 390, height: 844 });
   report.checks.desktopPendingMessageScroll = true;
+
+  fixtureItems.push({ type: 'agentMessage', id: 'custom-translation-fixture', text: customTranslationFixture });
+  native.revision++;
+  native.snapshot();
+  await expect(page.getByText(customTranslationFixture, { exact: true })).toBeAttached();
+  await verifyTranslationSettings(page, page.url(), '.test-output/v3');
+  report.checks.translationSettings = true;
 
   report.checks.noUncaughtErrors = report.errors.length === 0;
   report.passed = Object.values(report.checks).every(Boolean);

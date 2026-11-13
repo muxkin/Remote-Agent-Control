@@ -70,10 +70,25 @@ beforeAll(async () => {
       r2Buckets: ['IM_MEDIA'],
       images: { binding: 'IMAGES' },
       outboundService: async (request: Request) => {
-        if (request.url !== 'https://translate.test/translate' || request.method !== 'POST')
-          return new Response(null, { status: 404 });
-        translationRequests.push(await request.json());
-        return Response.json({ translatedText: '测试译文' });
+        if (request.method !== 'POST') return new Response(null, { status: 404 });
+        switch (request.url) {
+          case 'https://translate.test/translate':
+            translationRequests.push(await request.json());
+            return Response.json({ translatedText: '测试译文' });
+          case 'https://api.niutrans.com/NiuTransServer/translation':
+            translationRequests.push(Object.fromEntries(new URLSearchParams(await request.text())));
+            return Response.json({ tgt_text: '小牛译文' });
+          case 'https://api.deepseek.com/chat/completions':
+            translationRequests.push({
+              authorization: request.headers.get('authorization'),
+              body: await request.json(),
+            });
+            return Response.json({
+              choices: [{ finish_reason: 'stop', message: { content: 'DeepSeek 译文' } }],
+            });
+          default:
+            return new Response(null, { status: 404 });
+        }
       },
       serviceBindings: {
         ASSETS: async (request) =>
@@ -249,7 +264,7 @@ it('uses the existing account, encrypted messaging, recovery and R2 attachment p
     .toBe('expired');
 });
 
-it('translates a signed-in user’s selection through the configured Worker provider', async () => {
+it('translates a signed-in user’s selection through site and personal Worker providers', async () => {
   const reader = session();
   await reader.account.register('translation-reader', 'Reader', 'strong-password-reader');
   expect(await reader.request('/translation')).toEqual({ available: true });
@@ -258,6 +273,37 @@ it('translates a signed-in user’s selection through the configured Worker prov
     await reader.request('/translation', 'POST', { text: ' Selected text ', targetLanguage: 'zh' }),
   ).toEqual({ translatedText: '测试译文' });
   expect(translationRequests).toEqual([{ q: 'Selected text', source: 'auto', target: 'zh', format: 'text' }]);
+  expect(
+    await reader.request('/translation', 'POST', {
+      text: 'Selected text',
+      targetLanguage: 'zh',
+      provider: { id: 'niutrans', apiKey: 'fixture-niu' },
+    }),
+  ).toEqual({ translatedText: '小牛译文' });
+  expect(translationRequests[1]).toEqual({
+    from: 'auto',
+    to: 'zh',
+    apikey: 'fixture-niu',
+    src_text: 'Selected text',
+  });
+  expect(
+    await reader.request('/translation', 'POST', {
+      text: 'Selected text',
+      targetLanguage: 'zh',
+      provider: { id: 'deepseek', apiKey: 'fixture-deepseek', model: 'deepseek-v4-pro' },
+    }),
+  ).toEqual({ translatedText: 'DeepSeek 译文' });
+  expect(translationRequests[2]).toMatchObject({
+    authorization: 'Bearer fixture-deepseek',
+    body: {
+      model: 'deepseek-v4-pro',
+      thinking: { type: 'disabled' },
+      messages: [
+        { role: 'system', content: expect.stringContaining('into Simplified Chinese') },
+        { role: 'user', content: 'Selected text' },
+      ],
+    },
+  });
 });
 
 it('processes avatars through the Images binding with authenticated download', async () => {

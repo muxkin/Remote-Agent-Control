@@ -2,6 +2,7 @@
 import { onMounted, onScopeDispose, ref, shallowRef, useId, watch } from 'vue';
 import { SELECTION_TRANSLATION_MAX_LENGTH } from '../shared/selection-translation';
 import { Icon } from './Icon';
+import { messaging, useMessaging } from './messaging/context';
 import {
   defaultTranslationTarget,
   externalTranslationUrl,
@@ -10,6 +11,31 @@ import {
   translationServiceAvailable,
   type TranslationTarget,
 } from './selection-translation-client';
+import {
+  hasTranslationApiKey,
+  readTranslationApiKey,
+  translationSettings,
+  type CloudTranslationEngine,
+} from './selection-translation-settings';
+
+defineEmits<{ settings: [] }>();
+
+type TranslationMethod = 'device' | 'site' | CloudTranslationEngine;
+const providerLabel = { niutrans: '小牛翻译', deepseek: 'DeepSeek' } as const;
+const methodLabel: Record<TranslationMethod, string> = {
+  device: '设备内翻译',
+  site: '站点翻译',
+  niutrans: '由小牛翻译提供技术支持',
+  deepseek: 'DeepSeek AI 翻译',
+};
+const accountState = useMessaging();
+
+function currentTranslationAccount() {
+  const { user } = accountState;
+  const { secrets } = messaging.account;
+  if (user?.kind === 'human' && messaging.account.user?.id === user.id && secrets)
+    return { id: user.id, secrets };
+}
 
 interface SelectionAnchor {
   text: string;
@@ -22,8 +48,9 @@ interface SelectionAnchor {
 
 type TranslationState =
   | { status: 'loading' }
-  | { status: 'fallback'; service: boolean; error?: string }
-  | { status: 'result'; text: string; method: 'device' | 'service' }
+  | { status: 'fallback'; site: boolean; error?: string }
+  | { status: 'cloud'; provider: CloudTranslationEngine; configured: boolean; error?: string }
+  | { status: 'result'; text: string; method: TranslationMethod }
   | { status: 'too-long' };
 
 const anchor = shallowRef<SelectionAnchor>();
@@ -45,6 +72,10 @@ let touchSelection = false;
 let previousFocus: Element | null = null;
 let sheetScroll: { element: HTMLElement; previousTop: number; appliedTop: number } | undefined;
 const highlightName = 'selection-translation';
+
+watch([() => translationSettings.value.engine, () => translationSettings.value.deepseekModel], () => {
+  if (activeSelection.value) close(false);
+});
 
 function sourceOf(node: Node | null) {
   const element = node instanceof Element ? node : node?.parentElement;
@@ -293,7 +324,7 @@ function open() {
   target.value = defaultTranslationTarget(selected.text);
   anchor.value = undefined;
   window.getSelection()?.removeAllRanges();
-  void runTranslation('device');
+  void prepareTranslation();
 }
 
 function onBackdrop(event: MouseEvent) {
@@ -302,7 +333,7 @@ function onBackdrop(event: MouseEvent) {
   if (event.clientX < left || event.clientX > right || event.clientY < top || event.clientY > bottom) close();
 }
 
-async function runTranslation(method: 'device' | 'service') {
+async function prepareTranslation() {
   request?.abort();
   copyStatus.value = '';
   const text = original.value;
@@ -310,36 +341,74 @@ async function runTranslation(method: 'device' | 'service') {
     translation.value = { status: 'too-long' };
     return;
   }
+  const { engine } = translationSettings.value;
+  if (engine === 'niutrans' || engine === 'deepseek') {
+    const account = currentTranslationAccount();
+    translation.value = {
+      status: 'cloud',
+      provider: engine,
+      configured: !!account && hasTranslationApiKey(account.id, engine),
+    };
+    return;
+  }
   const language = target.value;
   const { signal } = (request = new AbortController());
   translation.value = { status: 'loading' };
-  if (method === 'service') {
+  if (engine !== 'site') {
     try {
-      const result = await translateWithService(text, language, signal);
-      if (!signal.aborted) translation.value = { status: 'result', text: result, method };
+      const result = await translateOnDevice(text, language, signal);
+      if (signal.aborted) return;
+      if (result) {
+        translation.value = { status: 'result', text: result, method: 'device' };
+        return;
+      }
     } catch {
-      if (!signal.aborted)
-        translation.value = { status: 'fallback', service: true, error: '站点翻译暂时失败，请重试。' };
+      if (signal.aborted) return;
     }
-    return;
   }
+  const site = engine !== 'device' && (await translationServiceAvailable(signal).catch(() => false));
+  if (!signal.aborted)
+    translation.value = {
+      status: 'fallback',
+      site,
+      ...(engine === 'site' && !site && { error: '站点翻译暂不可用。' }),
+    };
+}
+
+async function runCloudTranslation(method: 'site' | CloudTranslationEngine) {
+  request?.abort();
+  const { signal } = (request = new AbortController());
+  const text = original.value;
+  const language = target.value;
+  const model = translationSettings.value.deepseekModel;
+  const previous = translation.value;
+  translation.value = { status: 'loading' };
   try {
-    const result = await translateOnDevice(text, language, signal);
-    if (signal.aborted) return;
-    if (result) {
-      translation.value = { status: 'result', text: result, method };
-      return;
+    let provider;
+    if (method !== 'site') {
+      const account = currentTranslationAccount();
+      if (!account) throw Error('请先登录个人账户。');
+      const apiKey = await readTranslationApiKey(account, method);
+      signal.throwIfAborted();
+      if (!apiKey) throw Error('请先在设置中保存 API Key。');
+      provider =
+        method === 'deepseek' ? ({ id: method, apiKey, model } as const) : ({ id: method, apiKey } as const);
     }
-  } catch {
+    const result = await translateWithService(text, language, signal, provider);
+    if (!signal.aborted) translation.value = { status: 'result', text: result, method };
+  } catch (error) {
     if (signal.aborted) return;
+    const message = error instanceof Error ? error.message : '翻译失败，请重试。';
+    translation.value =
+      previous.status === 'cloud'
+        ? { ...previous, error: message }
+        : { status: 'fallback', site: true, error: message };
   }
-  const service = await translationServiceAvailable(signal).catch(() => false);
-  if (!signal.aborted) translation.value = { status: 'fallback', service };
 }
 
 function changeTarget(event: Event) {
   target.value = (event.target as HTMLSelectElement).value as TranslationTarget;
-  void runTranslation('device');
+  void prepareTranslation();
 }
 
 async function copyTranslation() {
@@ -424,7 +493,7 @@ async function copyTranslation() {
             <footer class="selection-translation-footer">
               <span class="selection-translation-source">
                 <Icon :name="translation.method === 'device' ? 'shield' : 'globe'" :size="16" />
-                {{ translation.method === 'device' ? '设备内翻译' : '站点翻译' }}
+                {{ methodLabel[translation.method] }}
               </span>
               <button
                 type="button"
@@ -445,13 +514,40 @@ async function copyTranslation() {
               </span>
             </footer>
           </template>
+          <template v-else-if="translation.status === 'cloud'">
+            <div class="selection-translation-fallback">
+              <p v-if="translation.error" role="alert">{{ translation.error }}</p>
+              <p v-else-if="!translation.configured">
+                请登录并在设置中保存 {{ providerLabel[translation.provider] }} 的 API Key。
+              </p>
+              <p v-else>使用 {{ providerLabel[translation.provider] }} 翻译</p>
+              <p v-if="translation.configured" class="hint">
+                继续后，所选原文会发送给 {{ providerLabel[translation.provider] }}。
+              </p>
+            </div>
+            <div class="selection-translation-fallback-actions">
+              <button
+                v-if="translation.configured"
+                type="button"
+                class="selection-translation-action"
+                @click="runCloudTranslation(translation.provider)"
+              >
+                使用 {{ providerLabel[translation.provider] }} 翻译
+              </button>
+              <button v-else type="button" class="selection-translation-action" @click="$emit('settings')">
+                打开翻译设置
+              </button>
+            </div>
+          </template>
           <template v-else>
             <div class="selection-translation-fallback">
               <p v-if="translation.error" role="alert">{{ translation.error }}</p>
-              <p v-else role="status">设备内翻译暂不可用</p>
+              <p v-else role="status">
+                {{ translationSettings.engine === 'site' ? '使用站点翻译' : '设备内翻译暂不可用' }}
+              </p>
               <p class="hint">
                 {{
-                  translation.service
+                  translation.site
                     ? '使用站点翻译或打开 Google 翻译会将原文发送给相应的服务。'
                     : '打开 Google 翻译会将原文发送给 Google。'
                 }}
@@ -459,10 +555,10 @@ async function copyTranslation() {
             </div>
             <div class="selection-translation-fallback-actions">
               <button
-                v-if="translation.service"
+                v-if="translation.site"
                 type="button"
                 class="selection-translation-action"
-                @click="runTranslation('service')"
+                @click="runCloudTranslation('site')"
               >
                 使用站点翻译
               </button>

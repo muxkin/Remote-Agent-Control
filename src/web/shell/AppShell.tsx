@@ -8,6 +8,7 @@ import { deviceSession } from '../device-session';
 import type { PairedHost } from '../sync-store';
 import { Icon } from '../Icon';
 import SelectionTranslation from '../SelectionTranslation.vue';
+import { translationSettings } from '../selection-translation-settings';
 import { modules, workspaceTools } from './modules';
 import { backTo, parentRoute, readRoute, routeURL, type AppRoute } from './routes';
 import { useAppViewport } from './viewport';
@@ -366,9 +367,14 @@ export const AppShell = tsxComponent(function AppShell() {
                   </p>
                 )}
               </div>
-              {ready && (showWorkspace || (route.page === 'messages' && route.conversation)) && (
-                <SelectionTranslation key={JSON.stringify([accountId, hostId, routeURL(route)])} />
-              )}
+              {ready &&
+                translationSettings.value.enabled &&
+                (showWorkspace || (route.page === 'messages' && route.conversation)) && (
+                  <SelectionTranslation
+                    key={JSON.stringify([accountId, hostId, routeURL(route)])}
+                    onSettings={() => navigate({ page: 'translation' })}
+                  />
+                )}
               {showNavigation && (
                 <nav class="bottom-navigation" aria-label="主要功能">
                   <button

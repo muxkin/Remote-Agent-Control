@@ -1,0 +1,365 @@
+.translation-settings {
+  --translation-setting-line: color-mix(in srgb, var(--outline) 32%, var(--line));
+  --translation-setting-tint: color-mix(in srgb, var(--soft) 58%, var(--surface));
+  display: grid;
+  gap: 24px;
+  width: min(740px, calc(100% - 2 * var(--ui-gutter, 24px)));
+  margin: 0 auto;
+  padding: 12px 0 20px;
+}
+
+.translation-settings-intro {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.translation-settings-intro > div {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.translation-settings-intro h2 {
+  font-size: clamp(23px, 3vw, 31px);
+  line-height: 1.2;
+}
+
+.translation-settings-intro p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.translation-settings-icon {
+  display: grid;
+  flex: none;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--translation-setting-tint);
+  color: var(--accent);
+}
+
+.translation-settings-intro .translation-settings-icon {
+  width: 54px;
+  height: 54px;
+  border-radius: 14px;
+  background: var(--soft);
+}
+
+.translation-settings-toggle,
+.translation-settings-list,
+.translation-settings-config {
+  margin: 0;
+  border: 1px solid var(--translation-setting-line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+}
+
+.translation-settings-toggle,
+.translation-settings-list > label {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  padding: 10px 16px;
+  min-height: 58px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.translation-settings-toggle {
+  min-height: 72px;
+}
+
+.translation-settings-copy {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.translation-settings-copy strong {
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.translation-settings-copy small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.translation-settings-engines {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.translation-settings-engines legend {
+  margin-bottom: 10px;
+  padding: 0;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.translation-settings-list > label + label {
+  border-top: 1px solid var(--line);
+}
+
+.translation-settings-list > label:first-child {
+  border-radius: 11px 11px 0 0;
+}
+
+.translation-settings-list > label:last-child {
+  border-radius: 0 0 11px 11px;
+}
+
+.translation-settings-list > label[data-selected='true'] {
+  background: color-mix(in srgb, var(--soft) 38%, var(--surface-raised));
+}
+
+.translation-settings :is(input[type='checkbox'], input[type='radio']) {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.translation-settings input[type='radio'] {
+  width: 20px;
+  height: 20px;
+}
+
+.translation-settings input[role='switch'] {
+  position: relative;
+  appearance: none;
+  width: 48px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--outline);
+  border-radius: 99px;
+  background: var(--surface-active);
+}
+
+.translation-settings input[role='switch']:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.translation-settings input[role='switch']::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--outline);
+  content: '';
+}
+
+.translation-settings input[role='switch']:checked::after {
+  left: 23px;
+  background: var(--on-accent);
+}
+
+.translation-settings-form {
+  display: grid;
+  gap: 14px;
+}
+
+.translation-settings-config {
+  display: grid;
+  gap: 14px;
+  padding: 15px 16px;
+}
+
+.translation-settings-config header,
+.translation-settings-login {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.translation-settings-config h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.translation-settings-config .translation-settings-saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.translation-settings-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.translation-settings-fields.has-model {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+}
+
+.translation-settings-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.translation-settings-field label {
+  margin: 0;
+  font-size: 13px;
+}
+
+.translation-settings-password,
+.translation-settings-select {
+  position: relative;
+  display: block;
+}
+
+.translation-settings-fields :is(input, select) {
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 44px 9px 10px;
+  border: 1px solid var(--translation-setting-line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-weight: 400;
+}
+
+.translation-settings-fields select {
+  appearance: none;
+}
+
+.translation-settings-password button,
+.translation-settings-select > svg {
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.translation-settings-password button {
+  display: grid;
+  width: 44px;
+  height: 100%;
+  place-items: center;
+  color: var(--muted);
+}
+
+.translation-settings-select > svg {
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.translation-settings-privacy,
+.translation-settings-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  color: var(--on-soft);
+  background: var(--translation-setting-tint);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.translation-settings-privacy svg {
+  flex: none;
+  color: var(--accent);
+}
+
+.translation-settings-attribution,
+.translation-settings-login p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.translation-settings-login p {
+  margin-top: 5px;
+}
+
+.translation-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px 12px;
+}
+
+.translation-settings-actions button,
+.translation-settings-login button {
+  min-height: 44px;
+  padding-inline: 18px;
+  border-radius: 9px;
+}
+
+.translation-settings-actions .secondary {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+}
+
+.translation-settings-remove {
+  margin-inline-end: auto;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.translation-settings-notice.is-error {
+  color: var(--on-danger-soft);
+  background: var(--danger-soft);
+}
+
+@media (max-width: 700px) {
+  .translation-settings {
+    gap: 18px;
+    padding-top: 8px;
+  }
+
+  .translation-settings-intro .translation-settings-icon {
+    width: 46px;
+    height: 46px;
+  }
+
+  .translation-settings-toggle,
+  .translation-settings-list > label {
+    gap: 10px;
+    padding: 8px 12px;
+  }
+
+  .translation-settings-toggle {
+    min-height: 64px;
+  }
+
+  .translation-settings-icon {
+    width: 37px;
+    height: 37px;
+  }
+
+  .translation-settings-fields.has-model {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .translation-settings-actions {
+    flex-direction: column;
+  }
+
+  .translation-settings-remove {
+    order: 1;
+    margin-inline-end: 0;
+  }
+}

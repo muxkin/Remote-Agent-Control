@@ -27,11 +27,12 @@ export class HttpMessagingClient implements MessagingClient {
     private readonly token?: string,
   ) {}
   async request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+    const timeout = AbortSignal.timeout(
+      path.startsWith('/sync?') ? 35000 : path === '/translation' && method === 'POST' ? 25000 : 15000,
+    );
     const response = await fetch(`${this.baseURL}/api/im${path}`, {
       method,
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(path.startsWith('/sync?') ? 35000 : 15000)])
-        : AbortSignal.timeout(path.startsWith('/sync?') ? 35000 : 15000),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       credentials: 'same-origin',
       cache: 'no-store',
       headers: {

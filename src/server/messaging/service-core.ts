@@ -19,7 +19,12 @@ import {
   SELECTION_TRANSLATION_LANGUAGES,
   SELECTION_TRANSLATION_MAX_LENGTH,
 } from '../../shared/selection-translation.js';
-import type { SelectionTranslator } from './translation.js';
+import {
+  selectionTranslationProviderInput,
+  translateWithPersonalProvider,
+  TranslationProviderError,
+  type SelectionTranslator,
+} from './translation.js';
 
 const username = z
   .string()
@@ -171,10 +176,9 @@ export async function registerMessaging(app: MessagingHttp, config: MessagingCon
     human(req);
     return { available: !!translate };
   });
-  app.post('/translation', { bodyLimit: 12 * 1024 }, async (req) => {
+  app.post('/translation', { bodyLimit: 16 * 1024 }, async (req) => {
     const user = human(req);
-    if (!translate) throw new ChatError(503, '站内翻译服务尚未配置');
-    const { text, targetLanguage } = z
+    const { text, targetLanguage, provider } = z
       .object({
         text: z
           .string()
@@ -182,12 +186,19 @@ export async function registerMessaging(app: MessagingHttp, config: MessagingCon
           .trim()
           .min(1, '请选择要翻译的文字'),
         targetLanguage: z.enum(SELECTION_TRANSLATION_LANGUAGES),
+        provider: selectionTranslationProviderInput.optional(),
       })
       .parse(req.body);
+    if (!provider && !translate) throw new ChatError(503, '站内翻译服务尚未配置');
     take(`translation:${user.id}`, 20);
     try {
-      return { translatedText: await translate(text, targetLanguage) };
-    } catch {
+      const translatedText = provider
+        ? await translateWithPersonalProvider(provider, text, targetLanguage)
+        : await translate!(text, targetLanguage);
+      return { translatedText };
+    } catch (error) {
+      if (error instanceof TranslationProviderError)
+        throw new ChatError(error.reason === 'timeout' ? 504 : 502, error.message);
       throw new ChatError(502, '翻译服务暂不可用，请稍后重试');
     }
   });

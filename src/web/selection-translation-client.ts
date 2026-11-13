@@ -1,5 +1,8 @@
-import { HttpMessagingClient } from '../client/messaging';
-import type { SelectionTranslationLanguage } from '../shared/selection-translation';
+import { HttpMessagingClient, MessagingError } from '../client/messaging';
+import type {
+  SelectionTranslationLanguage,
+  SelectionTranslationProvider,
+} from '../shared/selection-translation';
 
 export type TranslationTarget = SelectionTranslationLanguage;
 
@@ -118,20 +121,25 @@ export async function translateWithService(
   text: string,
   targetLanguage: TranslationTarget,
   signal: AbortSignal,
+  provider?: SelectionTranslationProvider,
 ): Promise<string> {
   signal.throwIfAborted();
   try {
     const result = await translationClient.request<{ translatedText?: unknown }>(
       '/translation',
       'POST',
-      { text, targetLanguage },
+      { text, targetLanguage, ...(provider && { provider }) },
       signal,
     );
     signal.throwIfAborted();
     if (typeof result?.translatedText === 'string' && result.translatedText.trim())
       return result.translatedText;
-  } catch {
+  } catch (error) {
     signal.throwIfAborted();
+    if (error instanceof MessagingError) {
+      if (error.status === 401 || error.status === 403) throw Error('请先登录个人账户。');
+      throw Error(error.message);
+    }
   }
   throw Error('翻译服务暂不可用，请稍后重试。');
 }

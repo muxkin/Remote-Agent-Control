@@ -5,6 +5,7 @@ export type AppPage =
   | 'me'
   | 'settings'
   | 'appearance'
+  | 'translation'
   | 'devices'
   | 'integrations'
   | 'profile'
@@ -27,6 +28,7 @@ const pages: AppPage[] = [
   'me',
   'settings',
   'appearance',
+  'translation',
   'devices',
   'integrations',
   'profile',
@@ -78,6 +80,7 @@ export function parentRoute(route: AppRoute): AppRoute {
       ...(route.backend && route.thread ? { backend: route.backend, host: route.host } : {}),
     };
   if (route.page === 'pair') return { page: 'devices' };
-  if (route.page === 'about' || route.page === 'appearance') return { page: 'settings' };
+  if (route.page === 'about' || route.page === 'appearance' || route.page === 'translation')
+    return { page: 'settings' };
   return { page: 'me' };
 }

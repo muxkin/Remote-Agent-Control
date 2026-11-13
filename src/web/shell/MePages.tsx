@@ -8,10 +8,12 @@ import { Avatar } from '../messaging/ui';
 import { deviceSession } from '../device-session';
 import { Icon } from '../Icon';
 import { PageHeader } from './PageHeader';
+import { translationSettings } from '../selection-translation-settings';
 import type { AppRoute } from './routes';
 const DownloadsPage = lazy(() => import('./DownloadsPage.vue'));
 const DonationPage = lazy(() => import('./DonationPage.vue'));
 const AppearanceSettings = lazy(() => import('../theme/AppearanceSettings.vue'));
+const TranslationSettings = lazy(() => import('../TranslationSettings.vue'));
 
 const Row = tsxComponent(function Row(_props: {
   icon: IconName;
@@ -78,6 +80,7 @@ export default tsxComponent(function MePages(_props: {
       me: '我的',
       settings: '设置',
       appearance: '外观',
+      translation: '划词翻译',
       devices: '我的设备',
       integrations: 'Agent 接入',
       profile: '个人资料',
@@ -134,6 +137,12 @@ export default tsxComponent(function MePages(_props: {
                 onClick={() => navigate({ page: 'appearance' })}
               />
               <Row
+                icon="translate"
+                title="划词翻译"
+                detail={translationSettings.value.enabled ? '已开启' : '已关闭'}
+                onClick={() => navigate({ page: 'translation' })}
+              />
+              <Row
                 icon="trash"
                 title={working ? '正在清理…' : '清理缓存'}
                 detail={usage}
@@ -183,6 +192,14 @@ export default tsxComponent(function MePages(_props: {
                   <AppearanceSettings />
                 </>
               ),
+            }}
+          </Suspense>
+        )}
+        {route.page === 'translation' && (
+          <Suspense timeout={0}>
+            {{
+              fallback: () => <div class="page-loading">正在打开翻译设置…</div>,
+              default: () => <TranslationSettings onLogin={() => navigate({ page: 'profile' })} />,
             }}
           </Suspense>
         )}
