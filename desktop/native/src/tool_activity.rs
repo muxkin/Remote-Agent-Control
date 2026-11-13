@@ -31,6 +31,80 @@ fn command(item: &Value, limit: usize) -> String {
     excerpt(&command, limit)
 }
 
+pub fn turn_timing(turn_id: &str, started_at: Option<u64>, duration: Option<u64>) -> Option<Value> {
+    let (text, metadata) = if let Some(duration) = duration {
+        (
+            "本轮用时",
+            json!({"kind":"turn-timing","state":"completed","durationMs":duration}),
+        )
+    } else {
+        let started_at = started_at.filter(|value| *value >= 1_000_000_000)?;
+        let milliseconds = if started_at < 100_000_000_000 {
+            started_at * 1000
+        } else {
+            started_at
+        };
+        (
+            "正在工作",
+            json!({"kind":"turn-timing","state":"running","startedAt":milliseconds}),
+        )
+    };
+    Some(json!({
+        "id":format!("{turn_id}:timing"),"role":"tool","text":text,
+        "turnId":turn_id,"codex":metadata,
+    }))
+}
+
+pub fn timeline_event(item: &Value, fallback_id: &str, turn_id: Option<&str>) -> Option<Value> {
+    let (text, codex) = match item["type"].as_str()? {
+        "contextCompaction" | "ContextCompaction" => {
+            let (state, text) = match item["status"].as_str() {
+                Some("inProgress" | "in_progress" | "running") => ("running", "正在压缩上下文"),
+                Some("failed") => ("failed", "上下文压缩失败"),
+                _ => ("completed", "已压缩上下文"),
+            };
+            let mut metadata = json!({"kind":"compaction","state":state});
+            if item["trigger"] == "automatic" || item["trigger"] == "auto" {
+                metadata["automatic"] = json!(true);
+            }
+            (text, metadata)
+        }
+        "subAgentActivity" | "SubAgentActivity" => {
+            let (state, text) = match item["kind"].as_str()? {
+                "started" => ("started", "子 Agent 开始工作"),
+                "completed" => ("completed", "子 Agent 已完成"),
+                "interrupted" => ("interrupted", "子 Agent 已中断"),
+                "failed" => ("failed", "子 Agent 执行失败"),
+                _ => return None,
+            };
+            let agent_path = item["agentPath"]
+                .as_str()
+                .or_else(|| item["agent_path"].as_str());
+            let agent_id = item["agentThreadId"]
+                .as_str()
+                .or_else(|| item["agent_thread_id"].as_str())
+                .or(agent_path)?;
+            let name = item["agentNickname"]
+                .as_str()
+                .or_else(|| item["agent_nickname"].as_str())
+                .or_else(|| {
+                    agent_path.and_then(|path| path.trim_end_matches('/').rsplit('/').next())
+                })
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("子 Agent");
+            (
+                text,
+                json!({"kind":"subagent","state":state,"agentId":excerpt(agent_id, 160),"name":excerpt(name, 160)}),
+            )
+        }
+        _ => return None,
+    };
+    Some(json!({
+        "id":item["id"].as_str().unwrap_or(fallback_id),"role":"tool","text":text,
+        "turnId":turn_id,"codex":codex,
+    }))
+}
+
 pub fn summary(item: &Value) -> Option<String> {
     let label = match item["type"].as_str()? {
         "commandExecution" | "CommandExecution" => {

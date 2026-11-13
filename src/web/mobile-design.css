@@ -825,3 +825,59 @@ textarea:focus {
     max-width: 100%;
   }
 }
+
+.transcript-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 14px 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.transcript-notice.turn-timing {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.transcript-notice > svg,
+.subagent-icons {
+  flex: none;
+}
+.subagent-icons {
+  display: inline-flex;
+  gap: 4px;
+}
+.subagent-icon {
+  display: grid;
+  place-items: center;
+  width: 21px;
+  height: 21px;
+  border-radius: 7px;
+  color: light-dark(#6442a1, #c8a9ff);
+  background: color-mix(in srgb, currentColor 15%, transparent);
+}
+.subagent-icon-1 {
+  color: light-dark(#a43665, #ffaacb);
+}
+.subagent-icon-2 {
+  color: light-dark(#a3472e, #ffae98);
+}
+.subagent-icon-3 {
+  color: light-dark(#216e6a, #84dbcf);
+}
+.activity-group.activity-group-inline {
+  margin: 12px 0;
+  background: transparent;
+}
+.activity-group.activity-group-inline > summary {
+  min-height: 36px;
+  padding: 5px 0;
+  gap: 9px;
+  color: var(--muted);
+  justify-content: flex-start;
+}
+.activity-group.activity-group-inline > summary span {
+  flex: none;
+}

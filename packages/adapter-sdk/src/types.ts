@@ -4,7 +4,17 @@ export interface MemoryCitationEntry {
   lineEnd: number;
   note: string;
 }
-export type CodexMessageMetadata = { kind: 'memory'; entries: MemoryCitationEntry[] };
+export type CodexActivity =
+  | { kind: 'turn-timing'; state: 'running'; startedAt: number }
+  | { kind: 'turn-timing'; state: 'completed'; durationMs: number }
+  | { kind: 'compaction'; state: 'running' | 'completed' | 'failed'; automatic?: true }
+  | {
+      kind: 'subagent';
+      state: 'started' | 'completed' | 'interrupted' | 'failed';
+      agentId: string;
+      name: string;
+    };
+export type CodexMessageMetadata = { kind: 'memory'; entries: MemoryCitationEntry[] } | CodexActivity;
 
 export interface Message {
   id: string;

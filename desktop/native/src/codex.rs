@@ -505,11 +505,24 @@ fn read_thread(row: &Row<'_>, names: &HashMap<String, String>) -> rusqlite::Resu
 fn rollout_message(line: &[u8], thread: &str, offset: u64, full: bool) -> Option<Value> {
     let record: Value = serde_json::from_slice(line).ok()?;
     let message = &record["payload"];
+    if record["type"] == "event_msg" && message["type"] == "task_complete" {
+        return crate::tool_activity::turn_timing(
+            message["turn_id"].as_str()?,
+            None,
+            Some(message["duration_ms"].as_u64()?),
+        );
+    }
     if record["type"] == "event_msg"
         && message["type"] == "item_completed"
         && message["thread_id"] == thread
     {
         let item = &message["item"];
+        let id = format!("rollout-{offset}");
+        if let Some(event) =
+            crate::tool_activity::timeline_event(item, &id, message["turn_id"].as_str())
+        {
+            return Some(event);
+        }
         let text = crate::tool_activity::summary(item)?;
         let mut projected = json!({
             "id":format!("rollout-{offset}"),"role":"tool","text":text,"turnId":message["turn_id"],

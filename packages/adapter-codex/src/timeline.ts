@@ -1,3 +1,4 @@
+import { timelineEvent, turnTiming } from './timeline-events.js';
 import { codexPermissionState } from './codex-permissions.js';
 import { userAttachments } from './user-content.js';
 import { asyncRequests, asyncQuestionRequest, userMessageText } from './async-questions.js';
@@ -75,6 +76,7 @@ export function requestsOf(state: Json): ConversationRequest[] {
 export function messagesOf(state: Json, full = false): Message[] {
   const messages: Message[] = [];
   for (const turn of turnsOf(state)) {
+    const turnStart = messages.length;
     const turnId = turn.turnId ?? turn.id;
     const items = orderedEntities(turn.items);
     let finalReply: Message | undefined;
@@ -99,7 +101,12 @@ export function messagesOf(state: Json, full = false): Message[] {
     }
     for (const [index, item] of items.entries()) {
       const type = item.type;
-      if (type === 'reasoning') continue;
+      if (type === 'reasoning' || (type === 'subAgentActivity' && item.kind === 'interacted')) continue;
+      const event = timelineEvent(item, `${turnId}:${index}`, turnId);
+      if (event) {
+        messages.push(event);
+        continue;
+      }
       const media = itemMedia(item);
       const user = type === 'userMessage' || type === 'steeringUserMessage';
       for (const [number, source] of (user ? [] : media).entries())
@@ -201,6 +208,15 @@ export function messagesOf(state: Json, full = false): Message[] {
     }
     if (finalReply && turn.status === 'completed' && typeof turnId === 'string')
       finalReply.turnBoundary = true;
+    if (typeof turnId === 'string') {
+      const timing = turn.status === 'inProgress'
+        ? turnTiming(turnId, turn.startedAt)
+        : turnTiming(turnId, undefined, turn.durationMs);
+      if (timing) {
+        const firstOutput = messages.slice(turnStart).findIndex((message) => message.role !== 'user');
+        messages.splice(firstOutput < 0 ? messages.length : turnStart + firstOutput, 0, timing);
+      }
+    }
   }
   return messages.slice(-500).map((message) => {
     if (full || (message.text.length <= 100000 && (message.details?.length ?? 0) <= 100000)) return message;

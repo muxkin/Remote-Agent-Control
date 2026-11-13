@@ -1,3 +1,4 @@
+import { timelineEvent, turnTiming } from './timeline-events.js';
 import { userAttachments } from './user-content.js';
 import { userMessageText } from './async-questions.js';
 import { DatabaseSync } from 'node:sqlite';
@@ -27,7 +28,7 @@ class RolloutPageMessages {
   reply = -1;
   leadingEnd?: TurnEnd;
   private sawTurnContent = false;
-  constructor(readonly messages: Message[] = []) {}
+  constructor(readonly threadId: string, readonly messages: Message[] = []) {}
   complete(end: TurnEnd) {
     const candidate = this.messages[this.reply];
     if (
@@ -56,7 +57,7 @@ class RolloutPageMessages {
         this.reply = -1;
       }
     }
-    const message = rolloutMessage(record, fallbackId);
+    const message = rolloutMessage(record, fallbackId, this.threadId);
     if (!message) return;
     if (message.role !== 'tool') this.sawTurnContent = true;
     if (message.role === 'user') this.reply = -1;
@@ -225,7 +226,7 @@ export class HistoryIndex {
         info.size >= cached.size &&
         info.size - cached.start <= 2 * PAGE_BYTES
       ) {
-        const projection = new RolloutPageMessages([...cached.page.messages]);
+        const projection = new RolloutPageMessages(id, [...cached.page.messages]);
         projection.reply = cached.reply;
         const result = await cached.tail.read(file, (record, offset) => {
           projection.append(record, `${id}:${offset}`);
@@ -274,7 +275,7 @@ export class HistoryIndex {
         start = Math.max(0, start - PAGE_BYTES);
       }
       const nextEnd = start + begin;
-      const projection = new RolloutPageMessages();
+      const projection = new RolloutPageMessages(id);
       let offset = nextEnd;
       const completeEnd = bytes.lastIndexOf(10) + 1;
       for (const line of bytes.subarray(begin, completeEnd).toString('utf8').split('\n')) {
@@ -408,7 +409,12 @@ export class HistoryIndex {
   }
 }
 
-export function rolloutMessage(record: any, fallbackId: string): Message | null {
+export function rolloutMessage(record: any, fallbackId: string, threadId?: string): Message | null {
+  const event = record.payload;
+  if (threadId && record.type === 'event_msg' && event?.type === 'task_complete' && typeof event.turn_id === 'string')
+    return turnTiming(event.turn_id, undefined, event.duration_ms);
+  if (threadId && record.type === 'event_msg' && event?.type === 'item_completed' && event.thread_id === threadId)
+    return timelineEvent(event.item, fallbackId, event.turn_id);
   let item = record.type === 'response_item' ? record.payload : null;
   if (!item) return null;
   const kinds = item.internal_chat_message_metadata_passthrough?.content_item_kinds;

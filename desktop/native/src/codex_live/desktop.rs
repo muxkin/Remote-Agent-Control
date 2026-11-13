@@ -877,6 +877,7 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
         let Some(turn_id) = turn["turnId"].as_str().or_else(|| turn["id"].as_str()) else {
             continue;
         };
+        let turn_start = messages.len();
         let items = ordered(&turn["items"]);
         let request = turn["params"]["clientUserMessageId"].as_str();
         turns.push(Turn {
@@ -910,6 +911,12 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
         let mut final_reply = None;
         for (index, item) in items.into_iter().enumerate() {
             let kind = item["type"].as_str().unwrap_or_default();
+            if let Some(event) =
+                tool_activity::timeline_event(item, &format!("{turn_id}:{index}"), Some(turn_id))
+            {
+                messages.push((event, None));
+                continue;
+            }
             let media = history_media::media(item);
             let summary = tool_activity::summary(item);
             let is_activity = summary.is_some();
@@ -970,6 +977,16 @@ fn project(id: Uuid, state: &Value, revision: u64, epoch: Uuid) -> View {
             && active != Some(turn_id)
         {
             messages[index].0["turnBoundary"] = json!(true);
+        }
+        let running = active == Some(turn_id);
+        let started = running.then(|| turn["startedAt"].as_u64()).flatten();
+        let duration = (!running).then(|| turn["durationMs"].as_u64()).flatten();
+        if let Some(timing) = tool_activity::turn_timing(turn_id, started, duration) {
+            let index = messages[turn_start..]
+                .iter()
+                .position(|(message, _)| message["role"] != "user")
+                .map_or(messages.len(), |index| turn_start + index);
+            messages.insert(index, (timing, None));
         }
     }
     let mut seen = HashSet::new();

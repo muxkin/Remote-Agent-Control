@@ -275,6 +275,12 @@ await writeFile(
       [
         legacyRecord,
         historicalTool,
+        activityEvent({ type: 'ContextCompaction', id: 'history-compaction', summary: 'fixture-private-summary' }),
+        activityEvent({
+          type: 'SubAgentActivity', id: 'history-agent', kind: 'completed',
+          agent_thread_id: 'fixture-agent', agent_path: '/验证',
+        }),
+        { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'historical-turn', duration_ms: 1056000 } },
         generatedEvent,
         foreignGeneratedEvent,
         ...imageCall(
@@ -548,7 +554,10 @@ async function desktopFixture(id = 'default', initialTitle = '测试会话', ren
       {
         turnId: 'earlier-turn',
         status: 'completed',
+        durationMs: 1056000,
         items: [
+          { id: 'live-compaction', type: 'contextCompaction', status: 'inProgress' },
+          { id: 'live-agent', type: 'subAgentActivity', kind: 'started', agentThreadId: 'fixture-agent', agentPath: '/验证' },
           { id: 'earlier-progress', type: 'agentMessage', phase: 'commentary', text: 'Preparing response' },
           { id: 'earlier-message', type: 'agentMessage', phase: 'final_answer', text: 'earlier response '.repeat(1000) },
           {
@@ -893,6 +902,15 @@ async function testLive(
     await wait(() => view?.synchronized && view?.canSend);
     assert.equal(update.changed.find((message: any) => message.id === 'earlier-message').turnBoundary, true);
     assert.equal(update.changed.find((message: any) => message.id === 'earlier-progress').turnBoundary, undefined);
+    assert.deepEqual(update.changed.find((message: any) => message.id === 'earlier-turn:timing').codex, {
+      kind: 'turn-timing', state: 'completed', durationMs: 1056000,
+    });
+    assert.deepEqual(update.changed.find((message: any) => message.id === 'live-compaction').codex, {
+      kind: 'compaction', state: 'running',
+    });
+    assert.deepEqual(update.changed.find((message: any) => message.id === 'live-agent').codex, {
+      kind: 'subagent', state: 'started', agentId: 'fixture-agent', name: '验证',
+    });
     const full = await session.rpc<{ message: { text: string; truncated: boolean } }>(
       apiCall(`/threads/${THREAD}/content?messageId=earlier-message`),
     );
@@ -2024,6 +2042,7 @@ try {
       messages: {
         id: string;
         text: string;
+        codex?: unknown;
         deferred?: boolean;
         truncated: boolean;
         attachments: { path: string }[];
@@ -2032,9 +2051,19 @@ try {
     assert.deepEqual(history.messages.map(({ text }) => text).filter(Boolean), [
       '历史消息',
       '命令 · printf historical tool · completed',
+      '已压缩上下文',
+      '子 Agent 已完成',
+      '本轮用时',
       Buffer.from(historicalReply).subarray(0, 12_000).toString(),
     ]);
     assert.equal(history.messages[0].attachments[0].path, legacyPath);
+    assert.deepEqual(history.messages.find((message) => message.id === 'history-compaction')?.codex, {
+      kind: 'compaction', state: 'completed',
+    });
+    assert.deepEqual(history.messages.find((message) => message.id === 'history-agent')?.codex, {
+      kind: 'subagent', state: 'completed', agentId: 'fixture-agent', name: '验证',
+    });
+    assert.doesNotMatch(JSON.stringify(history), /fixture-private-summary/);
     const historicalActivity = history.messages[1];
     assert.equal(historicalActivity.deferred, true);
     const historicalDetails = await session.rpc<{ message: Record<string, unknown> }>(
