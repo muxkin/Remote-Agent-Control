@@ -13,6 +13,17 @@ export interface NativeInstaller {
   releaseKeyOnly: boolean;
 }
 
+export function nativeSourceArchive(verified: readonly Pick<NativeInstaller, 'version'>[]) {
+  const version = verified
+    .map((release) => release.version)
+    .sort((left, right) => right.localeCompare(left, 'en', { numeric: true }))[0];
+  if (!version) return undefined;
+  return {
+    version,
+    href: `https://github.com/muxkin/Remote-Agent-Control/releases/download/native-rust-v${version}/AgentSpace-Native-${version}-source.tar.gz`,
+  };
+}
+
 const fromBase64 = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
 
 let publicKey: Promise<CryptoKey> | undefined;

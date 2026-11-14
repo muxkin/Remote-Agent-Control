@@ -1,7 +1,7 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { desktopRelease, nativeInstallerTargets, type ReleaseStore } from '../src/shared/desktop-releases.js';
-import { loadNativeInstaller } from '../src/web/shell/native-installers.js';
+import { loadNativeInstaller, nativeSourceArchive } from '../src/web/shell/native-installers.js';
 
 const signer = generateKeyPairSync('ed25519');
 const key = () =>
@@ -65,6 +65,14 @@ function fixture(
 }
 
 afterEach(() => vi.unstubAllGlobals());
+
+it('links the newest source release represented by verified installers', () => {
+  expect(nativeSourceArchive([])).toBeUndefined();
+  expect(nativeSourceArchive([{ version: '0.3.9' }, { version: '0.3.44' }, { version: '0.3.38' }])).toEqual({
+    version: '0.3.44',
+    href: 'https://github.com/muxkin/Remote-Agent-Control/releases/download/native-rust-v0.3.44/AgentSpace-Native-0.3.44-source.tar.gz',
+  });
+});
 
 it.each(nativeInstallerTargets)('shows a signed, available $platform/$arch installer', async (target) => {
   const publisher = target.platform === 'linux' ? undefined : 'release-key';

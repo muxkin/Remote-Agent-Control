@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onUnmounted, shallowRef } from 'vue';
-import { linuxMuslInstallerTarget, nativeInstallerTargets, type NativeInstallerTarget } from '../../shared/desktop-releases.js';
+import {
+  linuxMuslInstallerTarget,
+  nativeInstallerTargets,
+  type NativeInstallerTarget,
+} from '../../shared/desktop-releases.js';
 import SvgIcon from '../SvgIcon.vue';
-import { loadNativeInstaller, type NativeInstaller } from './native-installers.js';
+import { loadNativeInstaller, nativeSourceArchive, type NativeInstaller } from './native-installers.js';
 
-const sourceVersion = __POCKET_NATIVE_VERSION__;
-const sourceArchive = `https://github.com/muxkin/Remote-Agent-Control/releases/download/native-rust-v${sourceVersion}/AgentSpace-Native-${sourceVersion}-source.tar.gz`;
 const installerLabels = {
   'windows-x64-setup.exe': { name: 'Windows x64', icon: 'windows', format: 'EXE' },
   'macos-arm64.dmg': { name: 'macOS Apple Silicon', icon: 'apple', format: 'DMG' },
@@ -32,6 +34,7 @@ const verifiedRows = computed(() =>
     typeof result === 'string' ? [] : [{ name, release: result }],
   ),
 );
+const sourceArchive = computed(() => nativeSourceArchive(verifiedRows.value.map(({ release }) => release)));
 const checkingInstallers = computed(() => nativeRows.value.some(({ result }) => result === 'loading'));
 const installerRequests = new AbortController();
 const sizeLabel = (bytes: number) => `${Math.ceil(bytes / 1024 / 1024)} MiB`;
@@ -121,8 +124,15 @@ onUnmounted(() => installerRequests.abort());
           </li>
         </ul>
       </details>
-      <a class="source-download" :href="sourceArchive" :aria-label="'下载源码包 v' + sourceVersion">
-        <span>源码包 <small>v{{ sourceVersion }} · TAR.GZ</small></span>
+      <a
+        v-if="sourceArchive"
+        class="source-download"
+        :href="sourceArchive.href"
+        :aria-label="'下载源码包 v' + sourceArchive.version"
+      >
+        <span
+          >源码包 <small>v{{ sourceArchive.version }} · TAR.GZ</small></span
+        >
         <SvgIcon name="download" :size="18" />
       </a>
     </div>
