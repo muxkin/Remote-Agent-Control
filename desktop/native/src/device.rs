@@ -1,7 +1,8 @@
 use crate::{
     appearance,
-    codex_backend::{Backend, Group, ID as CODEX, Live},
+    codex_backend::{Backend, Group, ID as CODEX, Live, VoiceSession},
     codex_live::Action,
+    codex_service::voice_sdp,
     conversations,
     files::{Attachment, Download, Scope, VerifiedUpload},
     gateway::{Database, Packet, reply, reply_packet},
@@ -46,7 +47,27 @@ pub struct DeviceSession {
     bulk: bool,
     signaling: Option<Uuid>,
     connection: Option<Arc<dyn webrtc::peer_connection::PeerConnection>>,
+    voice: Option<DeviceVoice>,
 }
+
+const VOICE_LEASE: Duration = Duration::from_secs(60);
+
+struct DeviceVoice {
+    backend: String,
+    session: VoiceSession,
+    deadline: Instant,
+}
+
+#[derive(Debug)]
+struct VoiceError(&'static str);
+
+impl std::fmt::Display for VoiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for VoiceError {}
 
 struct Watch {
     live: Option<Live>,
@@ -86,6 +107,7 @@ impl DeviceSession {
             bulk,
             signaling,
             connection: None,
+            voice: None,
         }
     }
 
@@ -122,6 +144,23 @@ impl DeviceSession {
                     self.ensure_device()?;
                     self.publish(io).await?;
                     self.publish_plugins(io).await?;
+                }
+                event = async {
+                    let voice = self.voice.as_mut().expect("voice session");
+                    tokio::select! {
+                        value = voice.session.next() => value.unwrap_or_else(|| json!({"type":"closed"})),
+                        _ = tokio::time::sleep_until(voice.deadline) => json!({"type":"closed"}),
+                    }
+                }, if self.voice.is_some() => {
+                    self.ensure_device()?;
+                    let voice = self.voice.as_ref().expect("voice session");
+                    reply(io, json!({
+                        "type":"voice-event","backendId":voice.backend,"threadId":voice.session.thread,
+                        "sessionId":voice.session.id,"event":event,
+                    })).await?;
+                    if matches!(event["type"].as_str(), Some("closed" | "error")) {
+                        self.voice = None;
+                    }
                 }
                 request = requests.recv() => {
                     let Some(Packet { value: request, bytes }) = request else { return Ok(()) };
@@ -179,6 +218,9 @@ impl DeviceSession {
                             }
                             Ok(Some(json!({"ok": true})))
                         }
+                        Some("voice-start" | "voice-stop" | "voice-keepalive") if !self.bulk && bytes.is_empty() => {
+                            self.voice_request(&request).map(Some)
+                        }
                         Some("ping") => Ok(Some(json!({"ok": true}))),
                         _ => Ok(None),
                     };
@@ -197,6 +239,9 @@ impl DeviceSession {
                         Err(error) if error.is::<history_media::HistoryUnavailable>() => {
                             json!({"type":"response","id":id,"status":404,"error":error.to_string()})
                         }
+                        Err(error) if error.is::<VoiceError>() => {
+                            json!({"type":"response","id":id,"status":409,"error":error.to_string()})
+                        }
                         Err(_) => json!({"type":"response","id":id,"status":400,"error":"请求未完成，请核对本机会话和参数"}),
                     };
                     reply_packet(io, value, &reply_bytes).await?;
@@ -208,6 +253,58 @@ impl DeviceSession {
                 }
             }
         }
+    }
+
+    fn voice_request(&mut self, request: &Value) -> Result<Value> {
+        let backend = backend_id(request).context("Codex 实例无效")?;
+        let thread = thread_id(&request["threadId"])?;
+        let id = thread_id(&request["sessionId"])?;
+        let matches = self.voice.as_ref().is_some_and(|voice| {
+            voice.backend == backend && voice.session.thread == thread && voice.session.id == id
+        });
+        match request["type"].as_str() {
+            Some("voice-start") => {
+                ensure!(
+                    request["mode"] == "fork",
+                    VoiceError("请先确认创建只读语音分支")
+                );
+                if matches {
+                    return Ok(json!({"ok":true}));
+                }
+                ensure!(
+                    self.voice.is_none(),
+                    VoiceError("此设备已有 Codex 语音通话")
+                );
+                let sdp = request["sdp"]
+                    .as_str()
+                    .filter(|sdp| voice_sdp(sdp))
+                    .context(VoiceError("手机未提供有效的语音连接信息"))?;
+                let connector = self
+                    .backends
+                    .codex
+                    .get(backend)
+                    .context(VoiceError("当前实例未启用 Codex 语音"))?;
+                let admission = connector.admit_write()?;
+                let session = connector.voice(thread, id, sdp.to_owned(), admission)?;
+                self.voice = Some(DeviceVoice {
+                    backend: backend.to_owned(),
+                    session,
+                    deadline: Instant::now() + VOICE_LEASE,
+                });
+            }
+            Some("voice-keepalive") => {
+                ensure!(matches, VoiceError("语音通话已结束"));
+                self.voice
+                    .as_mut()
+                    .expect("matching voice session")
+                    .deadline = Instant::now() + VOICE_LEASE;
+            }
+            Some("voice-stop") if matches => {
+                self.voice = None;
+            }
+            _ => {}
+        }
+        Ok(json!({"ok":true}))
     }
 
     async fn offer(&mut self, request: &Value) -> Result<Value> {

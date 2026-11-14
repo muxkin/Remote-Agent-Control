@@ -169,7 +169,7 @@ impl ReplyFork {
     }
 }
 
-fn cli_for_desktop(desktop: &Path) -> Option<PathBuf> {
+pub(crate) fn cli_for_desktop(desktop: &Path) -> Option<PathBuf> {
     let root = desktop.parent()?;
     let resources = if cfg!(target_os = "macos") {
         root.parent()?.join("Resources")

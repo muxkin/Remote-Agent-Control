@@ -2,6 +2,7 @@ use crate::{
     codex_backend,
     codex_live::{Outcome, Thread},
     codex_service::{Local, Options, thread_id},
+    codex_voice::{Failure as VoiceFailure, Session as VoiceSession},
     dsh::Dsh,
     files::BLOCK,
     history_media::Source,
@@ -251,6 +252,7 @@ struct CodexServer {
     directory: PathBuf,
     watches: HashMap<Uuid, (Uuid, Arc<Thread>)>,
     jobs: HashMap<Uuid, (Instant, JoinHandle<Outcome>)>,
+    voice: Option<VoiceSession>,
 }
 
 impl Instance for CodexServer {
@@ -288,6 +290,7 @@ impl CodexServer {
             directory,
             watches: HashMap::new(),
             jobs: HashMap::new(),
+            voice: None,
         })
     }
 
@@ -399,6 +402,53 @@ impl CodexServer {
             return Ok(Value::Null);
         };
         match method {
+            "codex/voice/start" => {
+                let thread = thread_id(&params["thread"])?;
+                let session = thread_id(&params["session"])?;
+                let sdp = field(params, "sdp")?;
+                if let Some(active) = &self.voice
+                    && !active.finished()
+                {
+                    if active.thread == thread && active.id == session {
+                        return Ok(json!({"ok":true}));
+                    }
+                    return Ok(json!({"error":"另一台配对设备正在使用 Codex 语音，请稍后重试"}));
+                }
+                match local.start_voice(thread, session, sdp) {
+                    Ok(voice) => {
+                        self.voice = Some(voice);
+                        Ok(json!({"ok":true}))
+                    }
+                    Err(error) => {
+                        let message = error
+                            .downcast_ref::<VoiceFailure>()
+                            .map_or("Codex 语音无法启动", |failure| failure.0);
+                        Ok(json!({"error":message}))
+                    }
+                }
+            }
+            "codex/voice/poll" | "codex/voice/stop" => {
+                let thread = thread_id(&params["thread"])?;
+                let session = thread_id(&params["session"])?;
+                let active = self
+                    .voice
+                    .as_mut()
+                    .filter(|active| active.thread == thread && active.id == session);
+                if method == "codex/voice/stop" {
+                    if active.is_some() {
+                        self.voice = None;
+                    }
+                    return Ok(json!({"ok":true}));
+                }
+                let Some(active) = active else {
+                    return Ok(json!({"events":[],"done":true}));
+                };
+                let result = active.poll();
+                if result["done"] == true {
+                    self.voice = None;
+                }
+                Ok(result)
+            }
             "codex/read" => {
                 let args = &params["params"];
                 let live = thread_id(&args["id"])

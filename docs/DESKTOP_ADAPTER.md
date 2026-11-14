@@ -62,6 +62,12 @@ DSH 技能选择使用会话的原生目录，发送前会重新验证。会话�
 
 本机也可使用 `agent-space-native --instance list`、`show <id>`、`set <id>` 和 `reset <id>`。例如 `agent-space-native --instance set codex-local --name 工作助手 --emoji 🦄`。保存时可用 `--revision` 核对当前修订号，网页和命令行共用同一份设置。
 
+### Codex Voice
+
+打开工作台中的 Codex 会话，点击标题栏的麦克风，再选择「开始语音」。浏览器通过 WebRTC 与 Codex 的实时语音服务交换音频，并在通话面板显示转写。面板可静音、挂断，并可在通话结束后打开语音分支查看已保存的转写。
+
+官方 Codex Rust 插件使用本机 Codex 及其登录会话。开始语音时，从当前 Codex 会话的已保存历史创建独立分支。通话采用只读项目权限，禁用外部 MCP 工具、应用、插件和钩子。手机端需要 HTTPS、麦克风权限和支持 WebRTC 的浏览器。Codex 账户或工作区需要开通原生语音功能。若适配器找不到 Codex，可在实例配置中用 `cli` 指定可执行文件的绝对路径。默认实例也可用 `POCKET_NATIVE_CODEX_CLI` 设置。旧插件或只读适配器不显示入口。
+
 ### 独立 Agent 的消息与通话
 
 沿用私有 `im-agents.json`、账号凭据和 `im-agent-progress/<id>.json`，也可通过 `POCKET_NATIVE_IM_AGENTS` 指定配置文件。保留原实例 `id` 和账号 `state`，将 `messageHandler` 或 `callHandler` 改为对应的原生可执行程序绝对路径。可选的 `environmentFile` 只给本机处理程序提供所需配置。旧 JavaScript 处理器需移植到原生接口。

@@ -4,6 +4,7 @@ use crate::{
     codex::History,
     codex_live::{Action, Desktop, Outcome, Thread},
     codex_peer::Endpoint,
+    codex_voice::{Session, Voice},
     conversations, history_media, settings,
 };
 #[cfg(feature = "official-plugins")]
@@ -33,6 +34,8 @@ pub(crate) struct Availability {
     pub rename: bool,
     pub fork: bool,
     pub fork_reply: bool,
+    #[serde(default)]
+    pub voice: bool,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -46,10 +49,27 @@ pub(crate) struct Options {
     pub explicit: bool,
 }
 
+pub(crate) fn voice_sdp(sdp: &str) -> bool {
+    if sdp.len() > 64 * 1024 || sdp.lines().next() != Some("v=0") {
+        return false;
+    }
+    let mut audio_tracks = 0;
+    let mut data_channels = 0;
+    for media in sdp.lines().filter_map(|line| line.strip_prefix("m=")) {
+        match media.split_ascii_whitespace().next() {
+            Some("audio") => audio_tracks += 1,
+            Some("application") => data_channels += 1,
+            _ => return false,
+        }
+    }
+    audio_tracks == 1 && data_channels <= 1
+}
+
 #[cfg(feature = "official-plugins")]
 pub(crate) struct Local {
     history: History,
     desktop: Option<Desktop>,
+    voice: Option<Voice>,
     ipc_online: AtomicBool,
 }
 
@@ -58,15 +78,27 @@ impl Local {
     pub(crate) fn open(options: &Options, read_only: bool, named: bool) -> Result<Self> {
         let home = options.home.as_deref().context("尚未配置 Codex 目录")?;
         let history = History::open(home)?;
-        let desktop = if read_only {
+        let endpoint = if read_only {
             None
         } else {
             Endpoint::discover(home, options, named)
-                .map(|endpoint| Desktop::new(endpoint, history.clone(), options.cli.as_deref()))
         };
+        let voice = if read_only {
+            None
+        } else {
+            Voice::new(
+                endpoint.as_ref().and_then(Endpoint::executable),
+                options.cli.as_deref(),
+                history.clone(),
+                named,
+            )
+        };
+        let desktop = endpoint
+            .map(|endpoint| Desktop::new(endpoint, history.clone(), options.cli.as_deref()));
         Ok(Self {
             history,
             desktop,
+            voice,
             ipc_online: AtomicBool::new(false),
         })
     }
@@ -89,6 +121,7 @@ impl Local {
                 .desktop
                 .as_ref()
                 .is_some_and(|desktop| desktop.reply_fork.supported()),
+            voice: self.voice.is_some(),
         }
     }
 
@@ -106,6 +139,13 @@ impl Local {
 
     pub(crate) fn subscribe(&self, id: Uuid) -> Option<Arc<Thread>> {
         self.desktop.as_ref()?.subscribe(id)
+    }
+
+    pub(crate) fn start_voice(&self, thread: Uuid, session: Uuid, sdp: &str) -> Result<Session> {
+        self.voice
+            .as_ref()
+            .context(crate::codex_voice::Failure("Codex 语音尚未启用"))?
+            .start(thread, session, sdp)
     }
 
     pub(crate) async fn read(

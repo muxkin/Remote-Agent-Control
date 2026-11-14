@@ -18,14 +18,16 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{OwnedRwLockReadGuard, watch},
+    sync::{OwnedRwLockReadGuard, mpsc, watch},
     time::{sleep, timeout},
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub(crate) const ID: &str = "codex-local";
 pub(crate) const PACKAGE: &str = "@agent-remote/adapter-codex";
 const READ: Duration = Duration::from_secs(12);
+const VOICE_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Default)]
 pub struct Backend {
@@ -177,6 +179,25 @@ struct Hosted {
 
 #[derive(Clone)]
 pub(crate) struct Live(Arc<RemoteWatch>);
+
+pub(crate) struct VoiceSession {
+    pub(crate) thread: Uuid,
+    pub(crate) id: Uuid,
+    cancel: CancellationToken,
+    events: mpsc::Receiver<Value>,
+}
+
+impl VoiceSession {
+    pub(crate) async fn next(&mut self) -> Option<Value> {
+        self.events.recv().await
+    }
+}
+
+impl Drop for VoiceSession {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
 
 struct RemoteWatch {
     id: Uuid,
@@ -351,6 +372,65 @@ impl Backend {
         }
     }
 
+    pub(crate) fn voice(
+        &self,
+        thread: Uuid,
+        id: Uuid,
+        sdp: String,
+        admission: Option<OwnedRwLockReadGuard<()>>,
+    ) -> Result<VoiceSession> {
+        let remote = self.inner.as_ref().context("尚未连接 Codex")?;
+        ensure!(self.available().voice, "Codex 语音尚未启用");
+        let host = remote.host.clone();
+        let cancel = CancellationToken::new();
+        let canceled = cancel.clone();
+        let (sender, events) = mpsc::channel(32);
+        tokio::spawn(async move {
+            let _admission = admission;
+            let params = json!({"thread":thread,"session":id});
+            let mut start = params.clone();
+            start["sdp"] = json!(sdp);
+            let started = host
+                .call("codex/voice/start", start, VOICE_RPC_TIMEOUT)
+                .await;
+            match started {
+                Ok(reply) if reply["ok"] == true => {
+                    let result = poll_voice(&host, &params, &sender, &canceled).await;
+                    let _ = host
+                        .call("codex/voice/stop", params, VOICE_RPC_TIMEOUT)
+                        .await;
+                    if result.is_err() && !canceled.is_cancelled() {
+                        let _ = sender.try_send(
+                            json!({"type":"error","message":"本机 Codex 语音连接已中断"}),
+                        );
+                    }
+                }
+                result => {
+                    let message = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|reply| reply["error"].as_str())
+                        .filter(|message| {
+                            matches!(
+                                *message,
+                                "另一台配对设备正在使用 Codex 语音，请稍后重试"
+                                    | "手机未提供有效的语音连接信息"
+                                    | "Codex 语音尚未启用"
+                            )
+                        })
+                        .unwrap_or("Codex 语音无法启动，请重试");
+                    let _ = sender.try_send(json!({"type":"error","message":message}));
+                }
+            }
+        });
+        Ok(VoiceSession {
+            thread,
+            id,
+            cancel,
+            events,
+        })
+    }
+
     pub(crate) async fn read(
         &self,
         method: &str,
@@ -474,6 +554,36 @@ impl Hosted {
     }
 }
 
+async fn poll_voice(
+    host: &Host,
+    params: &Value,
+    events: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    // Keep a framed request in flight until it completes to preserve the shared plugin stream.
+    while !cancel.is_cancelled() {
+        let reply = host
+            .call("codex/voice/poll", params.clone(), VOICE_RPC_TIMEOUT)
+            .await?;
+        let updates = reply["events"].as_array().context("invalid voice poll")?;
+        ensure!(updates.len() <= 32, "invalid voice poll");
+        for event in updates {
+            tokio::select! {
+                result = events.send(event.clone()) => result?,
+                _ = cancel.cancelled() => return Ok(()),
+            }
+        }
+        if reply["done"] == true {
+            return Ok(());
+        }
+        tokio::select! {
+            _ = sleep(Duration::from_millis(160)) => {}
+            _ = cancel.cancelled() => break,
+        }
+    }
+    Ok(())
+}
+
 async fn follow(
     host: Arc<Host>,
     thread: Uuid,
@@ -540,6 +650,7 @@ pub(crate) fn status(available: Availability, online: bool) -> Value {
             "openThread":available.open,"elicitationForms":online,
             "newThread":available.create,"queue":online,
             "renameThread":available.rename,"forkThread":available.fork,"forkFromTurn":available.fork_reply,
+            "voice":available.voice,"voiceMode":available.voice.then_some("fork"),
         }
     })
 }
@@ -564,6 +675,7 @@ pub(crate) fn info(available: Availability, online: bool) -> Option<Value> {
         ("attachments", online),
         ("skills", true),
         ("plugins", true),
+        ("voice", available.voice),
     ] {
         capabilities.insert(
             name.into(),
