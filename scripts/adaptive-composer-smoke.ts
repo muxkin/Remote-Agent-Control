@@ -120,7 +120,13 @@ try {
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('draft with image');
   await tab('我的').click();
   await tab('工作台').click();
-  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('draft with image');
+  await page
+    .getByRole('group', { name: '会话列表' })
+    .getByRole('button', { name: /测试会话/ })
+    .click();
+  const composer = page.getByLabel('消息', { exact: true });
+  await expect(composer).toBeVisible();
+  await expect(composer).toHaveValue('draft with image');
   await expect(page.locator('.upload-chip')).toHaveCount(1);
   checks.clipboardAndModuleSwitchPreserveDraft = true;
   await page.locator('.composer .send-button').click();
