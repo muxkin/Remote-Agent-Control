@@ -153,6 +153,8 @@ export interface GatewayStatus {
     renameThread?: boolean;
     forkThread?: boolean;
     forkFromTurn?: boolean;
+    voice?: boolean;
+    voiceMode?: 'fork';
     queue: boolean;
   };
 }

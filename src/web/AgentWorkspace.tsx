@@ -1,5 +1,5 @@
 import { tsxComponent } from './tsx-component';
-import { onScopeDispose, shallowRef } from 'vue';
+import { defineAsyncComponent, onScopeDispose, shallowRef } from 'vue';
 import { watchRender, writeRef, useExternalSnapshot } from './render-effects';
 import { UsagePanel } from './UsagePanel';
 import { uploadItems, type UploadItem } from './UploadProgress';
@@ -41,7 +41,9 @@ import { OutgoingContent, OutgoingStatus } from './OutgoingMessage';
 import { ThreadNavigation } from './ThreadNavigation';
 import { useChatDrafts, type ChatDraft } from './chat-drafts';
 import { backTo, type AppRoute } from './shell/routes';
+import type { CodexVoiceMode } from '../shared/codex-voice';
 
+const CodexVoice = defineAsyncComponent(() => import('./CodexVoice'));
 const subscribeConnection = (notify: () => void) => deviceSession.onChange(notify);
 const connectionSnapshot = () => deviceSession.online;
 const HISTORY_TOP_THRESHOLD = 160;
@@ -98,6 +100,12 @@ export default tsxComponent(function AgentWorkspace(_props: {
   const setThreads = writeRef(threadsState);
   const cursorState = shallowRef<string | null>(null);
   const setCursor = writeRef(cursorState);
+  const voiceState = shallowRef<{
+    hostId: string;
+    threadId: string;
+    backendId: string;
+    mode: CodexVoiceMode;
+  }>();
   const toolsOpenState = shallowRef(false);
   const setToolsOpen = writeRef(toolsOpenState);
   const threadActionState = shallowRef<{
@@ -276,6 +284,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
 
     watchRoute(() => {
       creationRequest.current = undefined;
+      voiceState.value = undefined;
     }, [route.thread, route.host, backendId, active]);
     // The URL is the selection authority; previous cached metadata must never win a click.
     const selected =
@@ -337,6 +346,14 @@ export default tsxComponent(function AgentWorkspace(_props: {
     const receivedView = receivedViewState.value;
     const view = receivedView?.id === selected?.id ? receivedView : null;
     const stream = connection.value;
+    const voice = voiceState.value;
+    const voiceHost = deviceSession.host?.hostId;
+    const voiceMode = status?.capabilities.voice ? status.capabilities.voiceMode : undefined;
+    const voiceOpen =
+      active &&
+      voice?.hostId === voiceHost &&
+      voice?.threadId === selected?.id &&
+      voice?.backendId === backendId;
     const hostId = hostIdState.value;
     const drafts = readChatDrafts(deviceId, selected?.id ?? null);
 
@@ -1000,7 +1017,7 @@ export default tsxComponent(function AgentWorkspace(_props: {
             settingsDirty ||
             pickerDirty
           }
-          busy={busy || uploading}
+          busy={busy || uploading || voiceOpen}
         />
         <ThreadNavigation
           backend={backend}
@@ -1058,6 +1075,25 @@ export default tsxComponent(function AgentWorkspace(_props: {
             {() => (
               <>
                 <UsagePanel backendId={backendId} name={agentName} active={active} online={stream} />
+                {active && voiceHost && selected && selected.id !== 'new' && voiceMode && (
+                  <button
+                    class="icon-button"
+                    aria-label="Codex Voice"
+                    aria-haspopup="dialog"
+                    title="Codex Voice"
+                    disabled={!stream}
+                    onClick={() => {
+                      voiceState.value = {
+                        hostId: voiceHost,
+                        threadId: selected.id,
+                        backendId,
+                        mode: voiceMode,
+                      };
+                    }}
+                  >
+                    <Icon name="mic" size={21} />
+                  </button>
+                )}
                 {selected && (
                   <button
                     class="icon-button more-tools"
@@ -1070,6 +1106,22 @@ export default tsxComponent(function AgentWorkspace(_props: {
               </>
             )}
           </ConversationHeader>
+          {voiceOpen && voice && (
+            <CodexVoice
+              hostId={voice.hostId}
+              backendId={voice.backendId}
+              threadId={voice.threadId}
+              mode={voice.mode}
+              onClose={() => {
+                voiceState.value = undefined;
+              }}
+              onOpenThread={(id) => {
+                voiceState.value = undefined;
+                void loadThreads();
+                navigate({ page: 'workbench', host: voice.hostId, backend: backendId, thread: id });
+              }}
+            />
+          )}
           {!selected ? (
             <section class="empty">
               <div class="brand-icon">C</div>

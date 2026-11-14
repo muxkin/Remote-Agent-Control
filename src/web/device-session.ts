@@ -10,6 +10,7 @@ import { SyncStore, type PairedHost } from './sync-store';
 import type { GatewayStatus, ServerEvent, ThreadSummary, ThreadView } from '../shared/types';
 import type { AgentUsage } from '../../packages/adapter-sdk/src/usage';
 import type { UsageSnapshot } from '../shared/usage';
+import type { CodexVoiceEvent, CodexVoiceMode } from '../shared/codex-voice';
 
 export interface DeviceOverview {
   online: boolean | null;
@@ -457,6 +458,38 @@ export class DeviceSession {
       if (link && !link.closed) return link;
     }
     throw new RpcError('电脑未连接，当前显示缓存内容', 0);
+  }
+  voice(
+    hostId: string,
+    backendId: string,
+    threadId: string,
+    mode: CodexVoiceMode,
+    onEvent: (event: CodexVoiceEvent) => void,
+  ) {
+    if (this.host?.hostId !== hostId) throw new RpcError('电脑已切换，请重新打开语音', 409);
+    // Keep signaling on the authenticated control link that owns this call.
+    const link = this.link();
+    const sessionId = crypto.randomUUID();
+    const scope = { backendId, threadId, sessionId };
+    const unsubscribe = link.onEvent((message) => {
+      if (
+        message.type === 'voice-event' &&
+        message.sessionId === sessionId &&
+        message.backendId === backendId &&
+        message.threadId === threadId
+      )
+        onEvent(message.event);
+    });
+    const unsubscribeClose = link.onClose(() => onEvent({ type: 'error', message: '电脑连接已中断' }));
+    return {
+      start: (sdp: string) => link.request('voice-start', { ...scope, mode, sdp }, undefined, 12000),
+      stop: () => link.request('voice-stop', scope, undefined, 5000),
+      heartbeat: () => link.request('voice-keepalive', scope, undefined, 8000),
+      dispose: () => {
+        unsubscribe();
+        unsubscribeClose();
+      },
+    };
   }
   private async receive(event: Record<string, any>) {
     if (event.type === 'candidate') {
