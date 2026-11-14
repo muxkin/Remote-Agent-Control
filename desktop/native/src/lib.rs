@@ -11,6 +11,8 @@ mod codex_live;
 #[cfg(feature = "official-plugins")]
 mod codex_peer;
 mod codex_service;
+#[cfg(feature = "official-plugins")]
+mod codex_voice;
 mod desktop_authorization;
 mod device;
 mod direct;

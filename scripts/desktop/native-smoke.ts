@@ -21,6 +21,7 @@ import { buildRelay } from '../../src/server/relay.js';
 import { platformRuntime } from '../../src/server/platform.js';
 import { createIdentity, type Identity } from '../../src/shared/secure-channel.js';
 import type { BackendAppearanceDocument, BackendInfo } from '../../src/shared/backends.js';
+import type { CodexVoiceEvent } from '../../src/shared/codex-voice.js';
 import { DeviceLink } from '../../src/shared/device-link.js';
 import { nodeSession } from '../../src/client/node-session.js';
 import { apiCall } from '../../src/shared/rpc.js';
@@ -345,23 +346,89 @@ await mkdir(join(pluginRoot, '1.0.0', '.codex-plugin'), { recursive: true });
 await writeFile(join(skillRoot, 'SKILL.md'), '---\nname: fixture\ndescription: a native skill\n---\n');
 await writeFile(join(pluginRoot, '.codex-remote-plugin-install.json'), '{"remote_plugin_id":"fixture"}');
 await writeFile(join(pluginRoot, '1.0.0', '.codex-plugin', 'plugin.json'), '{"name":"Fixture Plugin"}');
+const VOICE_FORK = 'ed2a5874-cf9b-44d6-a2d6-fb9351af8fff';
+const voiceOffer = 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n';
+const voiceAnswer = 'v=0\r\nm=audio 10 UDP/TLS/RTP/SAVPF 111\r\n';
+const voiceSecret = 'fixture-credential-should-stay-local';
+const voiceStopped = join(directory, 'voice-stopped');
 const forkCli = process.platform === 'win32' ? undefined : join(directory, 'fixture-codex');
 if (forkCli) {
   await writeFile(
     forkCli,
     `#!/usr/bin/env node
 if (process.argv[2] === '--version') {
-  console.log('codex-cli 0.167.0-alpha.4.1');
+  console.log('codex-cli 0.167.0-alpha.3.2');
 } else {
+  const assert = require('node:assert/strict');
   const lines = require('node:readline').createInterface({ input: process.stdin });
+  let voiceSession;
+  const send = (value) => console.log(JSON.stringify(value));
+  const notify = (name, params = {}) =>
+    send({ method: 'thread/realtime/' + name, params: { threadId: '${VOICE_FORK}', ...params } });
   lines.on('line', (line) => {
     const call = JSON.parse(line);
-    if (call.id === 1) console.log(JSON.stringify({ id: 1, result: { userAgent: 'pocket_reply_fork/0.167.0-alpha.4.1 fixture' } }));
-    if (call.id === 2) {
-      require('node:assert/strict').deepEqual(call.params, {
-        threadId: '${THREAD}', lastTurnId: 'earlier-turn', excludeTurns: true, threadSource: 'user',
-      });
-      console.log(JSON.stringify({ id: 2, result: { thread: { id: '${FORK_REPLY}', forkedFromId: '${THREAD}' } } }));
+    const reply = (result = {}) => send({ id: call.id, result });
+    switch (call.method) {
+      case 'initialize':
+        if (call.params.clientInfo.name === 'agent_space_codex_voice') {
+          assert.equal(call.params.capabilities.experimentalApi, true);
+        }
+        reply({ userAgent: 'pocket_reply_fork/0.167.0-alpha.3.2 fixture' });
+        break;
+      case 'initialized':
+        break;
+      case 'config/read':
+        assert.deepEqual(call.params, { cwd: ${JSON.stringify(projectPath)}, includeLayers: false });
+        reply({ config: { mcp_servers: { fixture: { enabled: true } } } });
+        break;
+      case 'thread/fork': {
+        const expected = { threadId: '${THREAD}', excludeTurns: true, threadSource: 'user' };
+        if (call.params.lastTurnId) {
+          assert.deepEqual(call.params, { ...expected, lastTurnId: 'earlier-turn' });
+          reply({ thread: { id: '${FORK_REPLY}', forkedFromId: '${THREAD}' } });
+        } else {
+          assert.deepEqual(call.params, {
+            ...expected, cwd: ${JSON.stringify(projectPath)}, deferGoalContinuation: true,
+            sandbox: 'read-only', approvalPolicy: 'never',
+            config: { 'mcp_servers."fixture".enabled': false },
+          });
+          reply({
+            thread: { id: '${VOICE_FORK}', forkedFromId: '${THREAD}' },
+            sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never',
+          });
+        }
+        break;
+      }
+      case 'thread/realtime/listVoices':
+        reply({ voices: { v3: ['marin'] } });
+        break;
+      case 'thread/realtime/start':
+        voiceSession = call.params.voiceSessionId;
+        assert.match(voiceSession, /^[0-9a-f-]{36}$/);
+        assert.equal(call.params.threadId, '${VOICE_FORK}');
+        assert.equal(call.params.outputModality, 'audio');
+        assert.equal(call.params.version, 'v3');
+        assert.equal(call.params.transport.type, 'webrtc');
+        reply();
+        if (call.params.transport.sdp.includes('fixture-reject')) {
+          notify('error', { message: '${voiceSecret}' });
+          break;
+        }
+        assert.equal(call.params.transport.sdp, ${JSON.stringify(voiceOffer)});
+        notify('started', { version: 'v3' });
+        notify('sdp', { sdp: ${JSON.stringify(voiceAnswer)} });
+        notify('transcript/delta', { role: 'assistant', delta: 'wrong thread', threadId: '${THREAD}' });
+        notify('transcript/delta', { role: 'assistant', delta: 'He' });
+        notify('transcript/done', { role: 'assistant', text: 'Hello.' });
+        break;
+      case 'thread/realtime/stop':
+        assert.equal(call.params.threadId, '${VOICE_FORK}');
+        require('node:fs').appendFileSync(${JSON.stringify(voiceStopped)}, voiceSession + '\\n');
+        reply();
+        notify('closed', { reason: 'requested' });
+        break;
+      default:
+        assert.fail('Unexpected Codex fixture request: ' + call.method);
     }
   });
 }
@@ -848,6 +915,73 @@ async function desktopFixture(id = 'default', initialTitle = '测试会话', ren
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
+}
+
+async function verifyCodexVoice(session: DeviceLink, other: DeviceLink) {
+  type VoiceMessage = { backendId: string; threadId: string; sessionId: string; event: CodexVoiceEvent };
+  const scope = { backendId: 'codex-local', threadId: THREAD, sessionId: crypto.randomUUID() };
+  const conflicting = { ...scope, sessionId: crypto.randomUUID() };
+  const rejected = { ...scope, sessionId: crypto.randomUUID() };
+  const messages: VoiceMessage[] = [];
+  const foreignMessages: VoiceMessage[] = [];
+  const listen = (device: DeviceLink, into: VoiceMessage[]) => device.onEvent((event) => {
+    if (event.type === 'voice-event') into.push(event as VoiceMessage);
+  });
+  const unsubscribe = listen(session, messages);
+  const unsubscribeOther = listen(other, foreignMessages);
+  const start = (id: typeof scope, sdp = voiceOffer, device = session) =>
+    device.request('voice-start', { ...id, mode: 'fork', sdp });
+  const stopped = async () => (await readFile(voiceStopped, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  })).trim().split('\n').filter(Boolean);
+  const waitFor = async (check: () => boolean | Promise<boolean>, description: string) => {
+    const deadline = Date.now() + 10_000;
+    do {
+      if (await check()) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } while (Date.now() < deadline);
+    assert.fail(description);
+  };
+  try {
+    const status = (await session.ready).status;
+    assert.equal(status.capabilities.voice, true);
+    assert.equal(status.capabilities.voiceMode, 'fork');
+    await assert.rejects(start(scope, 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 111\r\n'));
+    await start(scope);
+    await waitFor(() => messages.some(({ event }) => event.type === 'transcript' && event.final),
+      'Encrypted voice events did not reach the initiating device');
+    assert.deepEqual(messages.map(({ backendId, threadId, sessionId, event }) => ({ backendId, threadId, sessionId, event })), [
+      { ...scope, event: { type: 'started', voiceThreadId: VOICE_FORK } },
+      { ...scope, event: { type: 'answer', sdp: voiceAnswer } },
+      { ...scope, event: { type: 'transcript', role: 'assistant', text: 'He', final: false } },
+      { ...scope, event: { type: 'transcript', role: 'assistant', text: 'Hello.', final: true } },
+    ]);
+    await session.request('voice-keepalive', scope);
+    await assert.rejects(start(conflicting));
+    await start(conflicting, voiceOffer, other);
+    await waitFor(() => foreignMessages.some(({ sessionId, event }) =>
+      sessionId === conflicting.sessionId && event.type === 'error'
+    ), 'A second paired device was not warned that the line was busy');
+    assert.deepEqual(await stopped(), []);
+    await session.request('voice-stop', scope);
+    await waitFor(async () => (await stopped()).includes(scope.sessionId), 'Hangup did not stop the upstream voice session');
+
+    await start(rejected, voiceOffer + 'a=fixture-reject\r\n');
+    await waitFor(() => messages.some(({ sessionId, event }) => sessionId === rejected.sessionId && event.type === 'error'),
+      'The device did not receive a voice error event');
+    await waitFor(async () => (await stopped()).includes(rejected.sessionId), 'Error did not stop the upstream voice session');
+    assert.deepEqual(await stopped(), [scope.sessionId, rejected.sessionId]);
+    assert(!JSON.stringify(messages).includes(voiceSecret), 'An upstream error leaked into the remote device');
+    assert.deepEqual(foreignMessages.map(({ backendId, threadId, sessionId, event }) =>
+      ({ backendId, threadId, sessionId, type: event.type })
+    ), [{ ...conflicting, type: 'error' }], 'Voice events escaped their paired connection');
+  } finally {
+    unsubscribe();
+    unsubscribeOther();
+    await session.request('voice-stop', scope).catch(() => {});
+    await session.request('voice-stop', rejected).catch(() => {});
+  }
 }
 
 async function testLive(
@@ -2154,6 +2288,15 @@ try {
     await assert.rejects(describe(unrelatedFile));
     await assert.rejects(session.rpc(apiCall(`/threads/${THREAD}/messages`, 'POST', { text: 'blocked' })));
     if (versions) await verifyCodexInstances(session, ready.device.id);
+    if (versions && forkCli && ipc) {
+      const other = await reconnect(existingPhone, old.routeTicket);
+      try {
+        await verifyCodexVoice(session, other);
+        console.log('Native Codex Voice verified scoped signaling, safe fork permissions, hangup, and upstream errors.');
+      } finally {
+        other.close();
+      }
+    }
     if (ipc) {
       await testLive(session, ipc, phone);
       if (versions && secondaryIpc) await verifyLiveCodexInstances(session, ipc, secondaryIpc, versions);

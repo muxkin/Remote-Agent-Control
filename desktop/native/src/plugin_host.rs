@@ -98,8 +98,26 @@ impl Process {
                 command.env(key, value);
             }
         }
-        if official_codex && let Some(path) = crate::migration::source() {
-            command.env("POCKET_NATIVE_LEGACY_STATE", path);
+        if official_codex {
+            if let Some(path) = crate::migration::source() {
+                command.env("POCKET_NATIVE_LEGACY_STATE", path);
+            }
+            // The voice plugin starts a local Codex App Server, which may need
+            // the same outbound route as the user who launched the gateway.
+            for key in [
+                "HTTPS_PROXY",
+                "HTTP_PROXY",
+                "ALL_PROXY",
+                "NO_PROXY",
+                "https_proxy",
+                "http_proxy",
+                "all_proxy",
+                "no_proxy",
+            ] {
+                if let Some(value) = env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
         }
         #[cfg(windows)]
         command.creation_flags(0x08000000);

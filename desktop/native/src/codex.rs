@@ -505,6 +505,19 @@ fn read_thread(row: &Row<'_>, names: &HashMap<String, String>) -> rusqlite::Resu
 fn rollout_message(line: &[u8], thread: &str, offset: u64, full: bool) -> Option<Value> {
     let record: Value = serde_json::from_slice(line).ok()?;
     let message = &record["payload"];
+    if record["type"] == "realtime_item" && message["type"] == "transcript_segment" {
+        let role = message["role"].as_str()?;
+        if !matches!(role, "user" | "assistant") {
+            return None;
+        }
+        return text_message(
+            offset,
+            role,
+            message["text"].as_str()?.to_owned(),
+            Vec::new(),
+            full,
+        );
+    }
     if record["type"] == "event_msg" && message["type"] == "task_complete" {
         return crate::tool_activity::turn_timing(
             message["turn_id"].as_str()?,
@@ -558,6 +571,16 @@ fn rollout_message(line: &[u8], thread: &str, offset: u64, full: bool) -> Option
         (text, Vec::new())
     };
     let attachments = crate::history_media::attachments(explicit, message);
+    text_message(offset, role, text, attachments, full)
+}
+
+fn text_message(
+    offset: u64,
+    role: &str,
+    text: String,
+    attachments: Vec<Value>,
+    full: bool,
+) -> Option<Value> {
     let mut text = text;
     let limit = 2 * 1024 * 1024;
     if full && text.len() > limit {
@@ -575,4 +598,37 @@ fn rollout_message(line: &[u8], thread: &str, offset: u64, full: bool) -> Option
         json!({"id":format!("rollout-{offset}"),"role":role,"text":text,
             "attachments":attachments,"truncated":truncated})
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_transcript_segments_become_history_messages() {
+        for role in ["user", "assistant"] {
+            let transcript = json!({
+                "type":"realtime_item",
+                "payload":{"type":"transcript_segment","role":role,"text":"你好"}
+            });
+            let line = serde_json::to_vec(&transcript).unwrap();
+            let message = rollout_message(&line, "voice-fork", 100, false).unwrap();
+            assert_eq!(message["id"], "rollout-100");
+            assert_eq!(message["role"], role);
+            assert_eq!(message["text"], "你好");
+            assert_eq!(
+                rollout_message(&line, "voice-fork", 100, true),
+                Some(message)
+            );
+        }
+        assert!(
+            rollout_message(
+                br#"{"type":"realtime_item","payload":{"type":"realtime_session_closed"}}"#,
+                "voice-fork",
+                100,
+                false
+            )
+            .is_none()
+        );
+    }
 }
