@@ -48,12 +48,35 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Configure Ubuntu APT mirrors
+        if: runner.os == 'Linux'
+        run: |
+          mirror_list=/etc/apt/apt-mirrors.txt
+          if [[ ! -f "$mirror_list" ]]; then exit 0; fi
+
+          mirror=https://mirrors.edge.kernel.org/ubuntu/
+          updated_list=$(mktemp)
+          trap 'rm -f -- "$updated_list"' EXIT
+          printf '%s\tpriority:0\n' "$mirror" > "$updated_list"
+          awk -v mirror="$mirror" '$1 != mirror' "$mirror_list" >> "$updated_list"
+          sudo install -m 0644 "$updated_list" "$mirror_list"
+
+          # Move to the next mirror when a request fails on Jammy.
+          printf '%s\n' 'Acquire::Retries "0";' |
+            sudo tee /etc/apt/apt.conf.d/zzzz-agent-space-mirror-failover >/dev/null
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils pkexec zstd
+      - name: Install Linux desktop test dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          if command -v desktop-file-validate >/dev/null && command -v pkexec >/dev/null && command -v zstd >/dev/null; then
+            exit 0
+          fi
+          sudo apt-get -o APT::Update::Error-Mode=any update
+          sudo apt-get install -y desktop-file-utils pkexec zstd
       - if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
       - run: npm ci --ignore-scripts
